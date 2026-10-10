@@ -1,0 +1,10 @@
+{
+  "name": "ai-ui-smoke",
+  "private": true,
+  "scripts": { "test": "node smoke.js" },
+  "devDependencies": {
+    "jsdom": "^24.0.0",
+    "marked": "12.0.2",
+    "dompurify": "2.4.1"
+  }
+}

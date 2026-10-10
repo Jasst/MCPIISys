@@ -1,0 +1,25 @@
+# Веб-сервер
+fastapi
+uvicorn[standard]
+starlette
+pydantic
+python-dotenv
+
+# HTTP и парсинг
+aiohttp
+beautifulsoup4
+ddgs
+pypdf
+pdfplumber
+
+# Память и поиск
+numpy
+faiss-cpu
+sentence-transformers
+torch
+
+# MCP
+mcp
+
+# Опционально: проверка Ethereum-подписей для входа через MCP
+# eth-account

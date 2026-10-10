@@ -1,0 +1,9 @@
+{
+  "objects": {},
+  "events": [],
+  "graph_edges": {},
+  "graph_edge_meta": {},
+  "embeddings": {},
+  "faiss_dirty": false,
+  "embedding_dim": 1024
+}

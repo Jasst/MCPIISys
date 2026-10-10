@@ -1,0 +1,55 @@
+{
+  "state": {
+    "confidence": 0.5944452036559583,
+    "curiosity": 0.4966671221935749,
+    "stress": 0.0,
+    "engagement": 0.5,
+    "last_update": 1791670806.3114054
+  },
+  "active_goals": [],
+  "action_history": [
+    {
+      "action_type": "tool_call",
+      "description": "привет ты понимаешь кто ты ?",
+      "success": true,
+      "confidence": 1.0,
+      "timestamp": 1791670438.1271145,
+      "metadata": {}
+    },
+    {
+      "action_type": "tool_call",
+      "description": "у тебя есть  доступ к памяти ?",
+      "success": true,
+      "confidence": 0.5166666666666667,
+      "timestamp": 1791670806.3113995,
+      "metadata": {}
+    }
+  ],
+  "self_concept": {
+    "skill_tool_call": 0.54,
+    "recent_failure_rate": 0.0,
+    "calib_tool_call_bucket_1.0": {
+      "n": 1,
+      "success": 1
+    },
+    "calib_tool_call_bucket_0.5": {
+      "n": 1,
+      "success": 1
+    }
+  },
+  "capabilities": [
+    "поиск информации в интернете",
+    "работа с долгосрочной памятью",
+    "вызов внешних инструментов (MCP)",
+    "генерация изображений",
+    "анализ кода",
+    "решение многошаговых задач",
+    "проактивное исследование тем"
+  ],
+  "limitations": [
+    "зависимость от качества локальной LLM",
+    "ограниченный контекст окна модели",
+    "отсутствие реального понимания (симуляция)",
+    "задержки при работе с внешними сервисами"
+  ]
+}
