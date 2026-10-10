@@ -3435,6 +3435,23 @@ async def revoke_mcp_login_code(address: str = Depends(require_auth)):
     return {"revoked": revoke_login_code(address)}
 
 
+@router.post("/chat/stop")
+async def stop_active_stream(address: str = Depends(require_auth)):
+    """
+    Останавливает текущую генерацию пользователя: отменяет фоновую задачу.
+    Воркер корректно завершает поток (подписчикам уходит сигнал окончания).
+    Частичный ответ в истории может не сохраниться — это ограничение отмены.
+    """
+    assistant = await get_assistant(address)
+    state = assistant._active_stream
+    if not state or state.get("done"):
+        return {"stopped": False, "reason": "no_active_generation"}
+    task = state.get("task")
+    if task is None or task.done():
+        return {"stopped": False, "reason": "no_task"}
+    task.cancel()
+    return {"stopped": True}
+
 @router.get("/notifications/poll")
 async def poll_notifications(address: str = Depends(require_auth)):
     """

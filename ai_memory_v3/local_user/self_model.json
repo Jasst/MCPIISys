@@ -1,12 +1,20 @@
 {
   "state": {
-    "confidence": 0.5944452036559583,
-    "curiosity": 0.4966671221935749,
-    "stress": 0.0,
+    "confidence": 0.4785446996410689,
+    "curiosity": 0.6326268197846412,
+    "stress": 0.13198079314231875,
     "engagement": 0.5,
-    "last_update": 1791670806.3114054
+    "last_update": 1791672114.3718872
   },
-  "active_goals": [],
+  "active_goals": [
+    {
+      "goal": "Повысить качество ответов: снизить процент неудач",
+      "priority": 0.6428571428571428,
+      "source": "quality_improvement",
+      "added_at": 1791672612.2627058,
+      "gcn_id": "goal_d89c1cfa-0699-451c-a06b-d52faff58297"
+    }
+  ],
   "action_history": [
     {
       "action_type": "tool_call",
@@ -23,18 +31,63 @@
       "confidence": 0.5166666666666667,
       "timestamp": 1791670806.3113995,
       "metadata": {}
+    },
+    {
+      "action_type": "reasoning",
+      "description": "Помоги составить план на неделю с фокусом на один большой проект.",
+      "success": true,
+      "confidence": 0.5428571428571429,
+      "timestamp": 1791671633.2194622,
+      "metadata": {}
+    },
+    {
+      "action_type": "reasoning",
+      "description": "ghbdtn",
+      "success": false,
+      "confidence": 0.5285714285714286,
+      "timestamp": 1791671664.6768975,
+      "metadata": {}
+    },
+    {
+      "action_type": "reasoning",
+      "description": "ns nen &",
+      "success": false,
+      "confidence": 0.5214285714285715,
+      "timestamp": 1791671669.9037678,
+      "metadata": {}
+    },
+    {
+      "action_type": "reasoning",
+      "description": "ты тут ?",
+      "success": true,
+      "confidence": 0.5428571428571429,
+      "timestamp": 1791671910.7835155,
+      "metadata": {}
+    },
+    {
+      "action_type": "tool_call",
+      "description": "Какие сейчас главные новости в мире искусственного интеллекта?",
+      "success": true,
+      "confidence": 0.5428571428571429,
+      "timestamp": 1791672114.3718832,
+      "metadata": {}
     }
   ],
   "self_concept": {
-    "skill_tool_call": 0.54,
-    "recent_failure_rate": 0.0,
+    "skill_tool_call": 0.56,
+    "recent_failure_rate": 0.2857142857142857,
     "calib_tool_call_bucket_1.0": {
       "n": 1,
       "success": 1
     },
     "calib_tool_call_bucket_0.5": {
-      "n": 1,
-      "success": 1
+      "n": 2,
+      "success": 2
+    },
+    "skill_reasoning": 0.44000000000000006,
+    "calib_reasoning_bucket_0.5": {
+      "n": 4,
+      "success": 2
     }
   },
   "capabilities": [

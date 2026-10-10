@@ -99,3 +99,140 @@
 2026-10-11 01:27:48 INFO [routes.ai_assistant:1076] Extracted 4 sanitized facts from web search -> scopes: ['private']
 2026-10-11 01:28:21 INFO [routes.ai_assistant:3091] [timing] gen=local_us prepare=27.33s route+tools=287.18s total=449.53s
 2026-10-11 01:28:21 INFO [main:55] Shutdown complete
+2026-10-11 01:32:28 WARNING [setup:43] === AI assistant started, log: C:\Users\PC\Documents\GitHub\MCPIISys\assistant.log ===
+2026-10-11 01:32:28 INFO [main:35] Starting AI assistant server...
+2026-10-11 01:32:28 INFO [routes.ai_assistant:3508] Global merge task started
+2026-10-11 01:32:28 INFO [sentence_transformers.SentenceTransformer:219] Use pytorch device_name: cpu
+2026-10-11 01:32:28 INFO [sentence_transformers.SentenceTransformer:227] Load pretrained SentenceTransformer: intfloat/multilingual-e5-large
+2026-10-11 01:32:33 INFO [GCN.memory_graph:195] GCN state loaded
+2026-10-11 01:32:33 INFO [GCN.memory_graph:244] CognitiveMemory (GCN-backed) initialized for global
+2026-10-11 01:32:33 INFO [GCN.memory_graph:195] GCN state loaded
+2026-10-11 01:32:33 INFO [GCN.memory_graph:244] CognitiveMemory (GCN-backed) initialized for shared
+2026-10-11 01:32:33 INFO [GCN.memory_graph:244] CognitiveMemory (GCN-backed) initialized for system_consolida
+2026-10-11 01:32:35 INFO [routes.ai_assistant:112] Global MCP config path: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-11 01:32:35 INFO [GCN.mcp_client_manager:151] Загрузка MCP конфига из: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-11 01:32:35 INFO [routes.ai_assistant:116] ✅ Global MCP manager initialized successfully
+2026-10-11 01:32:35 INFO [main:42] MCP manager initialized
+2026-10-11 01:32:40 INFO [GCN.memory_graph:195] GCN state loaded
+2026-10-11 01:32:41 INFO [GCN.memory_graph:244] CognitiveMemory (GCN-backed) initialized for local_user
+2026-10-11 01:32:41 INFO [routes.ai_assistant:431] [CognitiveController] SelfModel инициализирован для local_user
+2026-10-11 01:32:41 INFO [GCN.internal_tools:430] Инструменты самоанализа кода зарегистрированы
+2026-10-11 01:32:41 INFO [GCN.internal_tools:649] identity_tools: зарегистрированы contribute_to_identity, merge_identity_branches, search_identity_chain, get_identity_chain, invalidate_identity
+2026-10-11 01:32:41 INFO [GCN.internal_tools:663] internal_tools: memory/search/image/code/identity OK
+2026-10-11 01:32:41 INFO [GCN.autonomy:403] [Autonomy] движок запущен для local_user
+2026-10-11 01:32:41 INFO [routes.ai_assistant:478] CognitiveController (GCN) initialized for local_user
+2026-10-11 01:32:41 INFO [routes.ai_assistant:3231] Создан когнитивный ассистент для local_user
+2026-10-11 01:33:08 INFO [routes.ai_assistant:3265] Запрос от local_user, web=False, reasoning=False
+2026-10-11 01:33:10 INFO [routes.ai_assistant:2815] [router] route=fast p=0.20 (rule=0.20 learned=0.31) hard=False explore=False why=-
+2026-10-11 01:33:10 INFO [routes.ai_assistant:2841] ToolRouter decisions for 'Помоги составить план на неделю с фокусом на один ': used_native=False, trace_len=0
+2026-10-11 01:33:10 INFO [routes.ai_assistant:2843] Tool trace: []
+2026-10-11 01:33:53 INFO [routes.ai_assistant:3091] [timing] gen=local_us prepare=1.53s route+tools=0.00s ttft=36.79s stream=5.90s finalize=0.01s total=44.23s
+2026-10-11 01:34:23 INFO [routes.ai_assistant:3265] Запрос от local_user, web=False, reasoning=False
+2026-10-11 01:34:24 INFO [routes.ai_assistant:2815] [router] route=fast p=0.10 (rule=0.10 learned=0.31) hard=False explore=False why=short
+2026-10-11 01:34:24 INFO [routes.ai_assistant:2841] ToolRouter decisions for 'ghbdtn': used_native=False, trace_len=0
+2026-10-11 01:34:24 INFO [routes.ai_assistant:2843] Tool trace: []
+2026-10-11 01:34:24 ERROR [GCN.llm_client:193] Stream error 400: {
+    "error": {
+        "message": "No models loaded. Please load a model in the developer page or use the 'lms load' command.",
+        "type": "invalid_request_error",
+        "param": "model",
+   
+2026-10-11 01:34:24 INFO [routes.ai_assistant:3091] [timing] gen=local_us prepare=0.50s route+tools=0.00s ttft=0.26s stream=0.00s finalize=0.00s total=0.77s
+2026-10-11 01:34:29 INFO [routes.ai_assistant:3265] Запрос от local_user, web=False, reasoning=False
+2026-10-11 01:34:29 INFO [routes.ai_assistant:2815] [router] route=fast p=0.10 (rule=0.10 learned=0.31) hard=False explore=False why=short
+2026-10-11 01:34:29 INFO [routes.ai_assistant:2841] ToolRouter decisions for 'ns nen &': used_native=False, trace_len=0
+2026-10-11 01:34:29 INFO [routes.ai_assistant:2843] Tool trace: []
+2026-10-11 01:34:29 ERROR [GCN.llm_client:193] Stream error 400: {
+    "error": {
+        "message": "No models loaded. Please load a model in the developer page or use the 'lms load' command.",
+        "type": "invalid_request_error",
+        "param": "model",
+   
+2026-10-11 01:34:29 INFO [routes.ai_assistant:3091] [timing] gen=local_us prepare=0.54s route+tools=0.00s ttft=0.01s stream=0.00s finalize=0.00s total=0.55s
+2026-10-11 01:37:49 INFO [routes.ai_assistant:3265] Запрос от local_user, web=False, reasoning=False
+2026-10-11 01:37:50 INFO [routes.ai_assistant:2815] [router] route=fast p=0.10 (rule=0.10 learned=0.31) hard=False explore=False why=short
+2026-10-11 01:37:50 INFO [routes.ai_assistant:2841] ToolRouter decisions for 'ты тут ?': used_native=False, trace_len=0
+2026-10-11 01:37:50 INFO [routes.ai_assistant:2843] Tool trace: []
+2026-10-11 01:38:30 INFO [routes.ai_assistant:3091] [timing] gen=local_us prepare=0.58s route+tools=0.00s ttft=37.57s stream=2.67s finalize=0.00s total=40.82s
+2026-10-11 01:38:42 INFO [routes.ai_assistant:3265] Запрос от local_user, web=False, reasoning=False
+2026-10-11 01:38:51 INFO [primp:464] response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=%D0%9A%D0%B0%D0%BA%D0%B8%D0%B5%20%D1%81%D0%B5%D0%B9%D1%87%D0%B0%D1%81%20%D0%B3%D0%BB%D0%B0%D0%B2%D0%BD%D1%8B%D0%B5%20%D0%BD%D0%BE%D0%B2%D0%BE%D1%81%D1%82%D0%B8%20%D0%B2%20%D0%BC%D0%B8%D1%80%D0%B5%20%D0%B8%D1%81%D0%BA%D1%83%D1%81%D1%81%D1%82%D0%B2%D0%B5%D0%BD%D0%BD%D0%BE%D0%B3%D0%BE%20%D0%B8%D0%BD%D1%82%D0%B5%D0%BB%D0%BB%D0%B5%D0%BA%D1%82%D0%B0%3F%2011%20%D0%BE%D0%BA%D1%82%D1%8F%D0%B1%D1%80%D1%8F%202026 200
+2026-10-11 01:38:51 INFO [primp:464] response: https://yandex.ru/search/site/?text=%D0%9A%D0%B0%D0%BA%D0%B8%D0%B5%20%D1%81%D0%B5%D0%B9%D1%87%D0%B0%D1%81%20%D0%B3%D0%BB%D0%B0%D0%B2%D0%BD%D1%8B%D0%B5%20%D0%BD%D0%BE%D0%B2%D0%BE%D1%81%D1%82%D0%B8%20%D0%B2%20%D0%BC%D0%B8%D1%80%D0%B5%20%D0%B8%D1%81%D0%BA%D1%83%D1%81%D1%81%D1%82%D0%B2%D0%B5%D0%BD%D0%BD%D0%BE%D0%B3%D0%BE%20%D0%B8%D0%BD%D1%82%D0%B5%D0%BB%D0%BB%D0%B5%D0%BA%D1%82%D0%B0%3F%2011%20%D0%BE%D0%BA%D1%82%D1%8F%D0%B1%D1%80%D1%8F%202026&web=1&searchid=9632528&rdrnd=958482&lr=11057&redircnt=1791671930.1 200
+2026-10-11 01:38:51 INFO [GCN.web_search:403] Загрузка реранкера BAAI/bge-reranker-v2-m3 на cpu...
+2026-10-11 01:38:54 INFO [GCN.web_search:405] Реранкер загружен.
+2026-10-11 01:38:59 INFO [routes.ai_assistant:529] [ForcedSearch] поиск выполнен с 1-й попытки: 'Какие сейчас главные новости в мире искусственного интеллекта?'
+2026-10-11 01:38:59 ERROR [GCN.llm_client:107] LLM call failed: Server disconnected
+2026-10-11 01:39:57 INFO [GCN.tool_router:675] ToolRouter: round 0, decisions: [{'tool': 'internal__web_search', 'arguments': {'queries': ['искусственный интеллект новости 2025', 'AI breakthroughs latest 2025', 'нейросети новые открытия 2025'], 'max_results': 6}}]
+2026-10-11 01:40:07 INFO [GCN.tool_router:675] ToolRouter: round 1, decisions: [{'tool': 'internal__web_search', 'arguments': {'queries': ['искусственный интеллект новости 2025', 'AI breakthroughs latest 2025', 'нейросети новые открытия 2025'], 'max_results': 6}}]
+2026-10-11 01:40:07 INFO [GCN.tool_router:692] ToolRouter: пропускаю повторный вызов ('internal__web_search', '{"max_results": 6, "queries": ["искусственный интеллект новости 2025", "AI breakthroughs latest 2025", "нейросети новые открытия 2025"]}') — результат уже есть в tool_trace.
+2026-10-11 01:40:07 INFO [routes.ai_assistant:2815] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-11 01:40:07 INFO [routes.ai_assistant:2841] ToolRouter decisions for 'Какие сейчас главные новости в мире искусственного': used_native=True, trace_len=1
+2026-10-11 01:40:07 INFO [routes.ai_assistant:2843] Tool trace: [{'tool': 'internal__web_search', 'arguments': {'queries': ['искусственный интеллект новости 2025', 'AI breakthroughs latest 2025', 'нейросети новые открытия 2025'], 'max_results': 6}, 'result': 'Поиск уже выполнен в этом ходе. Найдено 5 источников.\nИсточник: ИноСМИ - главное из иностранных СМИ о России и мире сегодня\nURL: https://inosmi.ru/\nиным по “Северному потоку”\n09.10.2026\n44\nReuters\nВеликобритания\nТрамп договорился о поставках дизеля из России. Вот зачем ему это нужно\n09.10.2026\n5\nИноСМИ\nРоссия\nУкраина прячет руины. Тем, кто может рассказать правду, затыкают рты\n"Знову котел". Зеленский получил страшный сигнал из США\nАнтон  Трофимов\nОбозреватель ИноСМИ\n09.10.2026\n3\n10.10.2026\n4\nThe Telegraph UK\nВеликобритания\nХранилища газа опустеют уже зимой: Великобритания будет мерзнуть\n10.10.2026\n17\nYle\nФинляндия\n"Прекратить выдачу туристических виз": ЕС готов к радикальным мерам\n10.10.2026\n7\nThe Telegraph UK\nВеликобритания\nВ НАТО обнаружились запасы Patriot: Украине опять ничего не светит\n10.10.2026\n8\nBerliner Zeitung\nГермания\nПеред Россией открылись новые двери: Трамп сыграл Путину на руку\n10.10.2026\n4\nL\'AntiDiplomatico\nИталия\n“Убедился лично”: наблюдатель из Италии честно рассказал о выборах в России\n"Важная сделка": Трамп благодарит Путина\xa0— и\xa0игнорирует нападки Зеленского\n10.10.2026\n8\n10.10.2026\n22\nAxios\nСША\n"Это ужасно": истерика накрыла Зеленского из-за сделки Путина и Трампа\nСделка Трампа и Путина по российскому дизелю стала для Киева неприятным сюрпризом, заявил Зеленский в телефонной беседе с журналистами издания A\n[...]\nрампа\nСделка Трампа и Путина по российскому дизелю стала для Киева неприятным сюрпризом, заявил Зеленский в телефонной беседе с журналистами издания Axios. Глава киевского режима обвинил Вашингтон в нечестной игре и сравнил ситуацию с саммитом на Аляске.\n10.10.2026\n30\nThe Washington Post\nСША\nВ Киеве засуетились: Трамп встал на сторону России\n10.10.2026\n7\nTBS\nЯпония\nПодготовка космонавтов — лучшая в мире. Иностранцы с теплом вспоминают СССР\n10.10.2026\n11\nBerliner Zeitung\nГермания\n"Особые условия". Членства на равных не будет: ЕС поставил Украину на место\n10.10.2026\n9\nThe Sun\nВеликобритания\nЯдерные силы Британии под надежной защитой: БПЛА сбивают пожарными шлангами\n10.10.2026\n13\nFocus\nГермания\nСША и Запад серьезно больны. Без обновления системы их ждет упадок\nДональд Трамп — это не причина американского кризиса, а лишь его симптомом, пишет Focus. Настоящая болезнь кроется гораздо глубже: Запад стал жертвой собственного величия и променял внутреннюю стабильность на иллюзии о своей исключительности.\n10.10.2026\n20\nYahoo News Japan\nЯпония\nЕвропейские элиты долго жили в своих иллюзиях. Теперь пришел час расплаты\n10.10.2026\n3\nBerliner Zeitung\nГермания\nПроблемы Украины волнуют далеко не вс', 'verification': 'sufficient'}]
+2026-10-11 01:41:04 INFO [routes.ai_assistant:1076] Extracted 3 sanitized facts from web search -> scopes: ['private']
+2026-10-11 01:41:54 INFO [routes.ai_assistant:3091] [timing] gen=local_us prepare=16.91s route+tools=67.77s ttft=94.92s stream=12.15s finalize=0.00s total=191.76s
+2026-10-11 01:42:07 ERROR [asyncio:1871] Exception in callback BaseProactorEventLoop._start_serving.<locals>.loop() at C:\Users\PC\AppData\Local\Programs\Python\Python313\Lib\asyncio\proactor_events.py:840
+handle: <Handle BaseProactorEventLoop._start_serving.<locals>.loop() at C:\Users\PC\AppData\Local\Programs\Python\Python313\Lib\asyncio\proactor_events.py:840>
+Traceback (most recent call last):
+  File "C:\Users\PC\AppData\Local\Programs\Python\Python313\Lib\asyncio\events.py", line 89, in _run
+    self._context.run(self._callback, *self._args)
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\PC\AppData\Local\Programs\Python\Python313\Lib\asyncio\proactor_events.py", line 855, in loop
+    self._make_socket_transport(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        conn, protocol,
+        ^^^^^^^^^^^^^^^
+        extra={'peername': addr}, server=server)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\PC\AppData\Local\Programs\Python\Python313\Lib\asyncio\proactor_events.py", line 644, in _make_socket_transport
+    return _ProactorSocketTransport(self, sock, protocol, waiter,
+                                    extra, server)
+  File "C:\Users\PC\AppData\Local\Programs\Python\Python313\Lib\asyncio\proactor_events.py", line 610, in __init__
+    super().__init__(loop, sock, protocol, waiter, extra, server)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\PC\AppData\Local\Programs\Python\Python313\Lib\asyncio\proactor_events.py", line 189, in __init__
+    super().__init__(loop, sock, protocol, waiter, extra, server)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\PC\AppData\Local\Programs\Python\Python313\Lib\asyncio\proactor_events.py", line 335, in __init__
+    super().__init__(*args, **kw)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Users\PC\AppData\Local\Programs\Python\Python313\Lib\asyncio\proactor_events.py", line 66, in __init__
+    self._server._attach(self)
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\PC\AppData\Local\Programs\Python\Python313\Lib\asyncio\base_events.py", line 297, in _attach
+    assert self._sockets is not None
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError
+2026-10-11 01:42:08 INFO [main:55] Shutdown complete
+2026-10-11 01:43:36 WARNING [setup:43] === AI assistant started, log: C:\Users\PC\Documents\GitHub\MCPIISys\assistant.log ===
+2026-10-11 01:43:36 INFO [main:35] Starting AI assistant server...
+2026-10-11 01:43:36 INFO [routes.ai_assistant:3508] Global merge task started
+2026-10-11 01:43:36 INFO [sentence_transformers.SentenceTransformer:219] Use pytorch device_name: cpu
+2026-10-11 01:43:36 INFO [sentence_transformers.SentenceTransformer:227] Load pretrained SentenceTransformer: intfloat/multilingual-e5-large
+2026-10-11 01:43:41 INFO [GCN.memory_graph:195] GCN state loaded
+2026-10-11 01:43:41 INFO [GCN.memory_graph:244] CognitiveMemory (GCN-backed) initialized for global
+2026-10-11 01:43:41 INFO [GCN.memory_graph:195] GCN state loaded
+2026-10-11 01:43:41 INFO [GCN.memory_graph:244] CognitiveMemory (GCN-backed) initialized for shared
+2026-10-11 01:43:41 INFO [GCN.memory_graph:244] CognitiveMemory (GCN-backed) initialized for system_consolida
+2026-10-11 01:43:42 INFO [routes.ai_assistant:112] Global MCP config path: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-11 01:43:42 INFO [GCN.mcp_client_manager:151] Загрузка MCP конфига из: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-11 01:43:42 INFO [routes.ai_assistant:116] ✅ Global MCP manager initialized successfully
+2026-10-11 01:43:42 INFO [main:42] MCP manager initialized
+2026-10-11 01:44:22 INFO [GCN.memory_graph:195] GCN state loaded
+2026-10-11 01:44:25 INFO [GCN.memory_graph:244] CognitiveMemory (GCN-backed) initialized for local_user
+2026-10-11 01:44:25 INFO [routes.ai_assistant:431] [CognitiveController] SelfModel инициализирован для local_user
+2026-10-11 01:44:25 INFO [GCN.internal_tools:430] Инструменты самоанализа кода зарегистрированы
+2026-10-11 01:44:25 INFO [GCN.internal_tools:649] identity_tools: зарегистрированы contribute_to_identity, merge_identity_branches, search_identity_chain, get_identity_chain, invalidate_identity
+2026-10-11 01:44:25 INFO [GCN.internal_tools:663] internal_tools: memory/search/image/code/identity OK
+2026-10-11 01:44:25 INFO [GCN.autonomy:403] [Autonomy] движок запущен для local_user
+2026-10-11 01:44:25 INFO [routes.ai_assistant:478] CognitiveController (GCN) initialized for local_user
+2026-10-11 01:44:25 INFO [routes.ai_assistant:3231] Создан когнитивный ассистент для local_user
+2026-10-11 01:50:12 INFO [GCN.cognition:361] [SelfModel] sync_from_gcn: было 0, стало 0 (GCN: 0, transient: 0)
+2026-10-11 01:50:12 INFO [GCN.cognition:811] [Motivation] сгенерирована внутренняя цель: Повысить качество ответов: снизить процент неудач (источник: quality_improvement)
+2026-10-11 01:50:12 INFO [GCN.autonomy:571] [Autonomy] эндогенная цель: Повысить качество ответов: снизить процент неудач
+2026-10-11 01:50:12 INFO [GCN.autonomy:442] [Autonomy] в очередь (quality_improvement, p=0.82): Повысить качество ответов: снизить процент неудач
+2026-10-11 01:50:12 INFO [GCN.autonomy:668] [Autonomy] исследую (quality_improvement, p=0.82): Повысить качество ответов: снизить процент неудач
+2026-10-11 01:50:12 INFO [routes.ai_assistant:2496] [research] recall по 'Повысить качество ответов: снизить процент неудач': 7 записей
+2026-10-11 01:51:26 INFO [blockcoin-mcp:230] [auth] revoke для local_user…: codes=0, sids=0, ips=0
+2026-10-11 01:51:26 INFO [blockcoin-mcp:197] [auth] issue код для local_user… (persistent=True)
+2026-10-11 01:51:26 INFO [blockcoin-mcp:230] [auth] revoke для local_user…: codes=1, sids=0, ips=0
+2026-10-11 01:51:26 INFO [blockcoin-mcp:197] [auth] issue код для local_user… (persistent=True)
+2026-10-11 01:51:48 INFO [main:55] Shutdown complete

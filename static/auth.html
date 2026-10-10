@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
+  <link rel="icon" href="/static/favicon.ico" type="image/x-icon">
+  <title>Вход — AI-ассистент</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .auth-wrap { min-height: 100vh; display: grid; place-items: center; padding: 20px; background: var(--bg-primary); box-sizing: border-box; }
+    .auth-card {
+      width: min(380px, 100%); border-radius: 18px; background: var(--bg-secondary);
+      border: 1px solid var(--border-color); box-shadow: var(--shadow-xl); color: var(--text-main); overflow: hidden;
+    }
+    .auth-tabs { display: grid; grid-template-columns: 1fr 1fr 1fr; border-bottom: 1px solid var(--border-color); }
+    .auth-tab {
+      padding: 14px 6px; background: none; border: none; color: var(--text-muted); font: inherit; font-size: 14px; cursor: pointer;
+      border-bottom: 2px solid transparent;
+    }
+    .auth-tab[aria-selected="true"] { color: var(--text-main); border-bottom-color: var(--accent-color); }
+    .auth-body { padding: 22px 22px 24px; }
+    .auth-body h2 { margin: 0 0 4px; font-size: 18px; font-weight: 650; }
+    .auth-body p.lead { margin: 0 0 16px; color: var(--text-muted); font-size: 14px; }
+    .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+    .field label { font-size: 13px; color: var(--text-secondary); }
+    .field input {
+      padding: 11px 13px; border-radius: 10px; font: inherit; font-size: 15px;
+      border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-main); outline: none;
+    }
+    .field input:focus { border-color: var(--border-focus); }
+    .btn-main {
+      width: 100%; padding: 11px; border: none; border-radius: 10px; cursor: pointer; margin-top: 4px;
+      background: var(--accent-gradient); color: #fff; font: inherit; font-size: 15px; font-weight: 600;
+    }
+    .btn-main:disabled { opacity: .5; cursor: default; }
+    .btn-link { background: none; border: none; color: var(--text-secondary); font: inherit; font-size: 13px; cursor: pointer; padding: 8px 0 0; text-decoration: underline; }
+    .btn-link:disabled { opacity: .5; cursor: default; text-decoration: none; }
+    .msg { min-height: 18px; margin-top: 12px; font-size: 13px; }
+    .msg.err { color: #ffb3b0; }
+    .msg.ok { color: #9fe0bd; }
+    .step[hidden] { display: none; }
+    .row-between { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 6px; }
+  </style>
+</head>
+<body>
+<div class="auth-wrap">
+  <div class="auth-card">
+    <div class="auth-tabs" role="tablist">
+      <button class="auth-tab" role="tab" data-tab="login" aria-selected="true">Вход</button>
+      <button class="auth-tab" role="tab" data-tab="register" aria-selected="false">Регистрация</button>
+      <button class="auth-tab" role="tab" data-tab="forgot" aria-selected="false">Восстановление</button>
+    </div>
+
+    <div class="auth-body">
+
+      <!-- ВХОД -->
+      <section data-panel="login">
+        <h2>Вход</h2>
+        <p class="lead">Войдите по email и паролю.</p>
+        <form id="loginForm">
+          <div class="field"><label for="loginEmail">Email</label>
+            <input id="loginEmail" type="email" autocomplete="email" required></div>
+          <div class="field"><label for="loginPass">Пароль</label>
+            <input id="loginPass" type="password" autocomplete="current-password" required></div>
+          <button class="btn-main" type="submit">Войти</button>
+        </form>
+        <div class="row-between">
+          <button class="btn-link" type="button" data-go="forgot">Забыли пароль?</button>
+          <button class="btn-link" type="button" data-go="register">Создать аккаунт</button>
+        </div>
+        <div class="msg" id="loginMsg"></div>
+      </section>
+
+      <!-- РЕГИСТРАЦИЯ -->
+      <section data-panel="register" hidden>
+        <h2>Регистрация</h2>
+        <p class="lead">Укажите email и пароль. Мы пришлём код подтверждения.</p>
+
+        <form id="registerForm" class="step" data-step="1">
+          <div class="field"><label for="regEmail">Email</label>
+            <input id="regEmail" type="email" autocomplete="email" required></div>
+          <div class="field"><label for="regPass">Пароль (не короче 8 символов)</label>
+            <input id="regPass" type="password" autocomplete="new-password" minlength="8" required></div>
+          <button class="btn-main" type="submit">Получить код</button>
+        </form>
+
+        <form id="registerConfirmForm" class="step" data-step="2" hidden>
+          <p class="lead" id="regSentTo"></p>
+          <div class="field"><label for="regCode">Код из письма</label>
+            <input id="regCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required></div>
+          <button class="btn-main" type="submit">Подтвердить и войти</button>
+          <div class="row-between">
+            <button class="btn-link" type="button" id="regBack">Другой email</button>
+            <button class="btn-link" type="button" id="regResend">Отправить код ещё раз</button>
+          </div>
+        </form>
+        <div class="msg" id="regMsg"></div>
+      </section>
+
+      <!-- ВОССТАНОВЛЕНИЕ -->
+      <section data-panel="forgot" hidden>
+        <h2>Восстановление пароля</h2>
+        <p class="lead">Введите email, мы пришлём код для нового пароля.</p>
+
+        <form id="forgotForm" class="step" data-step="1">
+          <div class="field"><label for="forgotEmail">Email</label>
+            <input id="forgotEmail" type="email" autocomplete="email" required></div>
+          <button class="btn-main" type="submit">Отправить код</button>
+        </form>
+
+        <form id="resetForm" class="step" data-step="2" hidden>
+          <p class="lead" id="resetSentTo"></p>
+          <div class="field"><label for="resetCode">Код из письма</label>
+            <input id="resetCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required></div>
+          <div class="field"><label for="resetPass">Новый пароль (не короче 8 символов)</label>
+            <input id="resetPass" type="password" autocomplete="new-password" minlength="8" required></div>
+          <button class="btn-main" type="submit">Сменить пароль</button>
+          <div class="row-between">
+            <button class="btn-link" type="button" id="resetBack">Другой email</button>
+            <button class="btn-link" type="button" id="resetResend">Отправить код ещё раз</button>
+          </div>
+        </form>
+        <div class="msg" id="forgotMsg"></div>
+      </section>
+
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  const $ = (s) => document.querySelector(s);
+  const tabs = document.querySelectorAll('.auth-tab');
+  const panels = document.querySelectorAll('[data-panel]');
+  const RESEND_SEC = 60;
+
+  function showTab(name) {
+    tabs.forEach((t) => t.setAttribute('aria-selected', String(t.dataset.tab === name)));
+    panels.forEach((p) => { p.hidden = p.dataset.panel !== name; });
+    const path = name === 'login' ? '/login' : name === 'register' ? '/register' : '/forgot';
+    if (location.pathname !== path) history.replaceState(null, '', path);
+  }
+  tabs.forEach((t) => t.addEventListener('click', () => showTab(t.dataset.tab)));
+  document.querySelectorAll('[data-go]').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.go)));
+
+  function setStep(form, n) {
+    document.querySelectorAll(`form.step[data-step]`).forEach((f) => {
+      if (f.parentElement === form.parentElement) f.hidden = f.dataset.step !== String(n);
+    });
+  }
+
+  function msg(id, text, ok) {
+    const el = $(id);
+    el.textContent = text || '';
+    el.className = 'msg ' + (text ? (ok ? 'ok' : 'err') : '');
+  }
+
+  // Ошибки FastAPI приходят в detail: строкой или списком
+  async function call(url, body) {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(body),
+    });
+    let data = {};
+    try { data = await r.json(); } catch { /* пустой ответ */ }
+    if (!r.ok) {
+      let text = 'Ошибка ' + r.status;
+      if (typeof data.detail === 'string') text = data.detail;
+      else if (Array.isArray(data.detail)) text = 'Проверьте заполнение полей';
+      const err = new Error(text);
+      err.status = r.status;
+      err.retryAfter = Number(r.headers.get('Retry-After') || 0);
+      throw err;
+    }
+    return data;
+  }
+
+  // Кнопка «отправить ещё раз» блокируется на 60 секунд
+  function cooldown(btn) {
+    let left = RESEND_SEC;
+    const original = btn.textContent;
+    btn.disabled = true;
+    const timer = setInterval(() => {
+      left -= 1;
+      btn.textContent = `Отправить ещё раз через ${left} с`;
+      if (left <= 0) { clearInterval(timer); btn.disabled = false; btn.textContent = original; }
+    }, 1000);
+    btn.textContent = `Отправить ещё раз через ${left} с`;
+  }
+
+  // ---- вход
+  $('#loginForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const email = $('#loginEmail').value.trim();
+    const btn = e.target.querySelector('button');
+    btn.disabled = true;
+    msg('#loginMsg', '');
+    try {
+      await call('/auth/login', { email, password: $('#loginPass').value });
+      location.href = '/';
+    } catch (err) {
+      if (err.status === 403) {
+        // Аккаунт не подтверждён: отправляем код и ведём на шаг подтверждения
+        $('#regEmail').value = email;
+        showTab('register');
+        msg('#regMsg', 'Email не подтверждён. Введите код, который мы отправим.', false);
+        try { await call('/auth/code/resend', { email, purpose: 'verify' }); } catch { /* ниже покажем */ }
+        goRegisterStep2(email);
+      } else {
+        msg('#loginMsg', err.message, false);
+      }
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // ---- регистрация
+  function goRegisterStep2(email) {
+    $('#regSentTo').textContent = `Код отправлен на ${email}`;
+    setStep($('#registerForm'), 2);
+    $('#registerForm').hidden = true;
+    $('#registerConfirmForm').hidden = false;
+    $('#regCode').focus();
+  }
+  function goRegisterStep1() {
+    $('#registerForm').hidden = false;
+    $('#registerConfirmForm').hidden = true;
+  }
+
+  $('#registerForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const email = $('#regEmail').value.trim();
+    const btn = e.target.querySelector('button');
+    btn.disabled = true;
+    msg('#regMsg', '');
+    try {
+      const data = await call('/auth/register', { email, password: $('#regPass').value });
+      msg('#regMsg', data.message, true);
+      goRegisterStep2(email);
+    } catch (err) {
+      msg('#regMsg', err.message, false);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  $('#registerConfirmForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const email = $('#regEmail').value.trim();
+    const btn = e.target.querySelector('button');
+    btn.disabled = true;
+    msg('#regMsg', '');
+    try {
+      await call('/auth/register/confirm', { email, code: $('#regCode').value.trim() });
+      location.href = '/';
+    } catch (err) {
+      msg('#regMsg', err.message, false);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  $('#regBack').addEventListener('click', () => { goRegisterStep1(); msg('#regMsg', ''); });
+  $('#regResend').addEventListener('click', async (e) => {
+    const email = $('#regEmail').value.trim();
+    try {
+      const data = await call('/auth/code/resend', { email, purpose: 'verify' });
+      msg('#regMsg', data.message, true);
+      cooldown(e.currentTarget);
+    } catch (err) {
+      msg('#regMsg', err.message, false);
+      if (err.retryAfter) cooldown(e.currentTarget);
+    }
+  });
+
+  // ---- восстановление
+  let forgotEmail = '';
+  $('#forgotForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    forgotEmail = $('#forgotEmail').value.trim();
+    const btn = e.target.querySelector('button');
+    btn.disabled = true;
+    msg('#forgotMsg', '');
+    try {
+      const data = await call('/auth/reset/request', { email: forgotEmail });
+      $('#resetSentTo').textContent = `Если аккаунт ${forgotEmail} есть, код отправлен на него.`;
+      e.target.hidden = true;
+      $('#resetForm').hidden = false;
+      msg('#forgotMsg', data.message, true);
+      $('#resetCode').focus();
+    } catch (err) {
+      msg('#forgotMsg', err.message, false);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  $('#resetForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = e.target.querySelector('button');
+    btn.disabled = true;
+    msg('#forgotMsg', '');
+    try {
+      await call('/auth/reset/confirm', {
+        email: forgotEmail, code: $('#resetCode').value.trim(), password: $('#resetPass').value,
+      });
+      $('#loginEmail').value = forgotEmail;
+      $('#resetForm').hidden = true;
+      $('#forgotForm').hidden = false;
+      showTab('login');
+      msg('#loginMsg', 'Пароль изменён. Войдите с новым паролем.', true);
+    } catch (err) {
+      msg('#forgotMsg', err.message, false);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  $('#resetBack').addEventListener('click', () => {
+    $('#resetForm').hidden = true;
+    $('#forgotForm').hidden = false;
+    msg('#forgotMsg', '');
+  });
+  $('#resetResend').addEventListener('click', async (e) => {
+    try {
+      await call('/auth/code/resend', { email: forgotEmail, purpose: 'reset' });
+      msg('#forgotMsg', 'Код отправлен ещё раз, если аккаунт существует.', true);
+      cooldown(e.currentTarget);
+    } catch (err) {
+      msg('#forgotMsg', err.message, false);
+      if (err.retryAfter) cooldown(e.currentTarget);
+    }
+  });
+
+  // Стартовая вкладка по адресу
+  const path = location.pathname;
+  showTab(path.startsWith('/register') ? 'register' : path.startsWith('/forgot') ? 'forgot' : 'login');
+})();
+</script>
+</body>
+</html>
