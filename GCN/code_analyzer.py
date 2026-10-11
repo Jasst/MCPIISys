@@ -22,6 +22,7 @@ from GCN.config_ai import (
     AUTO_FIX_SUGGESTIONS,
     CODE_ACCESS_ROOT,
     ALLOWED_CODE_EXTENSIONS,
+    CODE_ALLOWED_DIRS,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,60 +45,30 @@ class CodeAnalyzer:
         self._file_cache: Dict[str, str] = {}  # кэш содержимого файлов
 
     def _is_safe_path(self, file_path: str) -> bool:
-        """Проверяет, что файл находится в разрешённой директории и имеет безопасное расширение.
+        """Разрешает только код: файлы из CODE_ALLOWED_DIRS и файлы в корне проекта
+        с безопасными расширениями. Данные пользователей и скрытые файлы закрыты.
 
-        ИСПРАВЛЕНИЕ (пункт 4): используем Path.relative_to() вместо startswith(),
-        чтобы избежать path traversal атак через префикс (например, /app/GCN_malicious/evil.py).
+        Раньше доступ был ко всему корню проекта, и модель могла прочитать историю
+        чужого аккаунта (ai_memory_v3/<user>/history.json) — это закрыто.
         """
         try:
-            # Нормализуем путь
             abs_path = Path(file_path).resolve()
-
-            # Проверяем, что путь внутри root через relative_to (безопаснее startswith)
-            try:
-                abs_path.relative_to(self.root.resolve())
-            except ValueError:
-                logger.warning(f"Попытка доступа к файлу вне root: {file_path}")
-                return False
-
-            # Проверяем расширение
-            if abs_path.suffix.lower() not in ALLOWED_CODE_EXTENSIONS:
-                logger.warning(f"Недопустимое расширение файла: {abs_path.suffix}")
-                return False
-
-            # Проверяем, что файл существует
-            if not abs_path.is_file():
-                logger.warning(f"Файл не существует: {file_path}")
-                return False
-
-            return True
-        except Exception as e:
-            logger.error(f"Ошибка проверки пути {file_path}: {e}")
+            rel = abs_path.relative_to(self.root.resolve())   # выход за корень -> ValueError
+        except (ValueError, OSError):
+            logger.warning(f"Доступ к файлу вне проекта запрещён: {file_path}")
             return False
 
-    def _get_context_lines(self, lines: List[str], line_idx: int, context_size: int = 5) -> str:
-        """Возвращает контекст вокруг указанной строки."""
-        start = max(0, line_idx - context_size)
-        end = min(len(lines), line_idx + context_size + 1)
+        if abs_path.suffix.lower() not in ALLOWED_CODE_EXTENSIONS:
+            return False
+        if any(part.startswith('.') or part == '__pycache__' for part in rel.parts):
+            return False
+        if len(rel.parts) > 1 and rel.parts[0] not in CODE_ALLOWED_DIRS:
+            logger.warning(f"Доступ к папке данных запрещён: {rel.parts[0]}")
+            return False
+        return abs_path.is_file()
 
-        context_lines = []
-        for i in range(start, end):
-            prefix = ">>> " if i == line_idx else "    "
-            context_lines.append(f"{prefix}{i+1:4d}: {lines[i]}")
-
-        return "\n".join(context_lines)
-
-    async def read_file(self, file_path: str, max_lines: int = 500) -> str:
-        """
-        Читает файл с проверкой безопасности.
-
-        Args:
-            file_path: Относительный путь от root (например, "GCN/config_ai.py")
-            max_lines: Максимум строк для возврата
-
-        Returns:
-            Содержимое файла или сообщение об ошибке
-        """
+    async def read_file(self, file_path: str, max_lines: int = 200) -> str:
+        """Читает файл кода из проекта. Доступ — только через _is_safe_path."""
         if not ENABLE_CODE_SELF_REFLECTION:
             return "Самоанализ кода отключён в конфигурации."
 
@@ -163,6 +134,8 @@ class CodeAnalyzer:
             for root, dirs, files in os.walk(self.root):
                 # Пропускаем скрытые директории и __pycache__
                 dirs[:] = [d for d in dirs if not d.startswith('.') and d != '__pycache__']
+                if Path(root).resolve() == self.root.resolve():
+                    dirs[:] = [d for d in dirs if d in CODE_ALLOWED_DIRS]
 
                 for filename in files:
                     if Path(filename).suffix.lower() not in ALLOWED_CODE_EXTENSIONS:
@@ -246,7 +219,10 @@ class CodeAnalyzer:
             result = []
             try:
                 items = sorted(path.iterdir(), key=lambda x: (x.is_file(), x.name.lower()))
-                items = [item for item in items if not item.name.startswith('.')]
+                items = [item for item in items if not item.name.startswith('.') and item.name != '__pycache__']
+                if path.resolve() == self.root.resolve():
+                    items = [i for i in items if (i.is_dir() and i.name in CODE_ALLOWED_DIRS)
+                             or (i.is_file() and i.suffix.lower() in ALLOWED_CODE_EXTENSIONS)]
 
                 for i, item in enumerate(items):
                     is_last = (i == len(items) - 1)
@@ -306,6 +282,8 @@ class CodeAnalyzer:
                     logger.debug(f"Путь {file_path} вне корня проекта — пропуск локации")
                     continue
                 rel_path = str(rel_path_obj)
+                if not self._is_safe_path(str(abs_path)):
+                    continue
 
                 # Читаем файл с контекстом
                 content = await self.read_file(rel_path, max_lines=int(line_num) + 10)
