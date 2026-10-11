@@ -79,15 +79,15 @@
       "predicate": "is_fact",
       "object": {
         "value": "true",
-        "access_count": 35,
-        "last_accessed": "2026-10-11T21:51:29.894336+00:00"
+        "access_count": 37,
+        "last_accessed": "2026-10-11T21:59:29.066559+00:00"
       },
       "author": "u1",
       "created": "2026-10-11T00:11:39.294086+00:00",
       "evidence": [],
       "confidence": 0.9,
-      "version": 36,
-      "content_hash": "f1352f24eb36cdee68257c0e8a8e30bf0c9e4ca2460ecfd782bc44a47f5ab14d",
+      "version": 38,
+      "content_hash": "876fa8865d788b0b597928c58373954be4cede0bb26ba241294d358074a7fea2",
       "signature": null,
       "provenance": null,
       "scope": "shared",
@@ -100,15 +100,15 @@
       "predicate": "is_fact",
       "object": {
         "value": "true",
-        "access_count": 33,
-        "last_accessed": "2026-10-11T21:51:29.894235+00:00"
+        "access_count": 35,
+        "last_accessed": "2026-10-11T21:59:29.066655+00:00"
       },
       "author": "u1",
       "created": "2026-10-11T00:11:42.279493+00:00",
       "evidence": [],
       "confidence": 0.9,
-      "version": 34,
-      "content_hash": "943eea5e4a16e1fa156dc40c4f344c1f1178d9202a036c8018f0a23f558c0545",
+      "version": 36,
+      "content_hash": "5ef0aea53626905cdb6704e82ccaa664fe79eb201c8e653c67482cb81d218660",
       "signature": null,
       "provenance": null,
       "scope": "shared",
@@ -121,15 +121,15 @@
       "predicate": "is_fact",
       "object": {
         "value": "true",
-        "access_count": 33,
-        "last_accessed": "2026-10-11T21:51:29.894171+00:00"
+        "access_count": 35,
+        "last_accessed": "2026-10-11T21:59:29.066467+00:00"
       },
       "author": "u1",
       "created": "2026-10-11T00:11:42.440737+00:00",
       "evidence": [],
       "confidence": 0.9,
-      "version": 34,
-      "content_hash": "1d374f6219e95836456ae6f9f042ee7988926ed2dffd743baa817fc80da3127d",
+      "version": 36,
+      "content_hash": "7489e3701c016ed3931187be9e870d33bd5f14d8316a8483686b98d7b395224e",
       "signature": null,
       "provenance": null,
       "scope": "shared",
@@ -2418,6 +2418,120 @@
         }
       },
       "signature": null
+    },
+    {
+      "id": "c911e5a4-d1ca-4ef9-9c02-0cab0ca20730",
+      "type": "UPDATE",
+      "timestamp": "2026-10-11T21:57:33.089326+00:00",
+      "actor": "u2",
+      "target_id": "fact_8252b3ba-0816-48b3-907d-b151449502f7",
+      "payload": {
+        "old_version": 35,
+        "new_version": 35,
+        "changes": {
+          "object": {
+            "value": "true",
+            "access_count": 35,
+            "last_accessed": "2026-10-11T21:59:29.066655+00:00"
+          }
+        }
+      },
+      "signature": null
+    },
+    {
+      "id": "2097aa3d-6475-461c-ae95-ced38fe0f74d",
+      "type": "UPDATE",
+      "timestamp": "2026-10-11T21:57:33.089371+00:00",
+      "actor": "u2",
+      "target_id": "fact_d9f58a20-566b-4f0f-b6a8-04564aaeb73a",
+      "payload": {
+        "old_version": 37,
+        "new_version": 37,
+        "changes": {
+          "object": {
+            "value": "true",
+            "access_count": 37,
+            "last_accessed": "2026-10-11T21:59:29.066559+00:00"
+          }
+        }
+      },
+      "signature": null
+    },
+    {
+      "id": "b9638303-db7c-4fd2-8da2-4583efa9113f",
+      "type": "UPDATE",
+      "timestamp": "2026-10-11T21:57:33.089413+00:00",
+      "actor": "u2",
+      "target_id": "fact_0cd2a2b0-e933-4b32-9260-6de966b8d27a",
+      "payload": {
+        "old_version": 35,
+        "new_version": 35,
+        "changes": {
+          "object": {
+            "value": "true",
+            "access_count": 35,
+            "last_accessed": "2026-10-11T21:59:29.066467+00:00"
+          }
+        }
+      },
+      "signature": null
+    },
+    {
+      "id": "50ce6237-2ae6-4eaa-9044-d90d2fbcf039",
+      "type": "UPDATE",
+      "timestamp": "2026-10-11T21:59:29.066548+00:00",
+      "actor": "u2",
+      "target_id": "fact_0cd2a2b0-e933-4b32-9260-6de966b8d27a",
+      "payload": {
+        "old_version": 36,
+        "new_version": 36,
+        "changes": {
+          "object": {
+            "value": "true",
+            "access_count": 35,
+            "last_accessed": "2026-10-11T21:59:29.066467+00:00"
+          }
+        }
+      },
+      "signature": null
+    },
+    {
+      "id": "427a6b8a-17b2-484b-8b0b-fe23359bce1c",
+      "type": "UPDATE",
+      "timestamp": "2026-10-11T21:59:29.066645+00:00",
+      "actor": "u2",
+      "target_id": "fact_d9f58a20-566b-4f0f-b6a8-04564aaeb73a",
+      "payload": {
+        "old_version": 38,
+        "new_version": 38,
+        "changes": {
+          "object": {
+            "value": "true",
+            "access_count": 37,
+            "last_accessed": "2026-10-11T21:59:29.066559+00:00"
+          }
+        }
+      },
+      "signature": null
+    },
+    {
+      "id": "2d4816ee-1280-4ff3-8183-cc0ed4a4e4a9",
+      "type": "UPDATE",
+      "timestamp": "2026-10-11T21:59:29.066743+00:00",
+      "actor": "u2",
+      "target_id": "fact_8252b3ba-0816-48b3-907d-b151449502f7",
+      "payload": {
+        "old_version": 36,
+        "new_version": 36,
+        "changes": {
+          "object": {
+            "value": "true",
+            "access_count": 35,
+            "last_accessed": "2026-10-11T21:59:29.066655+00:00"
+          }
+        }
+      },
+      "signature": null
     }
   ],
   "graph_edges": {
@@ -2449,19 +2563,19 @@
   "graph_edge_meta": {
     "identity_94a39a4b0d93|continues_from|identity_d451e1950442": {
       "weight": 1.0,
-      "updated": "2026-10-11T21:50:35.171006+00:00"
+      "updated": "2026-10-11T21:55:49.530374+00:00"
     },
     "identity_ec7b9db7c0e2|continues_from|identity_94a39a4b0d93": {
       "weight": 1.0,
-      "updated": "2026-10-11T21:50:35.171026+00:00"
+      "updated": "2026-10-11T21:55:49.530398+00:00"
     },
     "identity_cdd2189fb033|continues_from|identity_ec7b9db7c0e2": {
       "weight": 1.0,
-      "updated": "2026-10-11T21:50:35.171034+00:00"
+      "updated": "2026-10-11T21:55:49.530409+00:00"
     },
     "identity_68fbb7f628b3|continues_from|identity_cdd2189fb033": {
       "weight": 1.0,
-      "updated": "2026-10-11T21:50:35.171040+00:00"
+      "updated": "2026-10-11T21:55:49.530417+00:00"
     }
   },
   "embeddings": {
