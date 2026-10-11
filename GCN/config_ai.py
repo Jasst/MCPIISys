@@ -246,6 +246,9 @@ CODE_CONTEXT_MAX_LINES = 50  # макс. строк контекста вокр�
 AUTO_FIX_SUGGESTIONS = True  # предлагать исправления автоматически
 CODE_ACCESS_ROOT = Path(__file__).resolve().parent.parent  # корень для доступа к коду
 ALLOWED_CODE_EXTENSIONS = {".py", ".json", ".md", ".txt", ".yml", ".yaml"}  # безопасные расширения
+# Инструменты кода видят ТОЛЬКО эти папки проекта. Данные пользователей
+# (ai_memory_v3, ui_state, auth.db) и .env сюда не входят и недоступны моделям.
+CODE_ALLOWED_DIRS = {"GCN", "routes"}
 
 # -------------------------------
 # Проактивные уведомления
