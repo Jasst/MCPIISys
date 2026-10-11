@@ -526,3 +526,6 @@ AssertionError
 2026-10-12 00:57:33 INFO [routes.ai_assistant:2829] [router] route=fast p=0.10 (rule=0.10 learned=0.31) hard=False explore=False why=short
 2026-10-12 00:57:33 INFO [routes.ai_assistant:2855] ToolRouter decisions for 'Что ты помнишь ?': used_native=False, trace_len=0
 2026-10-12 00:57:33 INFO [routes.ai_assistant:2857] Tool trace: []
+2026-10-12 00:59:23 INFO [routes.ai_assistant:3105] [timing] gen=u2:17917 prepare=0.66s route+tools=0.00s ttft=82.32s stream=27.38s finalize=0.00s total=110.36s
+2026-10-12 00:59:24 INFO [routes.ai_assistant:1346] [QuickCorrection] High error detected for: Что ты помнишь ?...
+2026-10-12 00:59:29 INFO [routes.ai_assistant:2500] [research] recall по 'Что ты помнишь ?': 7 записей
