@@ -163,7 +163,7 @@ const msgsOf = (storage, id) => JSON.parse(storage['ai_messages_' + id] || '[]')
       if (url === '/health') return json({ status: 'ok' });
       if (url === '/ai/notifications/poll') return json({ notifications: [] });
       if (url === '/ai/chat/attach') return new Response(sse([{ no_active_generation: true }]), { status: 200 });
-      if (url === '/ai/chat/last_response') return json({ user: 'Вопрос 2', assistant: 'Готовый ответ с сервера' });
+      if (url.startsWith('/ai/chat/last_response')) return json({ user: 'Вопрос 2', assistant: 'Готовый ответ с сервера' });
       return new Response('nope', { status: 404 });
     };
     const p = openPage(storage, server);
@@ -197,6 +197,68 @@ const msgsOf = (storage, id) => JSON.parse(storage['ai_messages_' + id] || '[]')
     check('D1 stop calls server stop route', stopped);
     check('D2 stopped answer keeps partial text and is marked', m[1].notes.some(n => n.includes('Остановлено')) && !m[1].pending, JSON.stringify(m[1].notes));
     check('D3 send button back to send mode', !p.$('#sendBtn').classList.contains('stop'));
+  }
+
+
+  // ---------- E: обрыв сети во время ответа — ответ не теряется, подхватывается позже
+  {
+    const storage = {};
+    const server = (url, opts) => {
+      if (url === '/health') return json({ status: 'ok' });
+      if (url === '/ai/notifications/poll') return json({ notifications: [] });
+      if (url === '/auth/status') return json({ required: true, authenticated: true, uid: 'u9' });
+      if (url === '/ai/chat' && opts.method === 'POST') {
+        const enc = new TextEncoder();
+        const rs = new ReadableStream({ start(c) {
+          c.enqueue(enc.encode('data: {"token":"Начало "}\n\n'));
+          setTimeout(() => c.error(new TypeError('network error')), 30);
+        } });
+        return new Response(rs, { status: 200 });
+      }
+      if (url === '/ai/chat/attach') return new Response(sse([{ token: 'Начало ' }, { token: 'и конец' }, '[DONE]']), { status: 200 });
+      return new Response('nope', { status: 404 });
+    };
+    const p = openPage(storage, server);
+    await wait(60);
+    p.$('#input').value = 'Вопрос без интернета';
+    p.$('#input').dispatchEvent(new p.w.Event('input'));
+    p.$('#sendBtn').click();
+    await wait(150);
+    const sess = JSON.parse(storage['ai:u9:sessions'] || '[]')[0];
+    const msgsE = sess ? JSON.parse(storage['ai:u9:messages_' + sess.id] || '[]') : [];
+    const botE = msgsE[msgsE.length - 1] || {};
+    check('E1 network drop keeps answer pending, not marked as error', botE.pending === true && !botE.error, JSON.stringify({ pending: botE.pending, error: botE.error }));
+    check('E2 user sees that connection was interrupted', (botE.notes || []).some(n => n.includes('Соединение прервано')));
+
+    // Вернулись в сеть / на вкладку — ответ подхватывается
+    p.w.document.dispatchEvent(new p.w.Event('visibilitychange'));
+    await wait(200);
+    const msgsE2 = JSON.parse(storage['ai:u9:messages_' + sess.id] || '[]');
+    const botE2 = msgsE2[msgsE2.length - 1];
+    check('E3 answer recovered after reconnect', botE2.text === 'Начало и конец' && botE2.pending === false, JSON.stringify(botE2.text));
+  }
+
+  // ---------- F: чаты разделены по аккаунту на одном браузере
+  {
+    const storage = {};
+    const srv = (uid) => (url, opts) => {
+      if (url === '/health') return json({ status: 'ok' });
+      if (url === '/ai/notifications/poll') return json({ notifications: [] });
+      if (url === '/auth/status') return json({ required: true, authenticated: true, uid });
+      if (url === '/ai/chat' && opts.method === 'POST') return new Response(sse(['[DONE]']), { status: 200 });
+      return new Response('nope', { status: 404 });
+    };
+    const p1 = openPage(storage, srv('u1'));
+    await wait(60);
+    p1.$('#input').value = 'Секретный вопрос первого';
+    p1.$('#input').dispatchEvent(new p1.w.Event('input'));
+    p1.$('#sendBtn').click();
+    await wait(120);
+    const p2 = openPage(storage, srv('u2'));
+    await wait(60);
+    const visibleTitles = p2.$$('.sess .t').map(t => t.textContent);
+    check('F1 first account chat is saved under its own key', !!storage['ai:u1:sessions']);
+    check('F2 second account does not see first account chats', !visibleTitles.some(t => t.includes('Секретный')), JSON.stringify(visibleTitles));
   }
 
   const fails = results.filter(r => !r).length;

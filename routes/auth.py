@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 import auth_store as store
 import mailer
-from config import AUTH_ENABLED
+from config import AUTH_ENABLED, LOCAL_USER_ID
 from setup import RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -186,13 +186,14 @@ async def logout(request: Request):
 @router.get('/status')
 async def auth_status(request: Request):
     if not AUTH_ENABLED:
-        return {'required': False, 'authenticated': True, 'email': None}
+        return {'required': False, 'authenticated': True, 'email': None, 'uid': LOCAL_USER_ID}
     from dependencies import current_user
     user = current_user(request)
     return {
         'required': True,
         'authenticated': user is not None,
         'email': user['email'] if user is not None else None,
+        'uid': f"u{user['id']}" if user is not None else None,
     }
 
 

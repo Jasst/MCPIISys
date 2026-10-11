@@ -2,7 +2,7 @@
   "mcpServers": {
     "my-assistant": {
       "command": "npx",
-      "args": ["-y", "mcp-remote", "https://blockchat.mcp/"]
+      "args": ["-y", "mcp-remote", "https://ai.example.ru/mcp/"]
     }
   }
 }

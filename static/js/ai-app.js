@@ -26,7 +26,13 @@
     notify: '/ai/notifications/poll',
     health: '/health',
   };
+  // Чаты хранятся отдельно для каждого аккаунта: иначе другой человек на этом же
+  // браузере увидит чужие разговоры. Настройки общие для браузера.
   const KEY = { sessions: 'ai_sessions', msgs: 'ai_messages_', settings: 'ai_settings_v2' };
+  function setScope(uid) {
+    KEY.sessions = uid ? `ai:${uid}:sessions` : 'ai_sessions';
+    KEY.msgs = uid ? `ai:${uid}:messages_` : 'ai_messages_';
+  }
   const NOTIFY_ID = 'ai_notifications';
   const DEFAULT_NAME = 'Новый чат';
   const MAX_STORED = 300;
@@ -105,7 +111,7 @@
   // ------------------------------------------------------------------ состояние
 
   let settings = Object.assign({}, DEFAULTS, readJSON(KEY.settings, {}));
-  let sessions = readJSON(KEY.sessions, []);
+  let sessions = [];                 // загружаются в init() после определения аккаунта
   let cache = {};                 // id -> массив сообщений (живой объект для генерации)
   let currentId = null;           // открытый в интерфейсе чат
   let gen = null;                 // активная генерация: {sessionId, idx, controller, stopRequested}
@@ -571,6 +577,7 @@
 
   // ------------------------------------------------------------------ SSE
 
+  // Возвращает true, если поток завершился маркером [DONE]; false — если оборвался
   async function readSSE(res, onEvent, signal) {
     const reader = res.body.getReader();
     const dec = new TextDecoder();
@@ -579,9 +586,9 @@
     if (signal) signal.addEventListener('abort', onAbort, { once: true });
     try {
       for (;;) {
-        if (signal && signal.aborted) return;
+        if (signal && signal.aborted) return false;
         const { value, done } = await reader.read();
-        if (done) return;
+        if (done) return false;
         buf += dec.decode(value, { stream: true });
         let i;
         while ((i = buf.indexOf('\n\n')) !== -1) {
@@ -590,7 +597,7 @@
           for (const line of block.split('\n')) {
             if (!line.startsWith('data:')) continue;
             const data = line.slice(5).trim();
-            if (data === '[DONE]') { reader.cancel().catch(() => {}); return; }
+            if (data === '[DONE]') { reader.cancel().catch(() => {}); return true; }
             let ev;
             try { ev = JSON.parse(data); } catch { continue; }
             onEvent(ev);
@@ -613,17 +620,30 @@
   }
 
   // Если сервер уже закончил, берём готовый ответ по тексту вопроса
+  // true — ответ найден, false — сервер ответа не знает, null — нет связи
   async function recoverFromLast(bot, userText) {
     try {
-      const r = await fetch(API.last, { credentials: 'same-origin' });
+      const q = userText ? '?user_text=' + encodeURIComponent(userText) : '';
+      const r = await fetch(API.last + q, { credentials: 'same-origin' });
       if (!r.ok) return false;
       const ex = await r.json();
       if (ex && ex.assistant && (!userText || ex.user === userText)) {
         bot.text = ex.assistant;
         return true;
       }
-    } catch { /* сеть недоступна */ }
-    return false;
+      return false;
+    } catch {
+      return null;
+    }
+  }
+
+  function isNetworkError(err) {
+    // Сетевые ошибки fetch — TypeError; сравниваем по имени, а не через instanceof (разные realm)
+    return !!err && (err.name === 'TypeError' || err.name === 'NetworkError');
+  }
+
+  function pushNote(m, text) {
+    if (!m.notes.includes(text)) m.notes.push(text);
   }
 
   // ------------------------------------------------------------------ генерация
@@ -631,7 +651,7 @@
   // mode: 'send' — новый запрос к /ai/chat; 'attach' — подхват уже идущей генерации
   async function startGeneration(id, idx, mode, body) {
     const controller = new AbortController();
-    const g = { sessionId: id, idx, controller, stopRequested: false };
+    const g = { sessionId: id, idx, controller, stopRequested: false, interrupted: false, authLost: false };
     gen = g;
     refreshUI();
 
@@ -647,41 +667,72 @@
             body: JSON.stringify(body),
             signal: controller.signal,
           });
-      if (res.status === 401) { location.href = '/login'; return; }
+      if (res.status === 401) { g.authLost = true; location.href = '/login'; return; }
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
 
       // attach replays the whole buffer from the start: start from a clean slate
       if (mode === 'attach') resetBot(bot);
 
       let none = false;
-      await readSSE(res, (ev) => {
+      const finished = await readSSE(res, (ev) => {
         if (ev.no_active_generation) { none = true; return; }
         applyEvent(ev, bot);
         persistSoon(id);
         if (id === currentId) paintLive(idx);
       }, controller.signal);
 
-      if (none && !bot.text && !bot.error) {
-        const userMsg = msgs[idx - 1] && msgs[idx - 1].role === 'user' ? msgs[idx - 1].text : null;
-        const ok = await recoverFromLast(bot, userMsg);
-        if (!ok) bot.error = 'Ответ не найден на сервере (возможно, сервер перезапускался)';
+      if (!controller.signal.aborted) {
+        if (none) {
+          if (!bot.text && !bot.error) {
+            const userMsg = msgs[idx - 1] && msgs[idx - 1].role === 'user' ? msgs[idx - 1].text : null;
+            const ok = await recoverFromLast(bot, userMsg);
+            if (ok === null) g.interrupted = true;
+            else if (!ok) bot.error = 'Ответ не найден на сервере (возможно, сервер перезапускался)';
+          }
+        } else if (!finished) {
+          // Поток оборвался до [DONE]: ответ на сервере продолжается, его надо дождаться
+          g.interrupted = true;
+        }
       }
     } catch (err) {
-      if (err.name !== 'AbortError') bot.error = err.message || String(err);
+      if (err.name === 'AbortError') { /* остановка по кнопке — обработано ниже */ }
+      else if (isNetworkError(err)) g.interrupted = true;
+      else bot.error = err.message || String(err);
     } finally {
-      if (g.stopRequested) bot.notes.push('⏹ Остановлено');
-      else if (!bot.text && !bot.error) bot.text = '(пустой ответ)';
-      bot.pending = false;
-      if (gen === g) gen = null;
-      commit(id);
-      if (id === currentId) renderMessages({ scroll: false });
-      refreshUI();
-      els.input.focus();
+      if (g.authLost) {
+        if (gen === g) gen = null;
+        refreshUI();
+      } else {
+        if (g.stopRequested) {
+          bot.notes.push('⏹ Остановлено');
+          bot.pending = false;
+        } else if (g.interrupted) {
+          // Не помечаем готовым: сообщение остаётся «пишется», пока не получим ответ
+          bot.pending = true;
+          pushNote(bot, '📡 Соединение прервано, ждём ответ…');
+        } else {
+          if (!bot.text && !bot.error) bot.text = '(пустой ответ)';
+          bot.pending = false;
+        }
+        if (gen === g) gen = null;
+        commit(id);
+        if (id === currentId) renderMessages({ scroll: false });
+        refreshUI();
+        if (g.interrupted && !g.stopRequested) scheduleResume(5000);
+        else els.input.focus();
+      }
     }
+  }
+
+  let resumeTimer = null;
+  function scheduleResume(delay) {
+    clearTimeout(resumeTimer);
+    resumeTimer = setTimeout(() => resumePending(), delay);
   }
 
   // Подхватываем незавершённые ответы, например после перезагрузки страницы
   async function resumePending() {
+    clearTimeout(resumeTimer);
     for (const s of sessions) {
       if (gen) return;
       const idx = loadMsgs(s.id).findIndex((m) => m.pending);
@@ -1054,13 +1105,15 @@
     try {
       const r = await fetch('/auth/status', { credentials: 'same-origin', cache: 'no-store' });
       const j = await r.json();
-      if (j.required && !j.authenticated) { location.href = '/login'; return false; }
+      if (j.required && !j.authenticated) { location.href = '/login'; return null; }
       if (j.email) { const el = $('#userEmail'); if (el) el.textContent = j.email; }
-    } catch { /* сервер недоступен — остаёмся, статус покажет ping */ }
-    return true;
+      return { uid: j.uid || null };
+    } catch { /* сервер недоступен — работаем с локальными чатами, статус покажет ping */ }
+    return { uid: null };
   }
 
   function init() {
+    sessions = readJSON(KEY.sessions, []);
     bindSettings();
     applySettings();
     syncChips();
@@ -1080,5 +1133,11 @@
     resumePending();
   }
 
-  checkAuth().then((ok) => { if (ok) init(); });
+  checkAuth().then((st) => {
+    if (!st) return;
+    setScope(st.uid);
+    init();
+  });
+
+  window.addEventListener('online', () => resumePending());
 })();

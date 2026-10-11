@@ -406,3 +406,45 @@ AssertionError
 2026-10-11 22:07:42 INFO [routes.ai_assistant:112] Global MCP config path: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
 2026-10-11 22:07:42 INFO [GCN.mcp_client_manager:151] Загрузка MCP конфига из: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
 2026-10-11 22:07:42 INFO [routes.ai_assistant:116] ✅ Global MCP manager initialized successfully
+2026-10-11 22:25:55 WARNING [setup:43] === AI assistant started, log: C:\Users\PC\Documents\GitHub\MCPIISys\assistant.log ===
+2026-10-11 22:25:55 INFO [routes.ai_assistant:3544] Global merge task started
+2026-10-11 22:26:01 INFO [routes.ai_assistant:113] Global MCP config path: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-11 22:26:01 INFO [GCN.mcp_client_manager:151] Загрузка MCP конфига из: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-11 22:26:01 INFO [routes.ai_assistant:117] ✅ Global MCP manager initialized successfully
+2026-10-11 22:26:56 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-11 22:26:56 ERROR [routes.auth:219] Не удалось отправить код восстановления
+2026-10-11 22:28:01 WARNING [setup:43] === AI assistant started, log: C:\Users\PC\Documents\GitHub\MCPIISys\assistant.log ===
+2026-10-11 22:28:01 INFO [routes.ai_assistant:3544] Global merge task started
+2026-10-11 22:28:08 INFO [routes.ai_assistant:113] Global MCP config path: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-11 22:28:08 INFO [GCN.mcp_client_manager:151] Загрузка MCP конфига из: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-11 22:28:08 INFO [routes.ai_assistant:117] ✅ Global MCP manager initialized successfully
+2026-10-11 22:28:58 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-11 22:28:58 ERROR [routes.auth:219] Не удалось отправить код восстановления
+2026-10-11 22:30:10 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-11 22:30:29 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-11 22:30:56 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-11 22:30:56 ERROR [routes.auth:219] Не удалось отправить код восстановления
+2026-10-11 22:32:06 INFO [routes.ai_assistant:432] [CognitiveController] SelfModel инициализирован для u1
+2026-10-11 22:32:06 INFO [routes.ai_assistant:482] CognitiveController (GCN) initialized for u1
+2026-10-11 22:32:06 INFO [routes.ai_assistant:3245] Создан когнитивный ассистент для u1
+2026-10-11 22:32:41 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-11 22:33:00 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-11 22:36:08 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-11 22:36:48 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-11 22:36:48 ERROR [routes.auth:219] Не удалось отправить код восстановления
+2026-10-11 22:40:36 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-11 22:43:40 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-11 22:44:43 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-11 22:44:43 ERROR [routes.auth:219] Не удалось отправить код восстановления
+2026-10-11 22:47:08 INFO [routes.ai_assistant:867] Idle consolidation triggered
+2026-10-11 22:51:19 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-11 22:52:30 WARNING [setup:43] === AI assistant started, log: C:\Users\PC\Documents\GitHub\MCPIISys\assistant.log ===
+2026-10-11 22:52:31 INFO [routes.ai_assistant:3544] Global merge task started
+2026-10-11 22:52:39 INFO [routes.ai_assistant:113] Global MCP config path: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-11 22:52:39 INFO [GCN.mcp_client_manager:151] Загрузка MCP конфига из: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-11 22:52:39 INFO [routes.ai_assistant:117] ✅ Global MCP manager initialized successfully
+2026-10-11 23:20:39 INFO [routes.ai_assistant:432] [CognitiveController] SelfModel инициализирован для u1
+2026-10-11 23:20:39 INFO [routes.ai_assistant:482] CognitiveController (GCN) initialized for u1
+2026-10-11 23:20:39 INFO [routes.ai_assistant:3245] Создан когнитивный ассистент для u1
+2026-10-11 23:23:31 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-11 23:23:31 ERROR [routes.auth:219] Не удалось отправить код восстановления

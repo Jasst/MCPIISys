@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import logging
 import json
 import asyncio
+from collections import deque
 import time
 import re
 from typing import Dict, Optional, Any, List, Tuple
@@ -462,6 +463,9 @@ class CognitiveController:
         # досчитала, пока пользователь был не в чате (генерация идёт в фоновой
         # Task независимо от HTTP-соединения, но attach-буфер после завершения
         # уничтожается — поэтому фиксируем обмен отдельно).
+        # Журнал последних обменов: фронтенд находит ответ по тексту вопроса,
+        # даже если после него успели прийти другие сообщения
+        self._exchange_log = deque(maxlen=50)
         self._last_exchange: Optional[Dict] = None
 
         # ===== Автономный движок (GCN/autonomy.py): единая очередь фоновых
@@ -2576,6 +2580,16 @@ class CognitiveController:
         }
 
     # ===== ПОТОКОВЫЙ ОТВЕТ =====
+    @property
+    def _last_exchange(self):
+        return self.__dict__.get("_last_ex")
+
+    @_last_exchange.setter
+    def _last_exchange(self, value):
+        self.__dict__["_last_ex"] = value
+        if value:
+            self._exchange_log.append(value)
+
     async def stream_response(self, message: str, web_search: bool = False,
                               image_base64: str = None, image_mime: str = None,
                               reasoning: bool = False, char_by_char: bool = None):
@@ -3343,7 +3357,7 @@ async def attach_to_active_stream(address: str = Depends(require_auth)):
                              headers={"Cache-Control": "no-cache,no-store,must-revalidate", "X-Accel-Buffering": "no"})
 
 @router.get("/chat/last_response")
-async def get_last_response(address: str = Depends(require_auth)):
+async def get_last_response(user_text: Optional[str] = None, address: str = Depends(require_auth)):
     """
     Возвращает последний завершённый обмен (user -> assistant), чтобы после
     перезагрузки страницы фронтенд мог подтянуть ответ, который LLM досчитала,
@@ -3351,7 +3365,12 @@ async def get_last_response(address: str = Depends(require_auth)):
     уничтожается по завершении генерации).
     """
     assistant = await get_assistant(address)
-    exchange = getattr(assistant, "_last_exchange", None)
+    exchange = None
+    if user_text:
+        exchange = next((e for e in reversed(list(getattr(assistant, "_exchange_log", []))) 
+                         if e.get("user") == user_text), None)
+    if exchange is None:
+        exchange = getattr(assistant, "_last_exchange", None)
     if not exchange:
         # Fallback после перезапуска процесса: восстанавливаем из history.json
         user_msg = next((i.get("content") for i in reversed(assistant.history)
