@@ -79,15 +79,15 @@
       "predicate": "is_fact",
       "object": {
         "value": "true",
-        "access_count": 31,
-        "last_accessed": "2026-10-11T12:05:32.384266+00:00"
+        "access_count": 35,
+        "last_accessed": "2026-10-11T21:51:29.894336+00:00"
       },
       "author": "u1",
       "created": "2026-10-11T00:11:39.294086+00:00",
       "evidence": [],
       "confidence": 0.9,
-      "version": 32,
-      "content_hash": "dc845739406dfa17967bfdc0effdede44f9c80f1db1ed2fd07a0a6bffc2c0abc",
+      "version": 36,
+      "content_hash": "f1352f24eb36cdee68257c0e8a8e30bf0c9e4ca2460ecfd782bc44a47f5ab14d",
       "signature": null,
       "provenance": null,
       "scope": "shared",
@@ -100,15 +100,15 @@
       "predicate": "is_fact",
       "object": {
         "value": "true",
-        "access_count": 29,
-        "last_accessed": "2026-10-11T12:05:32.384445+00:00"
+        "access_count": 33,
+        "last_accessed": "2026-10-11T21:51:29.894235+00:00"
       },
       "author": "u1",
       "created": "2026-10-11T00:11:42.279493+00:00",
       "evidence": [],
       "confidence": 0.9,
-      "version": 30,
-      "content_hash": "51c8f364c641f786412ebbb2aa73af9d3d5b77cdf28620e80f4c5d012956d0bc",
+      "version": 34,
+      "content_hash": "943eea5e4a16e1fa156dc40c4f344c1f1178d9202a036c8018f0a23f558c0545",
       "signature": null,
       "provenance": null,
       "scope": "shared",
@@ -121,15 +121,15 @@
       "predicate": "is_fact",
       "object": {
         "value": "true",
-        "access_count": 29,
-        "last_accessed": "2026-10-11T12:05:32.384360+00:00"
+        "access_count": 33,
+        "last_accessed": "2026-10-11T21:51:29.894171+00:00"
       },
       "author": "u1",
       "created": "2026-10-11T00:11:42.440737+00:00",
       "evidence": [],
       "confidence": 0.9,
-      "version": 30,
-      "content_hash": "ccae9281f4321b3f1b69610555851b7a0063439cee319588b72d79ff43d6dd07",
+      "version": 34,
+      "content_hash": "1d374f6219e95836456ae6f9f042ee7988926ed2dffd743baa817fc80da3127d",
       "signature": null,
       "provenance": null,
       "scope": "shared",
@@ -2190,6 +2190,234 @@
         }
       },
       "signature": null
+    },
+    {
+      "id": "1aa2af76-1df4-4689-af47-4d9f98001c50",
+      "type": "UPDATE",
+      "timestamp": "2026-10-11T21:41:32.327583+00:00",
+      "actor": "u2",
+      "target_id": "fact_0cd2a2b0-e933-4b32-9260-6de966b8d27a",
+      "payload": {
+        "old_version": 31,
+        "new_version": 31,
+        "changes": {
+          "object": {
+            "value": "true",
+            "access_count": 32,
+            "last_accessed": "2026-10-11T21:47:46.192886+00:00"
+          }
+        }
+      },
+      "signature": null
+    },
+    {
+      "id": "ecaf30d7-6756-43d8-9cb6-da5c22c86c32",
+      "type": "UPDATE",
+      "timestamp": "2026-10-11T21:41:32.327684+00:00",
+      "actor": "u2",
+      "target_id": "fact_8252b3ba-0816-48b3-907d-b151449502f7",
+      "payload": {
+        "old_version": 31,
+        "new_version": 31,
+        "changes": {
+          "object": {
+            "value": "true",
+            "access_count": 32,
+            "last_accessed": "2026-10-11T21:47:46.193026+00:00"
+          }
+        }
+      },
+      "signature": null
+    },
+    {
+      "id": "7bb7dabd-392e-4fba-9fd9-022d5ece3b00",
+      "type": "UPDATE",
+      "timestamp": "2026-10-11T21:41:32.327776+00:00",
+      "actor": "u2",
+      "target_id": "fact_d9f58a20-566b-4f0f-b6a8-04564aaeb73a",
+      "payload": {
+        "old_version": 33,
+        "new_version": 33,
+        "changes": {
+          "object": {
+            "value": "true",
+            "access_count": 34,
+            "last_accessed": "2026-10-11T21:47:46.192630+00:00"
+          }
+        }
+      },
+      "signature": null
+    },
+    {
+      "id": "61d15ad3-eebb-42b7-893b-c77ab3c1c9dc",
+      "type": "UPDATE",
+      "timestamp": "2026-10-11T21:44:36.577811+00:00",
+      "actor": "u2",
+      "target_id": "fact_d9f58a20-566b-4f0f-b6a8-04564aaeb73a",
+      "payload": {
+        "old_version": 34,
+        "new_version": 34,
+        "changes": {
+          "object": {
+            "value": "true",
+            "access_count": 34,
+            "last_accessed": "2026-10-11T21:47:46.192630+00:00"
+          }
+        }
+      },
+      "signature": null
+    },
+    {
+      "id": "2cfa2c30-16c4-43a5-86ae-842b2db35c6f",
+      "type": "UPDATE",
+      "timestamp": "2026-10-11T21:44:36.577907+00:00",
+      "actor": "u2",
+      "target_id": "fact_8252b3ba-0816-48b3-907d-b151449502f7",
+      "payload": {
+        "old_version": 32,
+        "new_version": 32,
+        "changes": {
+          "object": {
+            "value": "true",
+            "access_count": 32,
+            "last_accessed": "2026-10-11T21:47:46.193026+00:00"
+          }
+        }
+      },
+      "signature": null
+    },
+    {
+      "id": "bc2f4964-505d-431d-a179-0160b67bfb2b",
+      "type": "UPDATE",
+      "timestamp": "2026-10-11T21:44:36.577982+00:00",
+      "actor": "u2",
+      "target_id": "fact_0cd2a2b0-e933-4b32-9260-6de966b8d27a",
+      "payload": {
+        "old_version": 32,
+        "new_version": 32,
+        "changes": {
+          "object": {
+            "value": "true",
+            "access_count": 32,
+            "last_accessed": "2026-10-11T21:47:46.192886+00:00"
+          }
+        }
+      },
+      "signature": null
+    },
+    {
+      "id": "36c04d15-0187-46ee-b1b7-858b95bdfc3d",
+      "type": "UPDATE",
+      "timestamp": "2026-10-11T21:47:46.192864+00:00",
+      "actor": "u2",
+      "target_id": "fact_d9f58a20-566b-4f0f-b6a8-04564aaeb73a",
+      "payload": {
+        "old_version": 35,
+        "new_version": 35,
+        "changes": {
+          "object": {
+            "value": "true",
+            "access_count": 34,
+            "last_accessed": "2026-10-11T21:47:46.192630+00:00"
+          }
+        }
+      },
+      "signature": null
+    },
+    {
+      "id": "1b67d7ae-6a89-4ae3-9b15-2ca978dc34f5",
+      "type": "UPDATE",
+      "timestamp": "2026-10-11T21:47:46.193009+00:00",
+      "actor": "u2",
+      "target_id": "fact_0cd2a2b0-e933-4b32-9260-6de966b8d27a",
+      "payload": {
+        "old_version": 33,
+        "new_version": 33,
+        "changes": {
+          "object": {
+            "value": "true",
+            "access_count": 32,
+            "last_accessed": "2026-10-11T21:47:46.192886+00:00"
+          }
+        }
+      },
+      "signature": null
+    },
+    {
+      "id": "8c0b3cc5-6bd4-4257-adde-9200835396c3",
+      "type": "UPDATE",
+      "timestamp": "2026-10-11T21:47:46.193124+00:00",
+      "actor": "u2",
+      "target_id": "fact_8252b3ba-0816-48b3-907d-b151449502f7",
+      "payload": {
+        "old_version": 33,
+        "new_version": 33,
+        "changes": {
+          "object": {
+            "value": "true",
+            "access_count": 32,
+            "last_accessed": "2026-10-11T21:47:46.193026+00:00"
+          }
+        }
+      },
+      "signature": null
+    },
+    {
+      "id": "3d6d003d-efaf-41d7-b281-d560071895e1",
+      "type": "UPDATE",
+      "timestamp": "2026-10-11T21:51:29.894224+00:00",
+      "actor": "u2",
+      "target_id": "fact_0cd2a2b0-e933-4b32-9260-6de966b8d27a",
+      "payload": {
+        "old_version": 34,
+        "new_version": 34,
+        "changes": {
+          "object": {
+            "value": "true",
+            "access_count": 33,
+            "last_accessed": "2026-10-11T21:51:29.894171+00:00"
+          }
+        }
+      },
+      "signature": null
+    },
+    {
+      "id": "62c8553f-01ad-4a88-a1a3-96911c09698c",
+      "type": "UPDATE",
+      "timestamp": "2026-10-11T21:51:29.894329+00:00",
+      "actor": "u2",
+      "target_id": "fact_8252b3ba-0816-48b3-907d-b151449502f7",
+      "payload": {
+        "old_version": 34,
+        "new_version": 34,
+        "changes": {
+          "object": {
+            "value": "true",
+            "access_count": 33,
+            "last_accessed": "2026-10-11T21:51:29.894235+00:00"
+          }
+        }
+      },
+      "signature": null
+    },
+    {
+      "id": "3e9a810b-cc05-4cd3-b572-bb4773294b5a",
+      "type": "UPDATE",
+      "timestamp": "2026-10-11T21:51:29.894403+00:00",
+      "actor": "u2",
+      "target_id": "fact_d9f58a20-566b-4f0f-b6a8-04564aaeb73a",
+      "payload": {
+        "old_version": 36,
+        "new_version": 36,
+        "changes": {
+          "object": {
+            "value": "true",
+            "access_count": 35,
+            "last_accessed": "2026-10-11T21:51:29.894336+00:00"
+          }
+        }
+      },
+      "signature": null
     }
   ],
   "graph_edges": {
@@ -2221,19 +2449,19 @@
   "graph_edge_meta": {
     "identity_94a39a4b0d93|continues_from|identity_d451e1950442": {
       "weight": 1.0,
-      "updated": "2026-10-11T19:28:06.757452+00:00"
+      "updated": "2026-10-11T21:50:35.171006+00:00"
     },
     "identity_ec7b9db7c0e2|continues_from|identity_94a39a4b0d93": {
       "weight": 1.0,
-      "updated": "2026-10-11T19:28:06.757493+00:00"
+      "updated": "2026-10-11T21:50:35.171026+00:00"
     },
     "identity_cdd2189fb033|continues_from|identity_ec7b9db7c0e2": {
       "weight": 1.0,
-      "updated": "2026-10-11T19:28:06.757512+00:00"
+      "updated": "2026-10-11T21:50:35.171034+00:00"
     },
     "identity_68fbb7f628b3|continues_from|identity_cdd2189fb033": {
       "weight": 1.0,
-      "updated": "2026-10-11T19:28:06.757526+00:00"
+      "updated": "2026-10-11T21:50:35.171040+00:00"
     }
   },
   "embeddings": {

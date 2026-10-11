@@ -34,6 +34,17 @@ SMTP_USER = os.getenv('SMTP_USER', '').strip()
 SMTP_PASSWORD = os.getenv('SMTP_PASSWORD', '')
 SMTP_FROM = os.getenv('SMTP_FROM', '').strip()
 SMTP_STARTTLS = os.getenv('SMTP_STARTTLS', '1') == '1'   # для порта 587
+
+# Способ отправки: smtp (по умолчанию), resend или brevo.
+# resend/brevo работают через HTTPS (порт 443), его обычно не блокируют,
+# в отличие от SMTP-портов 465/587.
+MAIL_PROVIDER = os.getenv('MAIL_PROVIDER', 'smtp').strip().lower()   # smtp | resend | brevo | unisender_go
+RESEND_API_KEY = os.getenv('RESEND_API_KEY', '').strip()
+BREVO_API_KEY = os.getenv('BREVO_API_KEY', '').strip()
+UNISENDER_GO_API_KEY = os.getenv('UNISENDER_GO_API_KEY', '').strip()
+# Адрес зависит от дата-центра, в котором зарегистрирован аккаунт: go1 или go2
+UNISENDER_GO_API_URL = os.getenv('UNISENDER_GO_API_URL',
+    'https://go1.unisender.ru/ru/transactional/api/v1').strip().rstrip('/')
 # порт 465 использует SSL с самого начала (SMTP_SSL), это определяется по порту
 
 # Если SECRET_KEY не задан, генерируем случайный на каждый запуск.

@@ -448,3 +448,81 @@ AssertionError
 2026-10-11 23:20:39 INFO [routes.ai_assistant:3245] Создан когнитивный ассистент для u1
 2026-10-11 23:23:31 ERROR [mailer:57] Ошибка отправки письма: timed out
 2026-10-11 23:23:31 ERROR [routes.auth:219] Не удалось отправить код восстановления
+2026-10-11 23:26:15 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-11 23:33:12 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-11 23:33:12 ERROR [routes.auth:219] Не удалось отправить код восстановления
+2026-10-11 23:34:06 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-11 23:35:12 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-11 23:35:12 ERROR [routes.auth:219] Не удалось отправить код восстановления
+2026-10-11 23:35:39 INFO [routes.ai_assistant:867] Idle consolidation triggered
+2026-10-11 23:36:41 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-11 23:37:01 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-11 23:37:38 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-11 23:56:07 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-11 23:56:25 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-12 00:03:16 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-12 00:04:42 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-12 00:04:42 ERROR [routes.auth:219] Не удалось отправить код восстановления
+2026-10-12 00:10:01 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-12 00:10:01 ERROR [routes.auth:219] Не удалось отправить код восстановления
+2026-10-12 00:10:36 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-12 00:10:59 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-12 00:10:59 ERROR [routes.auth:219] Не удалось отправить код восстановления
+2026-10-12 00:11:54 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-12 00:12:14 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-12 00:12:14 ERROR [routes.auth:219] Не удалось отправить код восстановления
+2026-10-12 00:13:24 ERROR [mailer:57] Ошибка отправки письма: timed out
+2026-10-12 00:24:10 WARNING [setup:43] === AI assistant started, log: C:\Users\PC\Documents\GitHub\MCPIISys\assistant.log ===
+2026-10-12 00:24:10 INFO [routes.ai_assistant:3544] Global merge task started
+2026-10-12 00:24:17 INFO [routes.ai_assistant:113] Global MCP config path: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-12 00:24:17 INFO [GCN.mcp_client_manager:151] Загрузка MCP конфига из: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-12 00:24:17 INFO [routes.ai_assistant:117] ✅ Global MCP manager initialized successfully
+2026-10-12 00:24:44 ERROR [mailer:70] Resend: ошибка 403: b'{"message":"The blockchat.ru domain is not verified. Please, add and verify your domain on https://resend.com/domains","name":"validation_error","statusCode":403}'
+2026-10-12 00:34:08 INFO [routes.ai_assistant:432] [CognitiveController] SelfModel инициализирован для u2
+2026-10-12 00:34:08 INFO [routes.ai_assistant:482] CognitiveController (GCN) initialized for u2
+2026-10-12 00:34:08 INFO [routes.ai_assistant:3245] Создан когнитивный ассистент для u2
+2026-10-12 00:40:43 WARNING [setup:43] === AI assistant started, log: C:\Users\PC\Documents\GitHub\MCPIISys\assistant.log ===
+2026-10-12 00:40:44 INFO [routes.ai_assistant:3544] Global merge task started
+2026-10-12 00:40:50 INFO [routes.ai_assistant:113] Global MCP config path: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-12 00:40:50 INFO [GCN.mcp_client_manager:151] Загрузка MCP конфига из: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-12 00:40:50 INFO [routes.ai_assistant:117] ✅ Global MCP manager initialized successfully
+2026-10-12 00:40:53 INFO [routes.ai_assistant:432] [CognitiveController] SelfModel инициализирован для u2
+2026-10-12 00:40:53 INFO [routes.ai_assistant:482] CognitiveController (GCN) initialized for u2
+2026-10-12 00:40:53 INFO [routes.ai_assistant:3245] Создан когнитивный ассистент для u2
+2026-10-12 00:41:27 INFO [routes.ai_assistant:3279] Запрос от u2, web=False, reasoning=True
+2026-10-12 00:43:33 INFO [routes.ai_assistant:2829] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-12 00:43:33 INFO [routes.ai_assistant:2855] ToolRouter decisions for 'привет': used_native=False, trace_len=0
+2026-10-12 00:43:33 INFO [routes.ai_assistant:2857] Tool trace: []
+2026-10-12 00:44:02 INFO [routes.ai_assistant:3105] [timing] gen=u2:17917 prepare=4.44s route+tools=121.08s ttft=17.36s stream=11.67s finalize=0.00s total=154.55s
+2026-10-12 00:44:32 INFO [routes.ai_assistant:3279] Запрос от u2, web=True, reasoning=True
+2026-10-12 00:44:59 INFO [routes.ai_assistant:533] [ForcedSearch] поиск выполнен с 1-й попытки: 'Напиши короткий пост для канала о запуске нового проекта.'
+2026-10-12 00:46:45 INFO [routes.ai_assistant:2829] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-12 00:46:45 INFO [routes.ai_assistant:2855] ToolRouter decisions for 'Напиши короткий пост для канала о запуске нового п': used_native=False, trace_len=0
+2026-10-12 00:46:45 INFO [routes.ai_assistant:2857] Tool trace: []
+2026-10-12 00:47:52 INFO [routes.ai_assistant:1080] Extracted 1 sanitized facts from web search -> scopes: ['private']
+2026-10-12 00:49:12 INFO [routes.ai_assistant:3105] [timing] gen=u2:17917 prepare=26.77s route+tools=106.53s ttft=84.82s stream=61.81s finalize=0.01s total=279.94s
+2026-10-12 00:50:30 WARNING [setup:43] === AI assistant started, log: C:\Users\PC\Documents\GitHub\MCPIISys\assistant.log ===
+2026-10-12 00:50:30 INFO [routes.ai_assistant:3544] Global merge task started
+2026-10-12 00:50:36 INFO [routes.ai_assistant:113] Global MCP config path: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-12 00:50:36 INFO [GCN.mcp_client_manager:151] Загрузка MCP конфига из: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-12 00:50:36 INFO [routes.ai_assistant:117] ✅ Global MCP manager initialized successfully
+2026-10-12 00:50:46 INFO [routes.ai_assistant:432] [CognitiveController] SelfModel инициализирован для u2
+2026-10-12 00:50:46 INFO [routes.ai_assistant:482] CognitiveController (GCN) initialized for u2
+2026-10-12 00:50:46 INFO [routes.ai_assistant:3245] Создан когнитивный ассистент для u2
+2026-10-12 00:51:29 INFO [routes.ai_assistant:3279] Запрос от u2, web=False, reasoning=False
+2026-10-12 00:51:30 INFO [routes.ai_assistant:2829] [router] route=fast p=0.02 (rule=0.02 learned=-) hard=True explore=False why=greeting/ack
+2026-10-12 00:51:30 INFO [routes.ai_assistant:2855] ToolRouter decisions for 'привет': used_native=False, trace_len=0
+2026-10-12 00:51:30 INFO [routes.ai_assistant:2857] Tool trace: []
+2026-10-12 00:52:13 INFO [routes.ai_assistant:3105] [timing] gen=u2:17917 prepare=0.60s route+tools=0.00s ttft=19.43s stream=23.50s finalize=0.01s total=43.54s
+2026-10-12 00:55:44 WARNING [setup:43] === AI assistant started, log: C:\Users\PC\Documents\GitHub\MCPIISys\assistant.log ===
+2026-10-12 00:55:44 INFO [routes.ai_assistant:3544] Global merge task started
+2026-10-12 00:55:51 INFO [routes.ai_assistant:113] Global MCP config path: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-12 00:55:51 INFO [GCN.mcp_client_manager:151] Загрузка MCP конфига из: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-12 00:55:51 INFO [routes.ai_assistant:117] ✅ Global MCP manager initialized successfully
+2026-10-12 00:56:09 INFO [routes.ai_assistant:432] [CognitiveController] SelfModel инициализирован для u2
+2026-10-12 00:56:09 INFO [routes.ai_assistant:482] CognitiveController (GCN) initialized for u2
+2026-10-12 00:56:09 INFO [routes.ai_assistant:3245] Создан когнитивный ассистент для u2
+2026-10-12 00:57:32 INFO [routes.ai_assistant:3279] Запрос от u2, web=False, reasoning=False
+2026-10-12 00:57:33 INFO [routes.ai_assistant:2829] [router] route=fast p=0.10 (rule=0.10 learned=0.31) hard=False explore=False why=short
+2026-10-12 00:57:33 INFO [routes.ai_assistant:2855] ToolRouter decisions for 'Что ты помнишь ?': used_native=False, trace_len=0
+2026-10-12 00:57:33 INFO [routes.ai_assistant:2857] Tool trace: []

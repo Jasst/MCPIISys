@@ -116,6 +116,7 @@
   let currentId = null;           // открытый в интерфейсе чат
   let gen = null;                 // активная генерация: {sessionId, idx, controller, stopRequested}
   let attachment = null;          // {url, base64, mime, name}
+  let currentScopeUid = null;     // null — локальный режим без входа, синхронизация выключена
   let notifyTimer = null;
   let chips = { web: !!settings.webDefault, reason: !!settings.reasoningDefault };
   const persistTimers = {};
@@ -159,7 +160,7 @@
 
   // ------------------------------------------------------------------ хранилище
 
-  const saveSessions = () => writeJSON(KEY.sessions, sessions);
+  const saveSessions = () => { writeJSON(KEY.sessions, sessions); scheduleSync(); };
   const currentSession = () => sessions.find((s) => s.id === currentId) || null;
   const findSession = (id) => sessions.find((s) => s.id === id) || null;
 
@@ -170,6 +171,7 @@
 
   function persist(id) {
     const ok = writeJSON(KEY.msgs + id, (cache[id] || []).slice(-MAX_STORED));
+    scheduleSync();
     if (!ok) toast('Не удалось сохранить: переполнено локальное хранилище');
   }
   // Частые обновления во время генерации сохраняем не чаще раза в PERSIST_DELAY_MS
@@ -1112,6 +1114,74 @@
     return { uid: null };
   }
 
+  // ------------------------------------------------------------------ синхронизация с сервером
+  // Чаты одного аккаунта видны на всех устройствах. Локальное хранилище — кеш.
+  const SYNC = { base: 0, ready: false, timer: null, busy: false };
+
+  function scheduleSync() {
+    if (!SYNC.ready || !currentScopeUid) return;
+    clearTimeout(SYNC.timer);
+    SYNC.timer = setTimeout(pushState, 1500);
+  }
+
+  // Слияние: серверные версии приоритетнее для тех же id, локальные чаты, которых
+  // на сервере нет, сохраняются и уйдут на сервер при следующей отправке.
+  function mergeState(st) {
+    const byId = new Map();
+    for (const s of st.sessions || []) byId.set(s.id, s);
+    for (const s of sessions) if (!byId.has(s.id)) byId.set(s.id, s);
+    sessions = [...byId.values()];
+    saveSessions();
+    for (const s of sessions) {
+      const server = st.messages && st.messages[s.id];
+      if (server) writeJSON(KEY.msgs + s.id, server);
+    }
+    cache = {};
+  }
+
+  async function pullState() {
+    if (!currentScopeUid || gen) return false;   // во время генерации не трогаем локальные сообщения
+    try {
+      const r = await fetch('/ai/ui-state', { credentials: 'same-origin', cache: 'no-store' });
+      if (!r.ok) return false;
+      const st = await r.json();
+      if (st.updated) mergeState(st);
+      SYNC.base = st.updated || 0;
+      return true;
+    } catch { return false; }
+  }
+
+  async function pushState() {
+    if (!SYNC.ready || SYNC.busy || !currentScopeUid) return;
+    SYNC.busy = true;
+    try {
+      const messages = {};
+      for (const s of sessions) messages[s.id] = loadMsgs(s.id);
+      const r = await fetch('/ai/ui-state', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ base: SYNC.base, sessions, messages }),
+      });
+      if (r.status === 409) {
+        // Другое устройство уже сохранило свою версию: берём её и не перезаписываем
+        await pullState();
+        scheduleSync();
+      } else if (r.ok) {
+        SYNC.base = (await r.json()).updated;
+      } else if (r.status === 401) {
+        location.href = '/login';
+      }
+    } catch { /* нет связи — повторим при следующем изменении или при возврате сети */ }
+    finally { SYNC.busy = false; }
+  }
+
+  async function bootstrap() {
+    SYNC.ready = await pullState();
+    init();
+    if (SYNC.ready && (SYNC.base === 0 || sessions.length)) scheduleSync();
+  }
+
   function init() {
     sessions = readJSON(KEY.sessions, []);
     bindSettings();
@@ -1136,8 +1206,13 @@
   checkAuth().then((st) => {
     if (!st) return;
     setScope(st.uid);
-    init();
+    currentScopeUid = st.uid;
+    bootstrap();
   });
 
-  window.addEventListener('online', () => resumePending());
+  window.addEventListener('online', async () => {
+    if (!SYNC.ready && currentScopeUid) SYNC.ready = await pullState();
+    scheduleSync();
+    resumePending();
+  });
 })();

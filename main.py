@@ -34,6 +34,7 @@ from routes.ai_assistant import (
     shutdown_all,
 )
 from routes.auth import router as auth_router
+from routes.ui_state import router as ui_state_router
 from mcp_server_blockcoin import mcp
 
 setup_logging()
@@ -120,6 +121,7 @@ app.mount('/mcp', mcp.streamable_http_app())
 
 app.include_router(ai_router)
 app.include_router(auth_router)
+app.include_router(ui_state_router)
 
 
 def _page(name: str):
@@ -140,6 +142,27 @@ async def auth_page(request: Request):
     if current_user_id(request) is not None:
         return RedirectResponse(url='/', status_code=302)
     return _page('auth.html')
+
+
+@app.get('/manifest.json', include_in_schema=False)
+async def manifest():
+    return FileResponse(os.path.join(STATIC_FOLDER, 'manifest.json'),
+                        media_type='application/manifest+json',
+                        headers={'Cache-Control': 'no-cache, must-revalidate'})
+
+
+@app.get('/sw.js', include_in_schema=False)
+async def service_worker():
+    # service worker должен отдаваться из корня, чтобы его область действия была весь сайт
+    return FileResponse(os.path.join(STATIC_FOLDER, 'sw.js'),
+                        media_type='application/javascript',
+                        headers={'Cache-Control': 'no-cache, no-store, must-revalidate',
+                                 'Service-Worker-Allowed': '/'})
+
+
+@app.get('/offline', include_in_schema=False)
+async def offline_page():
+    return _page('offline.html')
 
 
 @app.get('/health', tags=['health'])

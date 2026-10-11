@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0d0e11">
+  <link rel="stylesheet" href="/static/style.css">
+  <title>Нет связи — AI-ассистент</title>
+  <style>
+    body { background: #0d0e11; color: #eceef1; font: 15px/1.5 system-ui, sans-serif; margin: 0; }
+    .wrap { min-height: 100vh; display: grid; place-items: center; padding: 24px; box-sizing: border-box; text-align: center; }
+    h1 { font-size: 20px; margin: 0 0 8px; }
+    p { color: #8a9099; margin: 0 0 20px; }
+    button { padding: 10px 18px; border: none; border-radius: 10px; background: #4c7ce0; color: #fff; font: inherit; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div>
+      <h1>Нет связи с сервером</h1>
+      <p>Ассистент работает, когда есть интернет. Ответ, который уже писался, появится, как только связь вернётся.</p>
+      <button onclick="location.reload()">Попробовать снова</button>
+    </div>
+  </div>
+</body>
+</html>
