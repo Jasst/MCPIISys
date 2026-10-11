@@ -1,0 +1,38 @@
+# SearXNG для поиска из приложения. Поднимается в Docker (см. searxng/docker-compose.yml).
+# Документация: https://docs.searxng.org/admin/settings/settings.html
+
+use_default_settings: true
+
+server:
+  # Ключ обязателен. Его подставляет docker-compose из переменной SEARXNG_SECRET.
+  secret_key: "${SEARXNG_SECRET}"
+  limiter: false          # приложение ходит только с localhost, лимитер не нужен
+  image_proxy: false
+
+search:
+  # Приложение запрашивает результаты в json. Без этого формата SearXNG отвечает 403.
+  formats:
+    - html
+    - json
+  safe_search: 0
+  default_lang: "ru"
+
+engines:
+  # Движки, которые работают для русскоязычного поиска (включаем явно)
+  - name: yandex
+    engine: yandex
+    shortcut: ya
+    disabled: false
+  - name: wikipedia
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  # Официальный API Яндекса (платный, нужен ключ и folder id из Yandex Cloud).
+  # Раскомментируй, если скрейпинг yandex начнёт упираться в капчу:
+  # - name: yandex api
+  #   engine: yandex_api
+  #   shortcut: yda
+  #   categories: [general, web]
+  #   inactive: false
+  #   api_key: "ключ_из_yandex_cloud"
+  #   yandex_folder_id: "folder_id"

@@ -16,7 +16,7 @@ web_search.py v3 — улучшенный веб-поиск для BlockcoinWitr
      улучшен (BM25-стиль TF-сатурация + бонус за точную фразу).
 
   2. Порядок бэкендов настраивается (env SEARCH_BACKENDS_ORDER,
-     по умолчанию "ddg,searxng,brave"). Если поднят self-hosted SearXNG,
+     по умолчанию "searxng,brave,ddg"). Если поднят self-hosted SearXNG,
      имеет смысл поставить его первым — DDG часто отдаёт капчу, и логично
      сначала пробовать собственный стабильный бэкенд.
 
@@ -133,7 +133,7 @@ SIMHASH_DEDUP_BITS = int(os.getenv("SIMHASH_DEDUP_BITS", "8"))
 # v3: порядок бэкендов. Если SearXNG поднят — разумно поставить его первым:
 # SEARCH_BACKENDS_ORDER="searxng,ddg,brave"
 SEARCH_BACKENDS_ORDER = [
-    s.strip() for s in os.getenv("SEARCH_BACKENDS_ORDER", "ddg,searxng,brave").split(",")
+    s.strip() for s in os.getenv("SEARCH_BACKENDS_ORDER", "searxng,brave,ddg").split(",")
     if s.strip()
 ]
 # v3: общий бюджет времени на deep_search (секунды)
@@ -951,7 +951,8 @@ async def search_searxng(query: str, max_results: int = 5) -> List[Dict]:
             timeout=aiohttp.ClientTimeout(total=15),
         ) as resp:
             if resp.status != 200:
-                logger.debug(f"SearXNG status {resp.status}")
+                # 403 чаще всего значит: в settings.yml SearXNG не включён формат json
+                logger.warning(f"SearXNG вернул статус {resp.status} (проверьте search.formats: [html, json])")
                 return []
             data = await resp.json(content_type=None)
             out = []
@@ -967,7 +968,7 @@ async def search_searxng(query: str, max_results: int = 5) -> List[Dict]:
                 })
             return out[:max_results]
     except Exception as e:
-        logger.debug(f"SearXNG error: {e}")
+        logger.warning(f"SearXNG недоступен: {e}")
         return []
 
 
