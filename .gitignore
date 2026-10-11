@@ -1,1 +1,13 @@
 .env
+/ai_memory_v3
+/__pycache__
+/__pycache__
+/__pycache__
+/ai_memory_v3
+*.zip
+/routes/__pycache__
+/routes/__pycache__
+*.db
+*.log
+*.pid
+/ai_memory_v3
