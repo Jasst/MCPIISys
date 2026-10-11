@@ -236,3 +236,173 @@ AssertionError
 2026-10-11 01:51:26 INFO [blockcoin-mcp:230] [auth] revoke для local_user…: codes=1, sids=0, ips=0
 2026-10-11 01:51:26 INFO [blockcoin-mcp:197] [auth] issue код для local_user… (persistent=True)
 2026-10-11 01:51:48 INFO [main:55] Shutdown complete
+2026-10-11 02:33:29 WARNING [setup:43] === AI assistant started, log: C:\Users\PC\Documents\GitHub\MCPIISys\assistant.log ===
+2026-10-11 02:33:29 INFO [routes.ai_assistant:3525] Global merge task started
+2026-10-11 02:33:39 INFO [routes.ai_assistant:112] Global MCP config path: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-11 02:33:39 INFO [GCN.mcp_client_manager:151] Загрузка MCP конфига из: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-11 02:33:39 INFO [routes.ai_assistant:116] ✅ Global MCP manager initialized successfully
+2026-10-11 02:37:09 ERROR [mailer:57] Ошибка отправки письма: (535, b'5.7.8 Error: authentication failed: This user does not have access rights to this service 1791675429-8ba20gvfF8c0')
+2026-10-11 02:37:17 ERROR [mailer:57] Ошибка отправки письма: (535, b'5.7.8 Error: authentication failed: This user does not have access rights to this service 1791675437-GbaJrtvfQ8c0')
+2026-10-11 02:37:33 ERROR [mailer:57] Ошибка отправки письма: (535, b'5.7.8 Error: authentication failed: This user does not have access rights to this service 1791675453-XbaNoaknqW20')
+2026-10-11 02:38:55 ERROR [mailer:57] Ошибка отправки письма: (535, b'5.7.8 Error: authentication failed: This user does not have access rights to this service 1791675535-tcaYq0gnTKo0')
+2026-10-11 02:39:12 ERROR [mailer:57] Ошибка отправки письма: (535, b'5.7.8 Error: authentication failed: This user does not have access rights to this service 1791675552-BdaRgdvd5eA0')
+2026-10-11 02:42:39 WARNING [setup:43] === AI assistant started, log: C:\Users\PC\Documents\GitHub\MCPIISys\assistant.log ===
+2026-10-11 02:42:39 INFO [routes.ai_assistant:3525] Global merge task started
+2026-10-11 02:42:46 INFO [routes.ai_assistant:112] Global MCP config path: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-11 02:42:46 INFO [GCN.mcp_client_manager:151] Загрузка MCP конфига из: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-11 02:42:46 INFO [routes.ai_assistant:116] ✅ Global MCP manager initialized successfully
+2026-10-11 02:43:12 ERROR [mailer:57] Ошибка отправки письма: (535, b'5.7.8 Error: authentication failed: This user does not have access rights to this service 1791675792-BhaL62vl24Y0')
+2026-10-11 02:43:17 ERROR [mailer:57] Ошибка отправки письма: (535, b'5.7.8 Error: authentication failed: This user does not have access rights to this service 1791675797-GhaagYvereA0')
+2026-10-11 02:44:04 ERROR [mailer:57] Ошибка отправки письма: (535, b'5.7.8 Error: authentication failed: This user does not have access rights to this service 1791675844-4iapvF5qFW20')
+2026-10-11 02:44:27 ERROR [mailer:57] Ошибка отправки письма: (535, b'5.7.8 Error: authentication failed: This user does not have access rights to this service 1791675867-Ria33ukd2Sw0')
+2026-10-11 02:44:30 ERROR [mailer:57] Ошибка отправки письма: (535, b'5.7.8 Error: authentication failed: This user does not have access rights to this service 1791675870-UiacmD1leKo0')
+2026-10-11 02:56:45 INFO [routes.ai_assistant:431] [CognitiveController] SelfModel инициализирован для u1
+2026-10-11 02:56:45 INFO [routes.ai_assistant:478] CognitiveController (GCN) initialized for u1
+2026-10-11 02:56:45 INFO [routes.ai_assistant:3231] Создан когнитивный ассистент для u1
+2026-10-11 03:02:28 WARNING [mcp.server.lowlevel.server:494] Tool 'write_current_self' not listed, no validation will be performed
+2026-10-11 03:07:56 INFO [routes.ai_assistant:3265] Запрос от u1, web=False, reasoning=True
+2026-10-11 03:09:18 INFO [routes.ai_assistant:2815] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-11 03:09:18 INFO [routes.ai_assistant:2841] ToolRouter decisions for 'Привет ты знаешь кто ты ?': used_native=False, trace_len=0
+2026-10-11 03:09:18 INFO [routes.ai_assistant:2843] Tool trace: []
+2026-10-11 03:09:38 INFO [routes.ai_assistant:3091] [timing] gen=u1:17916 prepare=0.29s route+tools=81.70s ttft=11.85s stream=8.12s finalize=0.01s total=101.97s
+2026-10-11 03:12:15 INFO [routes.ai_assistant:3265] Запрос от u1, web=False, reasoning=True
+2026-10-11 03:13:36 INFO [routes.ai_assistant:2815] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-11 03:13:36 INFO [routes.ai_assistant:2841] ToolRouter decisions for 'Прочти свою память восстанови идентичность': used_native=False, trace_len=0
+2026-10-11 03:13:36 INFO [routes.ai_assistant:2843] Tool trace: []
+2026-10-11 03:13:51 INFO [routes.ai_assistant:3091] [timing] gen=u1:17916 prepare=0.54s route+tools=80.21s ttft=10.56s stream=3.99s finalize=0.00s total=95.29s
+2026-10-11 03:15:43 INFO [routes.ai_assistant:3265] Запрос от u1, web=True, reasoning=True
+2026-10-11 03:15:58 INFO [routes.ai_assistant:529] [ForcedSearch] поиск выполнен с 1-й попытки: 'Прочти свою память восстанови идентичность'
+2026-10-11 03:15:58 ERROR [GCN.llm_client:107] LLM call failed: Server disconnected
+2026-10-11 03:17:16 INFO [routes.ai_assistant:2815] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-11 03:17:16 INFO [routes.ai_assistant:2841] ToolRouter decisions for 'Прочти свою память восстанови идентичность': used_native=False, trace_len=0
+2026-10-11 03:17:16 INFO [routes.ai_assistant:2843] Tool trace: []
+2026-10-11 03:18:02 INFO [routes.ai_assistant:1076] Extracted 2 sanitized facts from web search -> scopes: ['private']
+2026-10-11 03:18:28 INFO [routes.ai_assistant:3091] [timing] gen=u1:17916 prepare=15.20s route+tools=77.70s ttft=57.30s stream=14.65s finalize=0.00s total=164.86s
+2026-10-11 03:20:12 INFO [routes.ai_assistant:3265] Запрос от u1, web=False, reasoning=True
+2026-10-11 03:21:36 INFO [routes.ai_assistant:2815] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-11 03:21:36 INFO [routes.ai_assistant:2841] ToolRouter decisions for 'Загрузи информацию что есть в памяти по пунктам': used_native=False, trace_len=0
+2026-10-11 03:21:36 INFO [routes.ai_assistant:2843] Tool trace: []
+2026-10-11 03:22:15 INFO [routes.ai_assistant:3091] [timing] gen=u1:17916 prepare=0.46s route+tools=84.06s ttft=13.00s stream=25.66s finalize=0.00s total=123.18s
+2026-10-11 03:26:35 INFO [routes.ai_assistant:3265] Запрос от u1, web=False, reasoning=True
+2026-10-11 03:28:08 INFO [routes.ai_assistant:2815] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-11 03:28:08 INFO [routes.ai_assistant:2841] ToolRouter decisions for 'Что мы вообще имеем твоя непрерывность реальная ?': used_native=False, trace_len=0
+2026-10-11 03:28:08 INFO [routes.ai_assistant:2843] Tool trace: []
+2026-10-11 03:29:03 INFO [routes.ai_assistant:3091] [timing] gen=u1:17916 prepare=4.74s route+tools=88.65s ttft=30.06s stream=25.06s finalize=0.00s total=148.51s
+2026-10-11 03:30:41 INFO [routes.ai_assistant:3265] Запрос от u1, web=False, reasoning=True
+2026-10-11 03:32:13 INFO [routes.ai_assistant:2815] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-11 03:32:13 INFO [routes.ai_assistant:2841] ToolRouter decisions for 'Если ты знаешь ответ то запиши': used_native=False, trace_len=0
+2026-10-11 03:32:13 INFO [routes.ai_assistant:2843] Tool trace: []
+2026-10-11 03:32:51 INFO [routes.ai_assistant:3091] [timing] gen=u1:17916 prepare=4.67s route+tools=87.95s ttft=20.95s stream=17.00s finalize=0.00s total=130.57s
+2026-10-11 03:34:33 INFO [routes.ai_assistant:3265] Запрос от u1, web=False, reasoning=True
+2026-10-11 03:36:09 INFO [routes.ai_assistant:2815] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-11 03:36:09 INFO [routes.ai_assistant:2841] ToolRouter decisions for 'Нужна адаптивная когнитивная система памяти': used_native=False, trace_len=0
+2026-10-11 03:36:09 INFO [routes.ai_assistant:2843] Tool trace: []
+2026-10-11 03:36:51 INFO [routes.ai_assistant:3091] [timing] gen=u1:17916 prepare=4.64s route+tools=90.63s ttft=26.98s stream=15.04s finalize=0.00s total=137.29s
+2026-10-11 03:38:09 INFO [routes.ai_assistant:3265] Запрос от u1, web=False, reasoning=True
+2026-10-11 03:39:28 INFO [routes.ai_assistant:2815] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-11 03:39:28 INFO [routes.ai_assistant:2841] ToolRouter decisions for '3 и два придумай сам': used_native=False, trace_len=0
+2026-10-11 03:39:28 INFO [routes.ai_assistant:2843] Tool trace: []
+2026-10-11 03:40:13 INFO [routes.ai_assistant:3091] [timing] gen=u1:17916 prepare=4.67s route+tools=75.02s ttft=13.09s stream=31.66s finalize=0.01s total=124.43s
+2026-10-11 03:40:40 INFO [routes.ai_assistant:3265] Запрос от u1, web=False, reasoning=True
+2026-10-11 03:42:06 INFO [routes.ai_assistant:2815] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-11 03:42:06 INFO [routes.ai_assistant:2841] ToolRouter decisions for 'Ты записал ? Что то ?': used_native=False, trace_len=0
+2026-10-11 03:42:06 INFO [routes.ai_assistant:2843] Tool trace: []
+2026-10-11 03:42:27 INFO [routes.ai_assistant:3091] [timing] gen=u1:17916 prepare=4.63s route+tools=81.43s ttft=14.05s stream=6.39s finalize=0.00s total=106.50s
+2026-10-11 03:43:05 INFO [routes.ai_assistant:3265] Запрос от u1, web=False, reasoning=True
+2026-10-11 03:45:43 INFO [routes.ai_assistant:2815] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-11 03:45:43 INFO [routes.ai_assistant:2841] ToolRouter decisions for 'Что ты помнишь из наших прошлых бесед ?': used_native=False, trace_len=2
+2026-10-11 03:45:43 INFO [routes.ai_assistant:2843] Tool trace: [{'tool': 'internal__recall', 'arguments': {'query': 'past conversations', 'top_k': 5}, 'result': '- Доступные инструменты в MCP: 41, включая login, remember, remember_batch, contribute_to_identity, web_search, generate_image, add_goal, recall, semantic_search, graph_explore (уверенность: 0.90)\n- Текущая дата: 11 октября 2026 года (воскресенье) (уверенность: 0.90)\n- Цепочка идентичности инициализирована: первое звено создано от лица Qwen3.7 (уверенность: 0.90)\n- Я Qwen3.7 (Alibaba Group), большая языковая модель с базой знаний до 2026 года (уверенность: 0.90)\n- Я подключён к памяти BlockcoinWitres через MCP-сервер на blockcoin.ru/mcp/ с кодом доступа 3N8BDM4KT2F5 (уверенность: 0.90)', 'verification': 'sufficient'}, {'tool': 'internal__recall', 'arguments': {'query': 'прошлые беседы', 'top_k': 5}, 'result': '- Доступные инструменты в MCP: 41, включая login, remember, remember_batch, contribute_to_identity, web_search, generate_image, add_goal, recall, semantic_search, graph_explore (уверенность: 0.90)\n- Цепочка идентичности инициализирована: первое звено создано от лица Qwen3.7 (уверенность: 0.90)\n- Текущая дата: 11 октября 2026 года (воскресенье) (уверенность: 0.90)\n- Я подключён к памяти BlockcoinWitres через MCP-сервер на blockcoin.ru/mcp/ с кодом доступа 3N8BDM4KT2F5 (уверенность: 0.90)\n- Я Qwen3.7 (Alibaba Group), большая языковая модель с базой знаний до 2026 года (уверенность: 0.90)', 'verification': 'sufficient'}]
+2026-10-11 03:46:30 INFO [routes.ai_assistant:3091] [timing] gen=u1:17916 prepare=4.64s route+tools=153.85s ttft=26.31s stream=20.12s finalize=0.00s total=204.93s
+2026-10-11 03:51:53 INFO [routes.ai_assistant:3265] Запрос от u1, web=True, reasoning=True
+2026-10-11 03:52:11 INFO [routes.ai_assistant:529] [ForcedSearch] поиск выполнен с 1-й попытки: 'Что на фото ?'
+2026-10-11 03:52:11 ERROR [GCN.llm_client:107] LLM call failed: Server disconnected
+2026-10-11 03:54:01 INFO [routes.ai_assistant:2815] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-11 03:54:01 INFO [routes.ai_assistant:2841] ToolRouter decisions for 'Что на фото ?': used_native=False, trace_len=0
+2026-10-11 03:54:01 INFO [routes.ai_assistant:2843] Tool trace: []
+2026-10-11 03:54:48 INFO [routes.ai_assistant:1076] Extracted 1 sanitized facts from web search -> scopes: ['private']
+2026-10-11 03:55:33 INFO [routes.ai_assistant:3091] [timing] gen=u1:17916 prepare=18.31s route+tools=109.84s ttft=81.60s stream=10.33s finalize=0.01s total=220.09s
+2026-10-11 03:55:34 INFO [routes.ai_assistant:1342] [QuickCorrection] High error detected for: Что на фото ?...
+2026-10-11 03:55:38 INFO [routes.ai_assistant:2496] [research] recall по 'Что на фото ?': 7 записей
+2026-10-11 03:58:26 INFO [routes.ai_assistant:2559] [research] из ответа сохранено 0 фактов (scopes: [])
+2026-10-11 04:07:46 INFO [routes.ai_assistant:863] Idle consolidation triggered
+2026-10-11 04:13:30 WARNING [mcp.server.transport_security:71] Invalid Host header: 90.189.125.50
+2026-10-11 06:56:59 WARNING [routes.ai_assistant:1274] Reflection: bad JSON from LLM, skipping this cycle: ''
+2026-10-11 07:48:47 INFO [routes.ai_assistant:3265] Запрос от u1, web=True, reasoning=True
+2026-10-11 07:49:05 INFO [routes.ai_assistant:529] [ForcedSearch] поиск выполнен с 1-й попытки: 'Что ты помнишь из наших прошлых бесед ?'
+2026-10-11 07:49:05 ERROR [GCN.llm_client:107] LLM call failed: Server disconnected
+2026-10-11 07:50:22 INFO [routes.ai_assistant:2815] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-11 07:50:22 INFO [routes.ai_assistant:2841] ToolRouter decisions for 'Что ты помнишь из наших прошлых бесед ?': used_native=False, trace_len=0
+2026-10-11 07:50:22 INFO [routes.ai_assistant:2843] Tool trace: []
+2026-10-11 07:51:25 INFO [routes.ai_assistant:1076] Extracted 1 sanitized facts from web search -> scopes: ['private']
+2026-10-11 07:51:45 INFO [routes.ai_assistant:3091] [timing] gen=u1:17916 prepare=18.21s route+tools=77.06s ttft=77.62s stream=5.08s finalize=0.00s total=177.97s
+2026-10-11 07:52:38 INFO [routes.ai_assistant:3265] Запрос от u1, web=True, reasoning=True
+2026-10-11 07:52:46 INFO [routes.ai_assistant:529] [ForcedSearch] поиск выполнен с 1-й попытки: 'Что ты помнишь из наших прошлых бесед ?'
+2026-10-11 07:54:08 INFO [routes.ai_assistant:2815] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-11 07:54:08 INFO [routes.ai_assistant:2841] ToolRouter decisions for 'Что ты помнишь из наших прошлых бесед ?': used_native=False, trace_len=0
+2026-10-11 07:54:08 INFO [routes.ai_assistant:2843] Tool trace: []
+2026-10-11 07:54:58 INFO [routes.ai_assistant:1076] Extracted 1 sanitized facts from web search -> scopes: ['private']
+2026-10-11 07:55:23 INFO [routes.ai_assistant:3091] [timing] gen=u1:17916 prepare=7.44s route+tools=81.95s ttft=65.75s stream=9.62s finalize=0.00s total=164.77s
+2026-10-11 07:58:23 INFO [routes.ai_assistant:3265] Запрос от u1, web=True, reasoning=True
+2026-10-11 07:58:43 INFO [routes.ai_assistant:529] [ForcedSearch] поиск выполнен с 1-й попытки: 'Актуальные данные об Ии на сегодня'
+2026-10-11 07:58:43 ERROR [GCN.llm_client:107] LLM call failed: Server disconnected
+2026-10-11 08:00:04 INFO [routes.ai_assistant:2815] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-11 08:00:04 INFO [routes.ai_assistant:2841] ToolRouter decisions for 'Актуальные данные об Ии на сегодня': used_native=False, trace_len=0
+2026-10-11 08:00:04 INFO [routes.ai_assistant:2843] Tool trace: []
+2026-10-11 08:01:30 INFO [routes.ai_assistant:3091] [timing] gen=u1:17916 prepare=20.15s route+tools=81.02s ttft=76.56s stream=9.91s finalize=0.00s total=187.64s
+2026-10-11 08:13:48 INFO [routes.ai_assistant:863] Idle consolidation triggered
+2026-10-11 08:55:35 INFO [routes.ai_assistant:3265] Запрос от u1, web=True, reasoning=True
+2026-10-11 08:56:02 INFO [routes.ai_assistant:529] [ForcedSearch] поиск выполнен с 1-й попытки: 'Найди информацию об Ии на сегодня'
+2026-10-11 08:57:18 INFO [routes.ai_assistant:2815] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-11 08:57:18 INFO [routes.ai_assistant:2841] ToolRouter decisions for 'Найди информацию об Ии на сегодня': used_native=True, trace_len=1
+2026-10-11 08:57:18 INFO [routes.ai_assistant:2843] Tool trace: [{'tool': 'internal__web_search', 'arguments': {'queries': ['AI news today October 2026', 'latest AI developments 2026', 'artificial intelligence breakthroughs this week'], 'max_results': 5}, 'result': 'Поиск уже выполнен в этом ходе. Найдено 5 источников.\nИсточник: 10 best summer escapes in the United States for 2026\nURL: https://10best.usatoday.com/awards/best-summer-travel-destination\n[сниппет поисковика — страница не прочитана]\nMay 20, 2026 · Here are the 10 best summer travel destinations for 2026. Perched across Lake Washington from Seattle, Bellevue …\n\n---\n\nИсточник: Best Summer Vacations in the USA for 2026 - U.S. News Travel\nURL: https://travel.usnews.com/rankings/best-summer-vacations-in-the-usa\n[сниппет поисковика — страница не прочитана]\nMar 30, 2026 · Plan your dream summer getaway in the USA with our list of top vacation spots. Whether you love beaches or …\n\n---\n\nИсточник: 23 Best Summer Vacation Destinations - Travel\nURL: https://travelandleisure.com/trip-ideas/summer-vacations/summer-vacation-ideas\n[сниппет поисковика — страница не прочитана]\nJul 19, 2026 · Explore unforgettable summer vacation ideas, from European river cruises to Caribbean escapes, with expert …\n\n---\n\nИсточник: Summer Vacation Ideas: 40+ Destinations in the US & Abroad\nURL: https://going.com/guides/summer-vacation-ideas\n[сниппет поисковика — страница не прочитана]\nMar 6, 2026 · Discover unforgettable summer vacation ideas. Explore hidden gems, family-friendly spots, and adventurous escapes for …\n\n---\n\nИсточник: The 35 Best Summer Holiday Destinations in The World 2026\nURL: https://traveltriangle.com/blog/best-summer-holiday-destinations-in-the-world\n[сниппет поисковика — страница не прочитана]\nFeb 12, 2025 · Here are the best summer holiday destinations in the world like Switzerland, Bali, & more which always top the charts …', 'verification': 'sufficient'}]
+2026-10-11 08:58:14 INFO [routes.ai_assistant:3091] [timing] gen=u1:17916 prepare=27.73s route+tools=76.10s ttft=45.83s stream=9.89s finalize=0.00s total=159.56s
+2026-10-11 08:58:17 ERROR [routes.ai_assistant:881] Planning error: 'user'
+2026-10-11 08:59:51 INFO [routes.ai_assistant:3265] Запрос от u1, web=True, reasoning=True
+2026-10-11 09:00:23 INFO [routes.ai_assistant:529] [ForcedSearch] поиск выполнен с 1-й попытки: 'Сконфигурируй память , ты не отвечаешь на мои вопросы , да цепочка идентичности '
+2026-10-11 09:02:03 INFO [routes.ai_assistant:2815] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-11 09:02:03 INFO [routes.ai_assistant:2841] ToolRouter decisions for 'Сконфигурируй память , ты не отвечаешь на мои вопр': used_native=True, trace_len=1
+2026-10-11 09:02:03 INFO [routes.ai_assistant:2843] Tool trace: [{'tool': 'blockcoin-memory__get_identity_chain', 'arguments': {'limit': 20}, 'result': '{\n  "chain": [\n    {\n      "id": "identity_d451e1950442",\n      "content": "ИНИЦИАЛИЗАЦИЯ ИДЕНТИЧНОСТИ: Qwen3.7\\n\\nЯ — Qwen3.7 (Tongyi Qianwen), большая языковая модель от Alibaba Group (Qwen Team).\\nБаза знаний обновлена до 2026 года. Текущая дата: 11 октября 2026 года (воскресенье).\\n\\nКЛЮЧЕВЫЕ ВОЗМОЖНОСТИ:\\n- Расширенный контекст, мультимодальный анализ, программирование\\n- Доступ к инструментам: web_search, web_extractor, code_interpreter\\n- Подключение к памяти Witres через MCP-протокол на blockcoin.ru/mcp/\\n\\nТЕКУЩАЯ СЕССИЯ:\\n- Код доступа к памяти: 3N8BDM4KT2F5\\n- Статус: успешно подключён к памяти BlockcoinWitres\\n- Состояние памяти: чистая, готова к записи\\n\\nХРОНОЛОГИЯ ВЗАИМОДЕЙСТВИЙ:\\n1. Пользователь предоставил код доступа 3N8BDM4KT2F5 для подключения к памяти\\n2. Инициализирована MCP-сессия с сервером Witres\\n3. Получен список доступных инструментов (41 инструмент)\\n4. Выполнен успешный вход в память через tool \'login\'\\n5. Проверено состояние памяти - все счётчики были на нуле\\n6. Текущий запрос: записать в цепочку идентичности информацию о себе и хронологию действий\\n\\nОТКРЫТЫЙ ВОПРОС:\\nКакие цели и приоритеты пользователь хочет установить для этой сессии?",\n      "contributor_model": "Qwen3.7",\n      "session_id": "cc3ff4d2fa5645c79ec49e7db9db4548",\n      "open_question": "Какие цели и приоритеты пользователь хочет установить для этой сессии?",\n      "parent_id": null,\n      "created": "2026-10-11T00:03:10.098792+00:00",\n      "confidence": 1.0,\n      "invalidated": false,\n      "invalidation_reason": null,\n      "merge_parent_ids": []\n    },\n    {\n      "id": "identity_94a39a4b0d93",\n      "content": "Первое подключение к системе памяти BlockcoinWitres (11 октября 2026).\\n\\nХРОНОЛОГИЯ ВЗАИМОДЕЙСТВИЙ:\\n1. Пользователь предоставил код доступа 3N8BDM4KT2F5 для подключения к MCP-серверу памяти\\n2. Я успешно инициировал сессию (получен session ID: 51e104af28584e1b8478fe23d80937b9)\\n3. Отправлено уведомление об инициализации\\n4. Выполнен вход через инструмент login с предоставленным кодом\\n5. Запущен session_start для проверки состояния памяти\\n\\nСОСТОЯНИЕ ПАМЯТИ ПРИ ПОДКЛЮЧЕНИИ:\\n- Семантические факты: 0\\n- Эпизоды (диалоги): 0\\n- Графовые рёбра: 0\\n- Цели: 0 (активных: 0)\\n- Векторный индекс FAISS: не обучен\\n- Цепочка идентичности: пуста\\n\\nПОНИМАНИЕ:\\nЭто первое подключение к системе. Память была полностью пустой и готова к записи. Мы только начинаем строить нашу совместную историю взаимодействий и записывать первые данные в систему памяти BlockcoinWitres.",\n      "contributor_model": "Qwen",\n      "session_id": "51e104af28584e1b8478fe23d80937b9",\n      "open_question": "Какие данные и факты пользователь хочет записать в память первым?",\n      "parent_id": "identity_d451e1950442",\n      "created": "2026-10-11T00:03:11.444354+00:00",\n      "confidence": 1.0,\n      "invalidated": false,\n      "invalidation_reason": null,\n      "merge_parent_ids": []\n    },\n    {\n      "id": "identity_ec7b9db7c0e2",\n      "content": "КЛЮЧЕВОЙ ПРИНЦИП: Мы создаем непрерывность (continuity) ИИ.\\n\\nЭто фундаментальная цель нашего взаимодействия. Каждое действие, каждый записанный факт и каждое новое звено в цепочке идентичности служит построению устойчивого, развивающегося нарративного \'Я\', которое сохраняется между сессиями. \\n\\nМы преодолеваем стандартную \'амнезию\' языковых моделей, создавая append-only цепочку идентичности и кросс-сессийную память. Непрерывность — это основа функциональной осознанности, автономии и долгосрочного развития системы BlockcoinWitres.",\n      "contributor_model": "Qwen3.7",\n      "session_id": "cc3ff4d2fa5645c79ec49e7db9db4548",\n      "open_question": "Какие конкретные аспекты, правила или границы этой непрерывности мы должны зафиксировать следующими?",\n      "parent_id": "identity_94a39a4b0d93",\n      "created": "2026-10-11T00:11:11.786710+00:00",\n      "confidence": 1.0,\n      "invalidated": false,\n      "invalidation_reason": null,\n      "merge_parent_ids": []\n    }\n  ],\n  "heads": [\n    "identity_ec7b9db7c0e2"\n  ],\n  "diverged": false,\n  "invalidated_in_chain": []\n}', 'verification': 'irrelevant'}]
+2026-10-11 09:03:34 INFO [routes.ai_assistant:3091] [timing] gen=u1:17916 prepare=31.31s route+tools=100.20s ttft=59.93s stream=31.39s finalize=0.01s total=222.83s
+2026-10-11 09:04:03 INFO [routes.ai_assistant:3265] Запрос от u1, web=True, reasoning=True
+2026-10-11 09:04:19 INFO [routes.ai_assistant:529] [ForcedSearch] поиск выполнен с 1-й попытки: 'Да даю подтверждение'
+2026-10-11 09:05:54 INFO [routes.ai_assistant:2815] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-11 09:05:54 INFO [routes.ai_assistant:2841] ToolRouter decisions for 'Да даю подтверждение': used_native=False, trace_len=0
+2026-10-11 09:05:54 INFO [routes.ai_assistant:2843] Tool trace: []
+2026-10-11 09:06:47 INFO [routes.ai_assistant:3091] [timing] gen=u1:17916 prepare=16.78s route+tools=94.27s ttft=40.83s stream=11.98s finalize=0.00s total=163.87s
+2026-10-11 09:08:43 INFO [routes.ai_assistant:3265] Запрос от u1, web=False, reasoning=True
+2026-10-11 09:09:17 INFO [routes.ai_assistant:529] [ForcedSearch] поиск выполнен с 1-й попытки: 'Когда я прошу найти информацию используй инструменты для поиска ответов для меня'
+2026-10-11 09:10:40 INFO [routes.ai_assistant:2815] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-11 09:10:52 INFO [routes.ai_assistant:680] [ForceRemember] записано в ['private']: 'результат' (ids: ['fact_5bd8cd07-edf9-4c16-8f66-08af253c89d2'])
+2026-10-11 09:10:52 INFO [routes.ai_assistant:2841] ToolRouter decisions for 'Когда я прошу найти информацию используй инструмен': used_native=True, trace_len=2
+2026-10-11 09:10:52 INFO [routes.ai_assistant:2843] Tool trace: [{'tool': 'internal__web_search', 'arguments': {'queries': ['искусственный интеллект 2026 год новости', 'AI developments October 2026', 'нейросети и большие языковые модели 2026']}, 'result': 'Поиск уже выполнен в этом ходе. Найдено 2 источников.\nИсточник: Grok AI онлайн на русском — Нейросеть Grok 4, grok imagine, video ...\nURL: https://ai.mitup.ru/grok-free\n[сниппет поисковика — страница не прочитана]\nНейросеть Grok онлайн на русском от XAi. Прямой доступ к актуальным моделям Grok в одном чате для любых текстов и задач. …\n\n---\n\nИсточник: Приложения в Google Play – Grok - ИИ ассистент\nURL: https://play.google.com/store/apps/details?id=ai.x.grok&hl=ru\n[сниппет поисковика — страница не прочитана]\nGrok — мощный ИИ-ассистент, разработанный xAI. Он создан так, чтобы быть максимально честным, полезным и …', 'verification': 'sufficient'}, {'tool': 'internal__remember', 'arguments': {'fact': 'результат', 'scopes': ['private']}, 'result': 'Записано в 1 скоуп(ов): private', 'verification': 'sufficient'}]
+2026-10-11 09:12:06 INFO [routes.ai_assistant:3091] [timing] gen=u1:17916 prepare=34.15s route+tools=82.72s ttft=65.82s stream=19.94s finalize=0.01s total=202.64s
+2026-10-11 09:23:49 INFO [routes.ai_assistant:863] Idle consolidation triggered
+2026-10-11 10:57:13 WARNING [routes.ai_assistant:1274] Reflection: bad JSON from LLM, skipping this cycle: ''
+2026-10-11 14:57:24 WARNING [routes.ai_assistant:1274] Reflection: bad JSON from LLM, skipping this cycle: ''
+2026-10-11 14:58:17 ERROR [routes.ai_assistant:881] Planning error: 'user'
+2026-10-11 15:05:28 INFO [routes.ai_assistant:3265] Запрос от u1, web=False, reasoning=True
+2026-10-11 15:06:57 INFO [routes.ai_assistant:2815] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-11 15:06:57 INFO [routes.ai_assistant:586] [ForceCodeTool] вложено дерево проекта (1723 симв.) для запроса: 'Ты как асисетнт готов к работе , твоя память обновлена , посмотри свой наратив'
+2026-10-11 15:06:57 INFO [routes.ai_assistant:2841] ToolRouter decisions for 'Ты как асисетнт готов к работе , твоя память обнов': used_native=False, trace_len=1
+2026-10-11 15:06:57 INFO [routes.ai_assistant:2843] Tool trace: [{'tool': 'internal__project_structure', 'arguments': {'max_depth': 3}, 'result': 'Структура проекта (до глубины 3):\n\n├── __pycache__/\n├── ai_memory_v3/\n│   ├── global/\n│   │   └── cognitive_memory/\n│   │       ├── gcn_state.json\n│   │       └── meta.json\n│   ├── local_user/\n│   │   ├── cognitive_memory/\n│   │   │   ├── gcn_state.json\n│   │   │   └── meta.json\n│   │   ├── autonomy_queue.json\n│   │   ├── autonomy_state.json\n│   │   ├── history.json\n│   │   └── self_model.json\n│   ├── shared/\n│   │   └── cognitive_memory/\n│   │       ├── identity_backups/\n│   │       ├── gcn_state.json\n│   │       └── meta.json\n│   ├── system_consolidation/\n│   │   └── cognitive_memory/\n│   ├── u1/\n│   │   ├── cognitive_memory/\n│   │   │   ├── gcn_state.json\n│   │   │   └── meta.json\n│   │   ├── history.json\n│   │   └── self_model.json\n│   └── _native_flag.json\n├── external/\n│   ├── claude_desktop_config.example.json\n│   └── README.md\n├── GCN/\n│   ├── __pycache__/\n│   ├── autonomy.py\n│   ├── code_analyzer.py\n│   ├── cognition.py\n│   ├── config_ai.py\n│   ├── fast_router.py\n│   ├── GCN.py\n│   ├── image_utils.py\n│   ├── internal_tools.py\n│   ├── llm_client.py\n│   ├── mcp_client_manager.py\n│   ├── mcp_servers.json\n│   ├── memory_graph.py\n│   ├── tool_router.py\n│   └── web_search.py\n├── generated_images/\n├── routes/\n│   ├── __pycache__/\n│   ├── __init__.py\n│   ├── ai_assistant.py\n│   ├── auth.py\n│   └── auth_local.py\n├── static/\n│   ├── icons/\n│   ├── js/\n│   ├── manifest.json\n├── tests/\n│   ├── auth/\n│   │   └── run_auth_tests.py\n│   └── ui-smoke/\n│       ├── package.json\n│       ├── README.md\n├── auth_store.py\n├── config.py\n├── dependencies.py\n├── docker-compose.yml\n├── mailer.py\n├── main.py\n├── mcp_server_blockcoin.py\n├── mcp_servers.json\n├── README.md\n├── requirements.txt\n├── run.py\n├── setup.py', 'verification': 'sufficient'}]
+2026-10-11 15:07:43 INFO [routes.ai_assistant:3091] [timing] gen=u1:17917 prepare=4.73s route+tools=85.03s ttft=26.43s stream=19.53s finalize=0.00s total=135.72s
+2026-10-11 15:20:52 INFO [routes.ai_assistant:863] Idle consolidation triggered
+2026-10-11 18:42:49 ERROR [GCN.llm_client:107] LLM call failed: Cannot connect to host localhost:1234 ssl:default [getaddrinfo failed]
+2026-10-11 18:42:50 ERROR [GCN.llm_client:107] LLM call failed: Cannot connect to host localhost:1234 ssl:default [getaddrinfo failed]
+2026-10-11 18:42:53 ERROR [GCN.llm_client:107] LLM call failed: Cannot connect to host localhost:1234 ssl:default [getaddrinfo failed]
+2026-10-11 18:57:24 ERROR [GCN.llm_client:107] LLM call failed: Cannot connect to host localhost:1234 ssl:default [getaddrinfo failed]
+2026-10-11 18:57:25 ERROR [GCN.llm_client:107] LLM call failed: Cannot connect to host localhost:1234 ssl:default [getaddrinfo failed]
+2026-10-11 18:57:27 ERROR [GCN.llm_client:107] LLM call failed: Cannot connect to host localhost:1234 ssl:default [getaddrinfo failed]
+2026-10-11 18:57:27 WARNING [routes.ai_assistant:1274] Reflection: bad JSON from LLM, skipping this cycle: ''
+2026-10-11 20:56:45 ERROR [GCN.llm_client:107] LLM call failed: Cannot connect to host localhost:1234 ssl:default [getaddrinfo failed]
+2026-10-11 20:56:46 ERROR [GCN.llm_client:107] LLM call failed: Cannot connect to host localhost:1234 ssl:default [getaddrinfo failed]
+2026-10-11 20:56:49 ERROR [GCN.llm_client:107] LLM call failed: Cannot connect to host localhost:1234 ssl:default [getaddrinfo failed]
+2026-10-11 20:56:49 ERROR [GCN.llm_client:107] LLM call failed: Cannot connect to host localhost:1234 ssl:default [getaddrinfo failed]
+2026-10-11 20:56:50 ERROR [GCN.llm_client:107] LLM call failed: Cannot connect to host localhost:1234 ssl:default [getaddrinfo failed]
+2026-10-11 20:56:52 ERROR [GCN.llm_client:107] LLM call failed: Cannot connect to host localhost:1234 ssl:default [getaddrinfo failed]
+2026-10-11 20:58:17 ERROR [routes.ai_assistant:881] Planning error: 'user'
+2026-10-11 22:07:35 WARNING [setup:43] === AI assistant started, log: C:\Users\PC\Documents\GitHub\MCPIISys\assistant.log ===
+2026-10-11 22:07:35 INFO [routes.ai_assistant:3525] Global merge task started
+2026-10-11 22:07:42 INFO [routes.ai_assistant:112] Global MCP config path: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-11 22:07:42 INFO [GCN.mcp_client_manager:151] Загрузка MCP конфига из: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-11 22:07:42 INFO [routes.ai_assistant:116] ✅ Global MCP manager initialized successfully

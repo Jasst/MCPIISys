@@ -11,3 +11,8 @@
 *.log
 *.pid
 /ai_memory_v3
+/__pycache__
+__pycache__/dependencies.cpython-313.pyc
+__pycache__/main.cpython-313.pyc
+assistant.log
+routes/__pycache__/ai_assistant.cpython-313.pyc
