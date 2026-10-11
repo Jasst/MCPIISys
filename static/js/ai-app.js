@@ -1074,7 +1074,16 @@
 
   els.openSettings.addEventListener('click', () => els.dialog.showModal());
 
-  $('#logoutBtn').addEventListener('click', async () => {
+  // Выход только после подтверждения: случайное нажатие не разлогинивает
+  const logoutDialog = $('#logoutDialog');
+  $('#logoutBtn').addEventListener('click', () => {
+    $('#logoutText').textContent = gen
+      ? 'Ответ ещё пишется. Он продолжится на сервере и появится при следующем входе. Чаты сохранятся.'
+      : 'Чаты сохранятся: они привязаны к аккаунту и откроются при следующем входе.';
+    logoutDialog.showModal();
+  });
+  $('#logoutConfirm').addEventListener('click', async (e) => {
+    e.preventDefault();
     try { await fetch('/auth/logout', { method: 'POST', credentials: 'same-origin' }); } catch { /* сеть */ }
     location.href = '/login';
   });

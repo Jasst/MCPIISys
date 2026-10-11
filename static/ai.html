@@ -173,6 +173,24 @@
   </form>
 </dialog>
 
+<!-- Подтверждение выхода: случайное нажатие не выкидывает из аккаунта -->
+<dialog id="logoutDialog" class="dialog">
+  <form method="dialog" class="dialog-body">
+    <header>
+      <h2>Выйти из аккаунта?</h2>
+    </header>
+    <section>
+      <p class="lead" id="logoutText" style="margin:0;color:var(--text-secondary);font-size:14px;line-height:1.5">
+        Чаты сохранятся: они привязаны к аккаунту и откроются при следующем входе.
+      </p>
+    </section>
+    <footer style="gap:8px">
+      <button class="btn-ghost" value="cancel" autofocus>Отмена</button>
+      <button class="btn-danger" value="confirm" id="logoutConfirm">Выйти</button>
+    </footer>
+  </form>
+</dialog>
+
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script>
   // Регистрация service worker: нужна, чтобы браузер разрешил установку
