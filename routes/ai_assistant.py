@@ -790,6 +790,10 @@ class CognitiveController:
             except Exception:
                 pass
 
+    async def _save_history_async(self):
+        # Запись истории в поток, чтобы не блокировать event loop (стриминг, другие запросы).
+        await asyncio.to_thread(self._save_history)
+
     def _save_history(self):
         history_path = self.user_dir / "history.json"
         # Атомарная запись: сначала во временный файл в той же директории
@@ -1648,7 +1652,7 @@ class CognitiveController:
         # чтобы будущий контекст модели не содержал служебный reasoning.
         if stored_response:
             self.history.append({"role": "assistant", "content": stored_response})
-        self._save_history()
+        await self._save_history_async()
 
         if response:
             uncertainty = self._last_prepare_meta.get("uncertainty", 0.5)
@@ -1866,7 +1870,7 @@ class CognitiveController:
                     )
                     self.history.append({"role": "user", "content": message})
                     self.history.append({"role": "assistant", "content": response})
-                    self._save_history()
+                    await self._save_history_async()
                     return response, {"metacognition_blocked": True, "confidence": conf}
             except Exception as e:
                 logger.warning(f"[Metacognition] ошибка проверки: {e}")
@@ -1899,7 +1903,7 @@ class CognitiveController:
                 if clarification:
                     self.history.append({"role": "user", "content": message})
                     self.history.append({"role": "assistant", "content": clarification})
-                    self._save_history()
+                    await self._save_history_async()
                     return clarification, {"clarification": True, "uncertainty": post_react_uncertainty}
 
         # Обработка результатов поиска (из внутреннего web_search)
@@ -2828,7 +2832,7 @@ class CognitiveController:
                                 await push("data: [DONE]\n\n")
                                 self.history.append({"role": "user", "content": message})
                                 self.history.append({"role": "assistant", "content": clarification})
-                                self._save_history()
+                                await self._save_history_async()
                                 return
 
                     logger.info(
@@ -3042,7 +3046,7 @@ class CognitiveController:
                     try:
                         self.history.append({"role": "user", "content": message})
                         self.history.append({"role": "assistant", "content": full_response})
-                        self._save_history()
+                        await self._save_history_async()
                         self._last_exchange = {
                             "user": message, "assistant": full_response,
                             "timestamp": time.time(),
@@ -3055,7 +3059,7 @@ class CognitiveController:
                 try:
                     self.history.append({"role": "user", "content": message})
                     self.history.append({"role": "assistant", "content": full_response})
-                    self._save_history()
+                    await self._save_history_async()
                     self._last_exchange = {
                         "user": message, "assistant": full_response,
                         "timestamp": time.time(),
