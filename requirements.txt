@@ -1,25 +1,28 @@
-# Веб-сервер
+# ---------- Веб-сервер и вход ----------
 fastapi
-uvicorn[standard]
+uvicorn[standard]          # httptools и uvloop на Linux/macOS; на Windows работает без них
 starlette
 pydantic
 python-dotenv
+itsdangerous               # подписи сессий (SessionMiddleware), без него вход не работает
 
-# HTTP и парсинг
-aiohttp
-beautifulsoup4
-ddgs
-pypdf
-pdfplumber
+# ---------- HTTP, поиск и документы ----------
+aiohttp                    # LLM, EasyDiffusion, веб-поиск
+ddgs                       # поиск в интернете
+beautifulsoup4             # разбор страниц
+pypdf                      # чтение PDF
+pdfplumber                 # таблицы и текст из PDF
 
-# Память и поиск
+# ---------- Память и эмбеддинги ----------
 numpy
-faiss-cpu
-sentence-transformers
-torch
+faiss-cpu                  # векторный индекс памяти
+sentence-transformers      # эмбеддинги (multilingual-e5-large)
+torch                      # нужен sentence-transformers; на Windows ставьте CPU-сборку с сайта pytorch.org
 
-# MCP
-mcp
+# ---------- MCP ----------
+mcp>=1.8,<2
+# ---------- Опционально ----------
+# eth-account              # проверка Ethereum-подписей для входа через MCP (блокчейн-вход, не нужен для email)
 
-# Опционально: проверка Ethereum-подписей для входа через MCP
-# eth-account
+# ---------- Для тестов (tests/) ----------
+httpx                      # нужен fastapi.testclient в tests/auth и tests/sync

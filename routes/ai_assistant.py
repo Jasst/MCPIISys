@@ -920,7 +920,16 @@ class CognitiveController:
     async def _plan_goals(self):
         if len(self.history) < 5:
             return
-        history_summary = "\n".join([f"User: {item['user']}\nAI: {item['assistant']}" for item in self.history[-10:]])
+        # История хранится как {"role", "content"} (не как пары user/assistant):
+        # берём последние реплики обоих участников
+        recent = [m for m in self.history[-20:]
+                  if m.get("role") in ("user", "assistant") and m.get("content")]
+        history_summary = "\n".join(
+            f"{'User' if m['role'] == 'user' else 'AI'}: {str(m['content'])[:500]}"
+            for m in recent[-10:]
+        )
+        if not history_summary:
+            return
         prompt = (
             f"На основе диалогов с пользователем сформулируй 1-3 долгосрочные цели, которые могут быть полезны для ассистента. "
             "Цели должны быть конкретными, измеримыми и достижимыми. Например: 'Изучить тему X', 'Научиться делать Y', 'Собрать информацию о Z'. "

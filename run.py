@@ -79,6 +79,14 @@ if __name__ == '__main__':
     workers = 1
     reload = (mode == 'dev')
 
+    # httptools быстрее, но на Windows его иногда не удаётся установить.
+    # Если его нет, используем h11 — он входит в uvicorn и работает так же.
+    try:
+        import httptools  # noqa: F401
+        http_impl = 'httptools'
+    except ImportError:
+        http_impl = 'h11'
+
     # === ИЗМЕНЕНИЕ 3: uvloop только если реально установлен ===
     try:
         import uvloop  # noqa: F401
@@ -111,7 +119,7 @@ if __name__ == '__main__':
         workers=workers,
         reload=reload,
         loop=loop_impl,
-        http='httptools',
+        http=http_impl,
         access_log=not is_prod,
         server_header=False,
         date_header=False,

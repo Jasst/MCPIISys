@@ -401,6 +401,8 @@ _MCP_RESEARCH_TOOL_TIMEOUT_SECONDS = int(os.getenv("MCP_RESEARCH_TOOL_TIMEOUT_SE
 # Публичные домены, по которым внешний ИИ подключается к /mcp (через nginx).
 # Например: MCP_PUBLIC_HOSTS=ai.example.ru,www.ai.example.ru
 _MCP_PUBLIC_HOSTS = [h.strip() for h in os.getenv("MCP_PUBLIC_HOSTS", "").split(",") if h.strip()]
+# Для домена добавляем и вариант с www: браузеры и клиенты часто открывают сайт именно так
+_MCP_PUBLIC_HOSTS = sorted({x for h in _MCP_PUBLIC_HOSTS for x in (h, h if h.startswith("www.") else "www." + h)})
 _MCP_ALLOWED_HOSTS = ["127.0.0.1", "127.0.0.1:*", "localhost", "localhost:*"] + \
     [x for h in _MCP_PUBLIC_HOSTS for x in (h, h + ":*")]
 _MCP_ALLOWED_ORIGINS = ["http://localhost", "http://127.0.0.1"] + \
