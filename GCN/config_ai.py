@@ -26,8 +26,12 @@ DEFAULT_MAX_TOKENS = 4096         # увеличенная длина ответ
 # -------------------------------
 # Переключатели для принудительного формирования рассуждений моделью.
 # Вынесены в конфиг, чтобы можно было настраивать без правки кода.
-REASONING_FORCE_TAGS = True       # обязывать модель писать <thought>...</thought>
-REASONING_FEW_SHOT = True         # добавлять few-shot примеры формата
+# По умолчанию ВЫКЛЮЧЕНО: модель с нативным рассуждением (reasoning_content) и одновременно
+# обязанная писать <thought> в ответе делает работу дважды и зацикливается на проверке формата.
+# Включайте (=1) только для моделей БЕЗ нативного рассуждения.
+REASONING_FORCE_TAGS = os.getenv("REASONING_FORCE_TAGS", "0") == "1"
+# Few-shot примеры формата <thought> — тоже только вместе с REASONING_FORCE_TAGS
+REASONING_FEW_SHOT = os.getenv("REASONING_FEW_SHOT", "0") == "1"
 # stop-токены для reasoning-режима (пустой tuple = не использовать)
 REASONING_STOP_TOKENS: tuple = ()
 
@@ -188,6 +192,10 @@ def _int_env(name: str, default: int, lo: int = 1, hi: int = 10) -> int:
 MAX_TOOL_ITERATIONS = _int_env("MAX_TOOL_ITERATIONS", 3)
 # Максимум раундов, если модель попросила перепланирование после ошибки
 MAX_TOOL_ITERATIONS_DYNAMIC = _int_env("MAX_TOOL_ITERATIONS_DYNAMIC", 7)
+
+# Лимит рассуждений модели (в символах), прежде чем ответ начат. Если модель думает
+# дольше, запрос повторяется без рассуждений. 0 — лимит выключен.
+REASONING_MAX_CHARS = _int_env("REASONING_MAX_CHARS", 6000, lo=0, hi=200000)
 
 # ИСПРАВЛЕНИЕ (рассинхронизация клиентского и серверного таймаута MCP):
 # mcp_client_manager.MCPToolManager.call_tool раньше всегда ждал ровно

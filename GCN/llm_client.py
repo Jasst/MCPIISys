@@ -149,7 +149,7 @@ async def call_llm(
     return f"<thought>{reasoning}</thought>\n\n{content}"
 
 
-async def call_llm_stream(
+async def _call_llm_stream_once(
     messages: List[Dict[str, str]],
     temp: float = 0.7,
     max_tokens: int = DEFAULT_MAX_TOKENS,
@@ -246,3 +246,51 @@ async def call_llm_stream(
     except Exception as e:
         logger.error(f"Stream error: {e}")
         yield {"kind": "content", "text": f"[Ошибка: {e}]"}
+
+
+async def call_llm_stream(
+    messages: List[Dict[str, str]],
+    temp: float = 0.7,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    stop: Optional[List[str]] = None,
+    include_reasoning: bool = True,
+):
+    """Потоковый вызов с защитой от зацикливания рассуждений.
+
+    Если модель думает дольше REASONING_MAX_CHARS и ещё не начала ответ,
+    поток прерывается и запрос повторяется без режима рассуждений.
+    Так длинная самопроверка не съедает весь лимит токенов и не оставляет
+    пользователя без ответа.
+    """
+    from GCN.config_ai import REASONING_MAX_CHARS
+
+    if not include_reasoning or REASONING_MAX_CHARS <= 0:
+        async for ev in _call_llm_stream_once(messages, temp, max_tokens, stop, include_reasoning):
+            yield ev
+        return
+
+    reasoning_chars = 0
+    content_started = False
+    overflow = False
+    gen = _call_llm_stream_once(messages, temp, max_tokens, stop, True)
+    try:
+        async for ev in gen:
+            kind = ev.get("kind")
+            if kind == "reasoning":
+                reasoning_chars += len(ev.get("text", ""))
+                if reasoning_chars > REASONING_MAX_CHARS and not content_started:
+                    overflow = True
+                    break
+            elif kind == "content":
+                content_started = True
+            yield ev
+    finally:
+        await gen.aclose()
+
+    if overflow:
+        logger.warning(
+            f"Рассуждения превысили {REASONING_MAX_CHARS} символов без ответа — повтор без рассуждений"
+        )
+        async for ev in _call_llm_stream_once(messages, temp, max_tokens, stop, False):
+            yield ev
+

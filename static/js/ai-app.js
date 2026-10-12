@@ -44,7 +44,7 @@
     enterSends: true,
     autoScroll: true,
     webDefault: false,
-    reasoningDefault: true,
+    reasoningDefault: false,
     fontSize: 'm',
     compact: false,
     notify: true,
