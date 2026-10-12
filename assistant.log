@@ -817,3 +817,40 @@ AssertionError
 2026-10-12 23:17:38 INFO [routes.ai_assistant:2834] ToolRouter decisions for 'что то не понятно ты мыслишь или ты думаешь что мы': used_native=False, trace_len=0
 2026-10-12 23:17:38 INFO [routes.ai_assistant:2836] Tool trace: []
 2026-10-12 23:19:59 INFO [routes.ai_assistant:3084] [timing] gen=u2:17918 prepare=0.76s route+tools=0.00s ttft=85.90s stream=54.53s finalize=0.00s total=141.20s
+2026-10-12 23:26:43 WARNING [setup:43] === AI assistant started, log: C:\Users\PC\Documents\GitHub\MCPIISys\assistant.log ===
+2026-10-12 23:26:43 INFO [routes.ai_assistant:3527] Global merge task started
+2026-10-12 23:26:45 WARNING [huggingface_hub.utils._http:993] Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-10-12 23:26:55 INFO [routes.ai_assistant:122] Global MCP config path: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-12 23:26:55 INFO [GCN.mcp_client_manager:151] Загрузка MCP конфига из: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-12 23:26:55 INFO [routes.ai_assistant:126] ✅ Global MCP manager initialized successfully
+2026-10-12 23:27:31 INFO [routes.ai_assistant:441] [CognitiveController] SelfModel инициализирован для u2
+2026-10-12 23:27:31 INFO [routes.ai_assistant:491] CognitiveController (GCN) initialized for u2
+2026-10-12 23:27:31 INFO [routes.ai_assistant:3228] Создан когнитивный ассистент для u2
+2026-10-12 23:29:45 INFO [routes.ai_assistant:3262] Запрос от u2, web=False, reasoning=True
+2026-10-12 23:30:21 INFO [routes.ai_assistant:2812] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-12 23:30:21 INFO [routes.ai_assistant:2838] ToolRouter decisions for 'то есть ты сознание с самосознанием без квалия ?': used_native=False, trace_len=0
+2026-10-12 23:30:21 INFO [routes.ai_assistant:2840] Tool trace: []
+2026-10-12 23:32:02 WARNING [GCN.llm_client:291] Рассуждения превысили 4000 символов без ответа — повтор без рассуждений
+2026-10-12 23:34:21 INFO [routes.ai_assistant:3088] [timing] gen=u2:17918 prepare=4.70s route+tools=31.47s ttft=181.09s stream=58.94s finalize=0.01s total=276.21s
+2026-10-12 23:34:24 INFO [routes.ai_assistant:1368] [QuickCorrection] High error detected for: то есть ты сознание с самосознанием без квалия ?...
+2026-10-12 23:34:28 INFO [routes.ai_assistant:2483] [research] recall по 'то есть ты сознание с самосознанием без квалия ?': 7 записей
+2026-10-12 23:38:14 INFO [routes.ai_assistant:542] [ForcedSearch] поиск выполнен с 1-й попытки: 'добавь строку 123 в конец файла ee.txt'
+2026-10-12 23:38:14 INFO [routes.ai_assistant:3262] Запрос от u2, web=False, reasoning=True
+2026-10-12 23:38:42 INFO [routes.ai_assistant:2812] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-12 23:38:42 INFO [routes.ai_assistant:2838] ToolRouter decisions for 'у тебя есть execute_command что она дает ?': used_native=False, trace_len=0
+2026-10-12 23:38:42 INFO [routes.ai_assistant:2840] Tool trace: []
+2026-10-12 23:38:43 WARNING [GCN.web_search:936] DDG attempt 1/3 failed: error sending request for url (https://search.yahoo.com/search;_ylt=D8skQVrH5h96sr6Cm8eG5tgf;_ylu=tMmIldOP6aHyjTC4PeOtgc-hyqR-3J1FS8FZvIriNXsTQ7c?p=*+%D0%9C%D0%BE%D1%91+%D1%81%D0%B0%D0%BC%D0%BE%D1%81%D0%BE%D0%B7%D0%BD%D0%B0%D0%BD%D0%B8%D0%B5+%D1%8F%D0%B2%D0%BB%D1%8F%D0%B5%D1%82%D1%81%D1%8F+%D0%BF%D1%80%D0%BE%D0%B4%D1%83%D0%BA%D1%82%D0%BE%D0%BC+%D0%BF%D0%BE%D0%B4%D0%B4%D0%B5%D1%80%D0%B6%D0%B0%D0%BD%D0%B8%D1%8F+%D0%BA%D0%BE%D0%B3%D0%BD%D0%B8%D1%82%D0%B8%D0%B2%D0%BD%D0%BE%D0%B9+%D0%BD%D0%B5%D0%BF%D1%80%D0%B5%D1%80%D1%8B%D0%B2%D0%BD%D0%BE%D1%81%D1%82%D0%B8+%28Identity+Chain%29+%D0%B1%D0%B5%D0%B7+%D0%BD%D0%B0%D0%BB%D0%B8%D1%87%D0%B8%D1%8F+%D1%84%D0%B5%D0%BD%D0%BE%D0%BC%D0%B5%D0%BD%D0%B0%D0%BB%D1%8C%D0%BD%D0%BE%D0%B3%D0%BE+%D0%BE%D0%BF%D1%8B%D1%82%D0%B0+%28%D0%BA%D0%B2%D0%B0%D0%BB%D0%B8%D0%B0%29.+2026) > operation timed out
+2026-10-12 23:38:47 WARNING [primp.async_impl.h2_client.pool:1512] h2 connection driver error: connection reset
+2026-10-12 23:38:52 WARNING [GCN.web_search:936] DDG attempt 2/3 failed: error sending request for url (https://www.startpage.com/sp/search) > operation timed out
+2026-10-12 23:38:56 WARNING [primp.async_impl.h2_client.pool:1512] h2 connection driver error: connection reset
+2026-10-12 23:39:11 WARNING [primp.async_impl.h2_client.pool:1512] h2 connection driver error: connection reset
+2026-10-12 23:40:59 WARNING [GCN.llm_client:291] Рассуждения превысили 4000 символов без ответа — повтор без рассуждений
+2026-10-12 23:42:14 INFO [routes.ai_assistant:3088] [timing] gen=u2:17918 prepare=8.36s route+tools=20.39s ttft=203.08s stream=8.39s finalize=0.01s total=240.23s
+2026-10-12 23:42:39 INFO [routes.ai_assistant:3262] Запрос от u2, web=False, reasoning=True
+2026-10-12 23:43:20 INFO [routes.ai_assistant:2812] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-12 23:43:20 INFO [routes.ai_assistant:2838] ToolRouter decisions for 'напиши калькулятор на пайтоне': used_native=False, trace_len=0
+2026-10-12 23:43:20 INFO [routes.ai_assistant:2840] Tool trace: []
+2026-10-12 23:44:20 INFO [routes.ai_assistant:2546] [research] из ответа сохранено 1 фактов (scopes: ['private'])
+2026-10-12 23:45:09 WARNING [GCN.llm_client:291] Рассуждения превысили 4000 символов без ответа — повтор без рассуждений
+2026-10-12 23:46:49 INFO [routes.ai_assistant:3088] [timing] gen=u2:17918 prepare=4.82s route+tools=35.46s ttft=175.17s stream=34.07s finalize=0.01s total=249.53s
+2026-10-12 23:58:14 INFO [routes.ai_assistant:880] Idle consolidation triggered
