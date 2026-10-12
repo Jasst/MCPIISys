@@ -709,7 +709,7 @@ class CognitiveController:
             return
 
         for t in tools:
-            if t.name in self._LOCAL_TOOLS_SKIP:
+            if t.name in self._LOCAL_TOOLS_SKIP or t.name in CHAT_TOOL_EXCLUDE:
                 continue
 
             async def _handler(args, _n=t.name):
@@ -2206,7 +2206,7 @@ class CognitiveController:
         расхождения/путаницу, которых нет в MCP-режиме (там память приходит
         только одним способом — через явный вызов инструмента).
         """
-        recall_tools = {"internal__recall", "internal__semantic_search"}
+        recall_tools = {"internal__recall"}
         if any(t.get("tool") in recall_tools for t in tool_trace):
             return ""
         return memory_context

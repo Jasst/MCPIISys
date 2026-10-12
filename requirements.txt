@@ -20,7 +20,9 @@ sentence-transformers      # эмбеддинги (multilingual-e5-large)
 torch                      # нужен sentence-transformers; на Windows ставьте CPU-сборку с сайта pytorch.org
 
 # ---------- MCP ----------
+# Код написан под API 1.x (FastMCP, streamable_http_app). Версия 2.x переименовала API и не работает.
 mcp>=1.8,<2
+
 # ---------- Опционально ----------
 # eth-account              # проверка Ethereum-подписей для входа через MCP (блокчейн-вход, не нужен для email)
 

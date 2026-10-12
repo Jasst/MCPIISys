@@ -250,6 +250,27 @@ ALLOWED_CODE_EXTENSIONS = {".py", ".json", ".md", ".txt", ".yml", ".yaml"}  # б
 # (ai_memory_v3, ui_state, auth.db) и .env сюда не входят и недоступны моделям.
 CODE_ALLOWED_DIRS = {"GCN", "routes"}
 
+# Инструменты MCP-сервера, которые НЕ регистрируются в чате.
+# Причины: (а) есть внутренний инструмент с тем же действием (internal__*),
+# (б) нужны только внешнему ИИ через /mcp, (в) перекрываются другими инструментами.
+# Модель видит одно действие одним инструментом: меньше путаницы и короче промпт.
+CHAT_TOOL_EXCLUDE = {
+    # дубли internal__*: один и тот же результат, другой инструмент
+    "recall", "remember", "add_goal", "web_search", "generate_image", "fetch_github_file",
+    "read_code_file", "search_in_code", "get_project_structure", "analyze_error",
+    # закрыты возможностями внутренних инструментов:
+    #   remember_batch    -> remember(facts=[...])
+    #   semantic_search   -> recall(queries=[...])
+    "remember_batch", "semantic_search",
+    # рекурсия: запускает весь конвейер чата внутри чата
+    "execute_command",
+    # внешний ИИ: сеанс и повторная идентичность, в чате не нужны
+    "session_start", "remember_with_handshake",
+    # идентичность: в чате есть internal__*, MCP-версии нужны только внешнему ИИ
+    "contribute_to_identity", "merge_identity_branches", "search_identity_chain",
+    "get_identity_chain", "invalidate_identity",
+}
+
 # -------------------------------
 # Проактивные уведомления
 # -------------------------------

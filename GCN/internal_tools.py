@@ -20,20 +20,59 @@ logger = logging.getLogger(__name__)
 
 def _register_memory(registry: ToolRegistry, controller) -> None:
     async def _internal_recall(args: Dict) -> str:
-        query = args.get("query", "")
-        top_k = args.get("top_k", 5)
+        top_k = int(args.get("top_k", 5))
         scope = args.get("scope")
-        results = await controller.memory_service.recall(query, top_k, scope)
-        if not results:
+        # Несколько формулировок за один вызов: поиск идёт параллельно,
+        # результаты объединяются и ранжируются по уверенности.
+        queries = args.get("queries") or ([args["query"]] if args.get("query") else [])
+        queries = [str(q).strip() for q in queries if str(q).strip()][:5]
+        if not queries:
+            return "Укажите запрос: query (строка) или queries (список формулировок)."
+
+        batches = await asyncio.gather(
+            *[controller.memory_service.recall(q, top_k, scope) for q in queries],
+            return_exceptions=True,
+        )
+        merged: Dict[str, float] = {}
+        for batch in batches:
+            if isinstance(batch, Exception) or not batch:
+                continue
+            for f in batch:
+                text = str(f.get("text", "")).strip()
+                if not text:
+                    continue
+                conf = float(f.get("confidence", 0.5))
+                if text not in merged or conf > merged[text]:
+                    merged[text] = conf
+        if not merged:
             return "Ничего не найдено."
-        lines = []
-        for f in results[:top_k]:
-            lines.append(f"- {f['text']} (уверенность: {f.get('confidence', 0.5):.2f})")
-        return "\n".join(lines)
+        ranked = sorted(merged.items(), key=lambda kv: -kv[1])[:top_k]
+        return "\n".join(f"- {text} (уверенность: {conf:.2f})" for text, conf in ranked)
 
     async def _internal_remember(args: Dict) -> str:
-        fact = args.get("fact", "")
         scope = args.get("scope")  # None = автодетекция
+        facts = args.get("facts")
+        if facts:
+            # Пакетное сохранение: список фактов в одном вызове
+            items = [str(f).strip() for f in facts if str(f).strip()][:20]
+            saved, rejected = [], []
+            for item in items:          # по одному: записи в память не должны идти параллельно
+                try:
+                    r = await controller.memory_service.remember(item, scope, user_explicit=True)
+                except Exception as e:
+                    rejected.append(f"{item} (ошибка: {e})")
+                    continue
+                if r.get("id"):
+                    saved.append(r.get("fact") or item)
+                else:
+                    rejected.append(f"{item} ({r.get('reason', 'unknown')})")
+            lines = [f"Запомнил {len(saved)} из {len(items)}."]
+            lines += [f"- {s}" for s in saved]
+            if rejected:
+                lines.append("Не сохранено: " + "; ".join(rejected))
+            return "\n".join(lines)
+
+        fact = args.get("fact", "")
         # ИСПРАВЛЕНИЕ: внутренний инструмент вызывается по решению LLM в ответ
         # на явную просьбу пользователя «запомни ...». Это осознанный запрос,
         # а не автоизвлечение из web-поиска — пропускаем фильтр фактологичности
@@ -59,29 +98,34 @@ def _register_memory(registry: ToolRegistry, controller) -> None:
 
     registry.register(
         name="recall",
-        description="Поиск в памяти по запросу. Аргументы: query (str), top_k (int, опционально), scope (str, опционально: private/shared/global)",
+        description=("Поиск в памяти. Одна формулировка: query (str). Несколько формулировок за один вызов "
+                     "(найдёт больше, чем одна): queries (список строк, до 5). top_k (int, опционально), "
+                     "scope (str, опционально: private/shared/global)"),
         parameters={
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
+                "queries": {"type": "array", "items": {"type": "string"}},
                 "top_k": {"type": "integer", "default": 5},
                 "scope": {"type": "string", "enum": ["private", "shared", "global"]}
             },
-            "required": ["query"]
+            "required": []
         },
         handler=_internal_recall,
         server="internal"
     )
     registry.register(
         name="remember",
-        description="Запоминает факт. Аргументы: fact (str), scope (str, опционально: private/shared/global, по умолчанию private)",
+        description=("Запоминает факты. Один факт: fact (str). Несколько фактов за один вызов: facts (список строк). "
+                     "scope (str, опционально: private/shared/global, по умолчанию private)"),
         parameters={
             "type": "object",
             "properties": {
                 "fact": {"type": "string"},
+                "facts": {"type": "array", "items": {"type": "string"}},
                 "scope": {"type": "string", "enum": ["private", "shared", "global"]}
             },
-            "required": ["fact"]
+            "required": []
         },
         handler=_internal_remember,
         server="internal"

@@ -666,3 +666,4 @@ AssertionError
 2026-10-12 21:04:59 INFO [routes.ai_assistant:432] [CognitiveController] SelfModel инициализирован для u2
 2026-10-12 21:04:59 INFO [routes.ai_assistant:482] CognitiveController (GCN) initialized for u2
 2026-10-12 21:04:59 INFO [routes.ai_assistant:3254] Создан когнитивный ассистент для u2
+2026-10-12 21:19:59 INFO [routes.ai_assistant:867] Idle consolidation triggered
