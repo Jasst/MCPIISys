@@ -113,11 +113,15 @@ try:
         TOOL_CALL_TIMEOUT_SECONDS,
         TOOL_PARALLEL_EXECUTION,
         MCP_TOOL_TIMEOUT_OVERRIDES,
+        MAX_TOOL_ITERATIONS,
+        MAX_TOOL_ITERATIONS_DYNAMIC,
     )
 except ImportError:
     TOOL_CALL_TIMEOUT_SECONDS = 45
     TOOL_PARALLEL_EXECUTION = True
     MCP_TOOL_TIMEOUT_OVERRIDES = {}
+    MAX_TOOL_ITERATIONS = 3
+    MAX_TOOL_ITERATIONS_DYNAMIC = 7
 
 
 # ИСПРАВЛЕНИЕ (генерация изображений в чате "не всегда работает"): тяжёлые
@@ -134,8 +138,7 @@ def _resolve_timeout(tool_name: str):
     return None
 
 
-MAX_TOOL_ITERATIONS = 3  # сколько раундов вызова инструментов разрешено за один ответ
-MAX_TOOL_ITERATIONS_DYNAMIC = 7  # максимум при активном перепланировании
+# MAX_TOOL_ITERATIONS и MAX_TOOL_ITERATIONS_DYNAMIC задаются в GCN/config_ai.py (и в .env)
 
 # Простые маркеры составного/многочастного запроса — пункт №4 (планирование).
 # Эвристика намеренно дешёвая: полноценная классификация "сложности" запроса

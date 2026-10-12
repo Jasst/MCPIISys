@@ -175,6 +175,20 @@ TOOL_CALL_TIMEOUT_SECONDS = 45
 # Периодичность повторных попыток подключиться к упавшим при старте MCP-серверам.
 MCP_RECONNECT_INTERVAL = 120
 
+# Лимит раундов вызова инструментов за один ответ (один раунд = решение модели +
+# выполнение инструментов). Читается из .env. Значения ограничены 1..10, чтобы
+# опечатка в .env не запустила бесконечный цикл и не заблокировала модель.
+def _int_env(name: str, default: int, lo: int = 1, hi: int = 10) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        value = default
+    return max(lo, min(hi, value))
+
+MAX_TOOL_ITERATIONS = _int_env("MAX_TOOL_ITERATIONS", 3)
+# Максимум раундов, если модель попросила перепланирование после ошибки
+MAX_TOOL_ITERATIONS_DYNAMIC = _int_env("MAX_TOOL_ITERATIONS_DYNAMIC", 7)
+
 # ИСПРАВЛЕНИЕ (рассинхронизация клиентского и серверного таймаута MCP):
 # mcp_client_manager.MCPToolManager.call_tool раньше всегда ждал ровно
 # TOOL_CALL_TIMEOUT_SECONDS (45с) для ЛЮБОГО инструмента любого внешнего
