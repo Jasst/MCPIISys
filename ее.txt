@@ -1,0 +1,1 @@
+ Compress-Archive -Path (Get-ChildItem -Exclude .env,auth.db,ai_memory_v3,assistant.log,.venv,__pycache__,*.pid) -DestinationPath project_for_review.zip -Force
