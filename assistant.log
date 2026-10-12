@@ -654,3 +654,15 @@ AssertionError
 2026-10-12 21:01:07 INFO [routes.ai_assistant:113] Global MCP config path: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
 2026-10-12 21:01:07 INFO [GCN.mcp_client_manager:151] Загрузка MCP конфига из: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
 2026-10-12 21:01:07 INFO [routes.ai_assistant:117] ✅ Global MCP manager initialized successfully
+2026-10-12 21:02:04 INFO [routes.ai_assistant:432] [CognitiveController] SelfModel инициализирован для u2
+2026-10-12 21:02:04 INFO [routes.ai_assistant:482] CognitiveController (GCN) initialized for u2
+2026-10-12 21:02:04 INFO [routes.ai_assistant:3254] Создан когнитивный ассистент для u2
+2026-10-12 21:04:18 WARNING [setup:43] === AI assistant started, log: C:\Users\PC\Documents\GitHub\MCPIISys\assistant.log ===
+2026-10-12 21:04:18 INFO [routes.ai_assistant:3553] Global merge task started
+2026-10-12 21:04:19 WARNING [huggingface_hub.utils._http:993] Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-10-12 21:04:29 INFO [routes.ai_assistant:113] Global MCP config path: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-12 21:04:29 INFO [GCN.mcp_client_manager:151] Загрузка MCP конфига из: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-12 21:04:29 INFO [routes.ai_assistant:117] ✅ Global MCP manager initialized successfully
+2026-10-12 21:04:59 INFO [routes.ai_assistant:432] [CognitiveController] SelfModel инициализирован для u2
+2026-10-12 21:04:59 INFO [routes.ai_assistant:482] CognitiveController (GCN) initialized for u2
+2026-10-12 21:04:59 INFO [routes.ai_assistant:3254] Создан когнитивный ассистент для u2
