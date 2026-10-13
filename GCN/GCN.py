@@ -1031,9 +1031,11 @@ class MemoryStore:
         elif n_vectors < 500:  # средний – HNSW для скорости
             index = faiss.IndexHNSWFlat(dim, 32)
             index.hnsw.efConstruction = 80
+            index.hnsw.efSearch = 64
             index.add(vectors_np)
         else:  # большой – IVF
-            nlist = max(1, min(FAISS_NLIST, int(math.sqrt(n_vectors) * 2)))
+            # 39 точек на центроид — минимум FAISS для обучения k-means, иначе предупреждение
+            nlist = max(1, min(FAISS_NLIST, n_vectors // 39, int(math.sqrt(n_vectors))))
             quantizer = faiss.IndexFlatL2(dim)
             index = faiss.IndexIVFFlat(quantizer, dim, nlist)
             index.train(vectors_np)
