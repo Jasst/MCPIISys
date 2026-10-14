@@ -213,6 +213,7 @@ MCP_TOOL_TIMEOUT_OVERRIDES = {
     "generate_image": 300,
     "research_topic": 240,
     "web_search": 90,
+    "execute_command": 600,
 }
 
 # -------------------------------

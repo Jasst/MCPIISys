@@ -394,6 +394,7 @@ def _safe_resolve_user(user_id: "Optional[str]", ctx: "Optional[Context]" = None
 
 # Таймауты для инструментов
 _MCP_TOOL_TIMEOUT_SECONDS = int(os.getenv("MCP_TOOL_TIMEOUT_SECONDS", "120"))
+_MCP_EXEC_TIMEOUT_SECONDS = int(os.getenv("MCP_EXEC_TIMEOUT_SECONDS", "600"))
 _MCP_IMAGE_TOOL_TIMEOUT_SECONDS = int(os.getenv("MCP_IMAGE_TOOL_TIMEOUT_SECONDS", "300"))
 _MCP_RESEARCH_TOOL_TIMEOUT_SECONDS = int(os.getenv("MCP_RESEARCH_TOOL_TIMEOUT_SECONDS", "240"))
 
@@ -770,7 +771,7 @@ async def execute_command(
     async def _run():
         return await assistant.process_input(command, web_search=allow_web_search)
 
-    result = await _with_timeout(_run(), "execute_command")
+    result = await _with_timeout(_run(), "execute_command", timeout=_MCP_EXEC_TIMEOUT_SECONDS)
     if isinstance(result, dict) and result.get("status") == "error":
         return result
     response, meta = result
