@@ -987,12 +987,12 @@ class MemoryStore:
         return result
 
     # ---------- FAISS-индекс (опционально) ----------
-    def build_faiss_index(self, force: bool = False):
-        if not FAISS_AVAILABLE:
-            return
+    def _faiss_snapshot(self, force: bool):
+        """Под коротким локом копирует данные для индекса и сбрасывает dirty.
+        Возвращает None, если перестройка не нужна. Лок не держится во время сборки."""
         with self._lock:
             if not self._faiss_dirty and not force:
-                return
+                return None
             ids_with_emb = []
             vectors = []
             for obj_id, vec in self._embedding_index.items():
@@ -1011,45 +1011,64 @@ class MemoryStore:
                     if len(vec) == self.embedding_dim:
                         ids_with_emb.append(obj_id)
                         vectors.append(vec)
-
-            n_vectors = len(vectors)
-            if n_vectors == 0:
-                self.faiss_index = None
-                self.faiss_id_map = {}
-                self.faiss_rev_map = {}
-                self._faiss_dirty = False
-                return
-
-            vectors_np = np.array(vectors).astype('float32')
-            # Нормализуем для косинусного сходства (IndexFlatIP работает с нормализованными)
-            faiss.normalize_L2(vectors_np)
-
-            # Выбор типа индекса
-            if n_vectors < 50:  # малый набор – точный поиск
-                index = faiss.IndexFlatIP(self.embedding_dim)
-                index.add(vectors_np)
-            elif n_vectors < 500:  # средний – HNSW для скорости
-                index = faiss.IndexHNSWFlat(self.embedding_dim, 32)
-                index.hnsw.efConstruction = 80
-                index.add(vectors_np)
-            else:  # большой – IVF
-                nlist = max(1, min(FAISS_NLIST, int(math.sqrt(n_vectors) * 2)))
-                quantizer = faiss.IndexFlatL2(self.embedding_dim)
-                index = faiss.IndexIVFFlat(quantizer, self.embedding_dim, nlist)
-                # Обучаем на подмножестве (если данных мало, берём все)
-                index.train(vectors_np)
-                index.add(vectors_np)
-                index.nprobe = min(FAISS_NPROBE, nlist)
-
-            self.faiss_index = index
-            self.faiss_id_map = {obj_id: i for i, obj_id in enumerate(ids_with_emb)}
-            self.faiss_rev_map = {i: obj_id for i, obj_id in enumerate(ids_with_emb)}
+            dim = self.embedding_dim
+            # Записи, пришедшие во время сборки, снова выставят dirty — поэтому сбрасываем сейчас.
             self._faiss_dirty = False
+        return ids_with_emb, vectors, dim
+
+    @staticmethod
+    def _faiss_build(ids_with_emb, vectors, dim):
+        """Тяжёлая CPU-часть. Не трогает состояние объекта, безопасна в отдельном потоке."""
+        n_vectors = len(vectors)
+        if n_vectors == 0:
+            return None, {}, {}
+        vectors_np = np.array(vectors).astype('float32')
+        # Нормализуем для косинусного сходства (IndexFlatIP работает с нормализованными)
+        faiss.normalize_L2(vectors_np)
+        if n_vectors < 50:  # малый набор – точный поиск
+            index = faiss.IndexFlatIP(dim)
+            index.add(vectors_np)
+        elif n_vectors < 500:  # средний – HNSW для скорости
+            index = faiss.IndexHNSWFlat(dim, 32)
+            index.hnsw.efConstruction = 80
+            index.hnsw.efSearch = 64
+            index.add(vectors_np)
+        else:  # большой – IVF
+            # 39 точек на центроид — минимум FAISS для обучения k-means, иначе предупреждение
+            nlist = max(1, min(FAISS_NLIST, n_vectors // 39, int(math.sqrt(n_vectors))))
+            quantizer = faiss.IndexFlatL2(dim)
+            index = faiss.IndexIVFFlat(quantizer, dim, nlist)
+            index.train(vectors_np)
+            index.add(vectors_np)
+            index.nprobe = min(FAISS_NPROBE, nlist)
+        id_map = {obj_id: i for i, obj_id in enumerate(ids_with_emb)}
+        rev_map = {i: obj_id for i, obj_id in enumerate(ids_with_emb)}
+        return index, id_map, rev_map
+
+    def build_faiss_index(self, force: bool = False):
+        """Перестраивает FAISS. Безопасно вызывать из потока (asyncio.to_thread):
+        сборка идёт без лока, лок нужен только для копирования данных и замены индекса."""
+        if not FAISS_AVAILABLE:
+            return
+        snap = self._faiss_snapshot(force)
+        if snap is None:
+            return
+        try:
+            index, id_map, rev_map = self._faiss_build(*snap)
+        except Exception:
+            with self._lock:
+                self._faiss_dirty = True  # вернуть флаг, чтобы повторить позже
+            raise
+        with self._lock:
+            self.faiss_index = index
+            self.faiss_id_map = id_map
+            self.faiss_rev_map = rev_map
 
     def _ensure_faiss(self):
-        """Вызывается перед поиском, чтобы перестроить индекс при необходимости."""
-        if self._faiss_dirty:
-            self.build_faiss_index()
+        """Строит индекс только при первом обращении. Устаревший индекс на пути поиска
+        не перестраиваем — свежие записи досчитывает semantic_search."""
+        if self.faiss_index is None and FAISS_AVAILABLE:
+            self.build_faiss_index(force=True)
 
     # ---------- Поиск ----------
     @staticmethod
@@ -1066,8 +1085,10 @@ class MemoryStore:
     def semantic_search(self, query_vector: List[float], top_k: int = 10) -> List[Tuple[str, float]]:
         """
         Поиск по вектору с использованием FAISS (если доступен) или косинусного сходства.
+        Не перестраивает индекс на пути поиска: при dirty досчитывает только свежие записи.
         """
         self._ensure_faiss()
+        results = None
         if self.faiss_index is not None and FAISS_AVAILABLE:
             try:
                 q = np.array(query_vector).astype('float32').reshape(1, -1)
@@ -1081,14 +1102,20 @@ class MemoryStore:
                             # dist — это L2, преобразуем в сходство (чем меньше, тем лучше)
                             sim = 1.0 / (1.0 + dist[0][i])
                             results.append((obj_id, sim))
-                return results[:top_k]
-            except Exception as e:
-                # fallback
-                pass
+            except Exception:
+                results = None  # fallback ниже
+        if results is not None:
+            if self._faiss_dirty:
+                # Записи, добавленные после последней сборки, в индексе ещё нет — досчитываем.
+                for obj_id, vec in list(self._embedding_index.items()):
+                    if obj_id not in self.faiss_id_map:
+                        results.append((obj_id, self._cosine(query_vector, vec)))
+                results.sort(key=lambda x: x[1], reverse=True)
+            return results[:top_k]
 
         # Косинусное сходство по всем векторам
         results = []
-        for obj_id, vec in self._embedding_index.items():
+        for obj_id, vec in list(self._embedding_index.items()):
             sim = self._cosine(query_vector, vec)
             results.append((obj_id, sim))
         results.sort(key=lambda x: x[1], reverse=True)

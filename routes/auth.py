@@ -4,6 +4,7 @@ routes/auth.py — регистрация, вход, подтверждение,
 Ответы на регистрацию и восстановление одинаковые независимо от того,
 есть ли такой аккаунт, чтобы по форме нельзя было узнать чужие адреса.
 """
+import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
@@ -75,9 +76,9 @@ def _log_in(request: Request, user) -> None:
     request.session['v'] = user['session_version']
 
 
-def _send(email: str, code: str, purpose: str) -> None:
+async def _send(email: str, code: str, purpose: str) -> None:
     try:
-        mailer.send_code(email, code, purpose)
+        await asyncio.to_thread(mailer.send_code, email, code, purpose)
     except mailer.MailError as e:
         store.drop_codes(email, purpose)
         raise HTTPException(503, detail=str(e) + '. Попробуйте позже.')
@@ -102,7 +103,7 @@ async def register(body: RegisterBody, request: Request):
         code = store.new_code(email, 'verify')
     except store.AuthError as e:
         _fail(e)
-    _send(email, code, 'verify')
+    await _send(email, code, 'verify')
     return {'ok': True, 'message': SENT_MESSAGE}
 
 
@@ -140,7 +141,7 @@ async def resend_code(body: ResendBody, request: Request):
             code = store.new_code(email, body.purpose)
         except store.AuthError as e:
             _fail(e)
-        _send(email, code, body.purpose)
+        await _send(email, code, body.purpose)
     return {'ok': True, 'message': SENT_MESSAGE}
 
 
@@ -213,7 +214,7 @@ async def reset_request(body: EmailBody, request: Request):
         except store.AuthError as e:
             _fail(e)
         try:
-            mailer.send_code(email, code, 'reset')
+            await asyncio.to_thread(mailer.send_code, email, code, 'reset')
         except mailer.MailError:
             store.drop_codes(email, 'reset')
             logger.error('Не удалось отправить код восстановления')

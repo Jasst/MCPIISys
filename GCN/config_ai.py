@@ -26,8 +26,12 @@ DEFAULT_MAX_TOKENS = 4096         # увеличенная длина ответ
 # -------------------------------
 # Переключатели для принудительного формирования рассуждений моделью.
 # Вынесены в конфиг, чтобы можно было настраивать без правки кода.
-REASONING_FORCE_TAGS = True       # обязывать модель писать <thought>...</thought>
-REASONING_FEW_SHOT = True         # добавлять few-shot примеры формата
+# По умолчанию ВЫКЛЮЧЕНО: модель с нативным рассуждением (reasoning_content) и одновременно
+# обязанная писать <thought> в ответе делает работу дважды и зацикливается на проверке формата.
+# Включайте (=1) только для моделей БЕЗ нативного рассуждения.
+REASONING_FORCE_TAGS = os.getenv("REASONING_FORCE_TAGS", "0") == "1"
+# Few-shot примеры формата <thought> — тоже только вместе с REASONING_FORCE_TAGS
+REASONING_FEW_SHOT = os.getenv("REASONING_FEW_SHOT", "0") == "1"
 # stop-токены для reasoning-режима (пустой tuple = не использовать)
 REASONING_STOP_TOKENS: tuple = ()
 
@@ -175,6 +179,24 @@ TOOL_CALL_TIMEOUT_SECONDS = 45
 # Периодичность повторных попыток подключиться к упавшим при старте MCP-серверам.
 MCP_RECONNECT_INTERVAL = 120
 
+# Лимит раундов вызова инструментов за один ответ (один раунд = решение модели +
+# выполнение инструментов). Читается из .env. Значения ограничены 1..10, чтобы
+# опечатка в .env не запустила бесконечный цикл и не заблокировала модель.
+def _int_env(name: str, default: int, lo: int = 1, hi: int = 10) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        value = default
+    return max(lo, min(hi, value))
+
+MAX_TOOL_ITERATIONS = _int_env("MAX_TOOL_ITERATIONS", 3)
+# Максимум раундов, если модель попросила перепланирование после ошибки
+MAX_TOOL_ITERATIONS_DYNAMIC = _int_env("MAX_TOOL_ITERATIONS_DYNAMIC", 7)
+
+# Лимит рассуждений модели (в символах), прежде чем ответ начат. Если модель думает
+# дольше, запрос повторяется без рассуждений. 0 — лимит выключен.
+REASONING_MAX_CHARS = _int_env("REASONING_MAX_CHARS", 6000, lo=0, hi=200000)
+
 # ИСПРАВЛЕНИЕ (рассинхронизация клиентского и серверного таймаута MCP):
 # mcp_client_manager.MCPToolManager.call_tool раньше всегда ждал ровно
 # TOOL_CALL_TIMEOUT_SECONDS (45с) для ЛЮБОГО инструмента любого внешнего
@@ -191,6 +213,7 @@ MCP_TOOL_TIMEOUT_OVERRIDES = {
     "generate_image": 300,
     "research_topic": 240,
     "web_search": 90,
+    "execute_command": 600,
 }
 
 # -------------------------------
@@ -249,6 +272,27 @@ ALLOWED_CODE_EXTENSIONS = {".py", ".json", ".md", ".txt", ".yml", ".yaml"}  # б
 # Инструменты кода видят ТОЛЬКО эти папки проекта. Данные пользователей
 # (ai_memory_v3, ui_state, auth.db) и .env сюда не входят и недоступны моделям.
 CODE_ALLOWED_DIRS = {"GCN", "routes"}
+
+# Инструменты MCP-сервера, которые НЕ регистрируются в чате.
+# Причины: (а) есть внутренний инструмент с тем же действием (internal__*),
+# (б) нужны только внешнему ИИ через /mcp, (в) перекрываются другими инструментами.
+# Модель видит одно действие одним инструментом: меньше путаницы и короче промпт.
+CHAT_TOOL_EXCLUDE = {
+    # дубли internal__*: один и тот же результат, другой инструмент
+    "recall", "remember", "add_goal", "web_search", "generate_image", "fetch_github_file",
+    "read_code_file", "search_in_code", "get_project_structure", "analyze_error",
+    # закрыты возможностями внутренних инструментов:
+    #   remember_batch    -> remember(facts=[...])
+    #   semantic_search   -> recall(queries=[...])
+    "remember_batch", "semantic_search",
+    # рекурсия: запускает весь конвейер чата внутри чата
+    "execute_command",
+    # внешний ИИ: сеанс и повторная идентичность, в чате не нужны
+    "session_start", "remember_with_handshake",
+    # идентичность: в чате есть internal__*, MCP-версии нужны только внешнему ИИ
+    "contribute_to_identity", "merge_identity_branches", "search_identity_chain",
+    "get_identity_chain", "invalidate_identity",
+}
 
 # -------------------------------
 # Проактивные уведомления

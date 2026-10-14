@@ -314,14 +314,24 @@
     }
 
     if (m.reasoning) {
+      const thinking = !!m.pending && !m.text;          // модель ещё думает
       const d = document.createElement('details');
       d.className = 'reasoning';
       const s = document.createElement('summary');
-      s.textContent = 'Ход рассуждений';
+      if (thinking) {
+        s.textContent = 'Думаю…';
+      } else {
+        const sec = m.rStart && m.rEnd ? Math.max(1, Math.round((m.rEnd - m.rStart) / 1000)) : 0;
+        s.textContent = sec ? `Размышлял ${sec} с` : 'Ход рассуждений';
+      }
       const body = document.createElement('div');
       body.className = 'rbody';
       body.textContent = m.reasoning;
       d.append(s, body);
+      // Открываем во время размышления, сворачиваем, когда пошёл ответ.
+      // Если пользователь сам раскрыл блок, его выбор не сбиваем.
+      if (m._rWant !== thinking) { d.open = thinking; m._rWant = thinking; }
+      else d.open = d.open || thinking;
       bubble.appendChild(d);
     }
 
@@ -612,8 +622,14 @@
   }
 
   function applyEvent(ev, m) {
-    if (ev.token !== undefined) m.text += ev.token;
-    else if (ev.reasoning_token !== undefined) m.reasoning = (m.reasoning || '') + ev.reasoning_token;
+    if (ev.token !== undefined) {
+      if (m.rStart && !m.rEnd) m.rEnd = Date.now();   // рассуждения закончились, пошёл ответ
+      m.text += ev.token;
+    }
+    else if (ev.reasoning_token !== undefined) {
+      if (!m.rStart) m.rStart = Date.now();
+      m.reasoning = (m.reasoning || '') + ev.reasoning_token;
+    }
     else if (ev.sources) m.sources = (m.sources || []).concat(ev.sources);
     else if (ev.image_url) m.images = (m.images || []).concat([ev.image_url]);
     else if (ev.tool_call) m.notes = (m.notes || []).concat(['🔧 ' + ev.tool_call]);
@@ -705,6 +721,7 @@
         if (gen === g) gen = null;
         refreshUI();
       } else {
+        if (bot.rStart && !bot.rEnd) bot.rEnd = Date.now();
         if (g.stopRequested) {
           bot.notes.push('⏹ Остановлено');
           bot.pending = false;

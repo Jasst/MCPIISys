@@ -1,0 +1,16 @@
+# Поднимает SearXNG только на localhost: наружу он не открыт.
+# Запуск из папки searxng:  docker compose up -d
+# Секрет: создай строку командой  python -c "import secrets; print(secrets.token_hex(32))"
+# и укажи в файле .env рядом: SEARXNG_SECRET=...
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      - SEARXNG_BASE_URL=http://127.0.0.1:8080/
+      - SEARXNG_SECRET=${SEARXNG_SECRET}
+    restart: unless-stopped
