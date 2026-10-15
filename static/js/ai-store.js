@@ -186,7 +186,7 @@
         if (bytes + add > LS_MSG_LIMIT) break;
         slice.unshift(s); bytes += add;
       }
-      while (lsTotalBytes() > LS_TOTAL_LIMIT && slice.length > 8) { slice.pop(); }
+      while (lsTotalBytes() > LS_TOTAL_LIMIT && slice.length > 8) { slice.shift(); }
       lsSet('messages_' + sid, '[' + slice.join(',') + ']');
     } catch { /* quota — зеркало необязательно */ }
   }

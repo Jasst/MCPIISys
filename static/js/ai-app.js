@@ -220,8 +220,21 @@
     // role+time+text): «открыл и закрыл диалог — он скопировался» становится
     // невозможным локально, ещё до отправки на сервер.
     cache[id] = dedupeByKeys(cache[id]);
+    adoptLive(id);
     reconcile(id);
     return cache[id];
+  }
+  // Сообщение, которое сейчас пишет стрим (gen.bot), должно быть ОДНИМ объектом
+  // с тем, что лежит в cache. Перезагрузки кеша (reloadFromStore, merge, разрешение
+  // конфликтов) создают новые объекты: стрим писал бы в «осиротевший» объект, а на
+  // экран и в хранилище уходила бы копия без текста — отсюда вечные точки.
+  function adoptLive(id) {
+    const live = gen && gen.sessionId === id && gen.bot;
+    if (!live || !cache[id]) return;
+    const arr = cache[id];
+    const i = arr.findIndex((m) => m && m.id === live.id);
+    if (i >= 0) arr[i] = live;
+    else arr.push(live);
   }
   function dedupeByKeys(msgs) {
     let hasDup = false;
@@ -408,9 +421,29 @@
   }
 
   function highlight(root) {
-    if (typeof hljs === 'undefined') return;
-    root.querySelectorAll('pre code').forEach((el) => {
-      if (!el.dataset.hl) { hljs.highlightElement(el); el.dataset.hl = '1'; }
+    if (typeof hljs !== 'undefined') {
+      root.querySelectorAll('pre code').forEach((el) => {
+        if (!el.dataset.hl) { hljs.highlightElement(el); el.dataset.hl = '1'; }
+      });
+    }
+    // Кнопка «Копировать» на каждом блоке кода: копируется только код, без обёртки
+    root.querySelectorAll('pre').forEach((pre) => {
+      if (pre.dataset.copyBtn) return;
+      pre.dataset.copyBtn = '1';
+      const wrap = document.createElement('div');
+      wrap.className = 'code-wrap';
+      pre.parentNode.insertBefore(wrap, pre);
+      wrap.appendChild(pre);
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'copy-code-btn';
+      btn.textContent = 'Копировать';
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const code = pre.querySelector('code');
+        copyText((code || pre).textContent || '');
+      });
+      wrap.appendChild(btn);
     });
   }
 
@@ -890,8 +923,10 @@
   }
 
   function isNetworkError(err) {
-    // Сетевые ошибки fetch — TypeError; сравниваем по имени, а не через instanceof (разные realm)
-    return !!err && (err.name === 'TypeError' || err.name === 'NetworkError');
+    // Сетевые ошибки fetch — TypeError с сообщением о сбое сети (у каждого браузера свой текст).
+    // Прочие TypeError — это баги в коде, их не маскируем под обрыв связи.
+    if (!err || (err.name !== 'TypeError' && err.name !== 'NetworkError')) return false;
+    return /fetch|network|load failed/i.test(String(err.message || ''));
   }
 
   function pushNote(m, text) {
@@ -914,6 +949,8 @@
 
     const msgs = loadMsgs(id);
     const bot = msgs[idx];
+    if (!bot) { if (gen === g) gen = null; refreshUI(); return; }
+    g.bot = bot;
     if (watch) pushNote(bot, '👁 Ответ печатается на другом устройстве');
     try {
       const res = mode === 'attach'
@@ -1030,8 +1067,7 @@
     const rest = sessions.map((s) => s.id).filter((id) => !priority.includes(id));
     for (const id of priority.concat(rest)) {
       if (gen) return;
-      const msgs = await peekMsgs(id);
-      const idx = msgs.findIndex((m) => m.pending);
+      const idx = loadMsgs(id).findIndex((m) => m.pending);
       if (idx < 0) continue;
       if (st === null) {
         try {
@@ -1046,7 +1082,16 @@
       } else if (st.active && st.may_watch) {
         await startGeneration(id, idx, 'attach', null, 'watch');   // смотрим чужую печать
       } else if (!st.active && !genFlagGet()) {
-        continue;               // генерации нет и она была не наша — ждём sync владельца
+        // Генерации нет и она была не наша. Ждём sync владельца, но если сообщение
+        // висит дольше 3 минут — снимаем точки, иначе оно остаётся pending навсегда.
+        const m = loadMsgs(id)[idx];
+        if (m && Date.now() - (m.time || 0) > 180000) {
+          if (!m.text) m.error = 'Ответ не получен: генерация потеряна';
+          m.pending = false;
+          await commit(id);
+          if (currentId === id) renderMessages({ scroll: false });
+        }
+        continue;
       } else {
         await startGeneration(id, idx, 'attach', null, 'replay');  // свой оборванный ответ
       }

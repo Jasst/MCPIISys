@@ -38,7 +38,7 @@ body[data-fs="l"] { --chat-fs: 17px; }
   color: var(--text-main); font: inherit; font-size: 14px; font-weight: 550; cursor: pointer;
   transition: border-color var(--transition-fast), background var(--transition-fast);
 }
-.btn-new:hover { border-color: var(--border-focus); background: var(--bg-tertiary); }
+@media (hover: hover) { .btn-new:hover { border-color: var(--border-focus); background: var(--bg-tertiary); } }
 .btn-new .plus { font-size: 16px; line-height: 1; }
 .btn-new kbd {
   margin-left: auto; font: inherit; font-size: 11px; color: var(--text-muted);
@@ -62,7 +62,7 @@ body[data-fs="l"] { --chat-fs: 17px; }
   font: inherit; font-size: 14px; text-align: left; cursor: pointer;
   transition: background var(--transition-fast), color var(--transition-fast);
 }
-.sess:hover { background: var(--bg-hover); color: var(--text-main); }
+@media (hover: hover) { .sess:hover { background: var(--bg-hover); color: var(--text-main); } }
 .sess.active { background: var(--bg-active); color: var(--text-main); }
 .sess .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -72,7 +72,7 @@ body[data-fs="l"] { --chat-fs: 17px; }
   border: none; border-radius: 10px; background: transparent; color: var(--text-secondary);
   font: inherit; font-size: 14px; cursor: pointer;
 }
-.sb-link:hover { background: var(--bg-hover); color: var(--text-main); }
+@media (hover: hover) { .sb-link:hover { background: var(--bg-hover); color: var(--text-main); } }
 
 /* ---------- верхняя панель ---------- */
 .topbar {
@@ -94,9 +94,9 @@ body[data-fs="l"] { --chat-fs: 17px; }
   background: transparent; color: var(--text-secondary); display: grid; place-items: center;
   cursor: pointer; padding: 0; transition: background var(--transition-fast);
 }
-.icon-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-main); }
+@media (hover: hover) { .icon-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-main); } }
 .icon-btn:disabled { opacity: .35; cursor: default; }
-.icon-btn.danger:hover:not(:disabled) { color: var(--danger-color); }
+@media (hover: hover) { .icon-btn.danger:hover:not(:disabled) { color: var(--danger-color); } }
 .ico { width: 18px; height: 18px; filter: invert(1); opacity: .85; }
 .only-mobile { display: none; }
 
@@ -113,7 +113,7 @@ body[data-fs="l"] { --chat-fs: 17px; }
   border: 1px solid var(--border-color); box-shadow: var(--shadow-md);
   transition: color var(--transition-fast), background var(--transition-fast);
 }
-.scroll-bottom:hover { color: var(--text-main); background: var(--bg-hover); }
+@media (hover: hover) { .scroll-bottom:hover { color: var(--text-main); background: var(--bg-hover); } }
 
 /* Pull-to-refresh — «потянуть диалог вниз, чтобы обновить чаты» (мобильные).
    Индикатор живёт над списком сообщений; JS сдвигает msgs-inner transform'ом
@@ -168,7 +168,7 @@ body[data-fs="l"] { --chat-fs: 17px; }
   width: 28px; height: 28px; border-radius: 8px; border: none; background: transparent;
   color: var(--text-muted); display: grid; place-items: center; cursor: pointer; padding: 0;
 }
-.act:hover { background: var(--bg-hover); color: var(--text-main); }
+@media (hover: hover) { .act:hover { background: var(--bg-hover); color: var(--text-main); } }
 .act img { width: 15px; height: 15px; filter: invert(1); opacity: .7; }
 
 .reasoning { margin-bottom: 10px; font-size: 13px; color: var(--text-muted); }
@@ -188,6 +188,12 @@ body[data-fs="l"] { --chat-fs: 17px; }
   padding: 12px; overflow-x: auto; font-size: 13px;
 }
 .markdown-body code { font-family: ui-monospace, Consolas, monospace; }
+.code-wrap { position: relative; margin: 8px 0; }
+.code-wrap pre { margin: 0; }
+.code-wrap .copy-code-btn {
+  position: absolute; top: 6px; right: 6px; z-index: 1;
+  padding: 3px 10px; font: inherit; font-size: 12px; opacity: .85;
+}
 .markdown-body :not(pre) > code {
   background: var(--bg-tertiary); padding: 1px 6px; border-radius: 6px; font-size: .92em;
 }
@@ -202,7 +208,7 @@ body[data-fs="l"] { --chat-fs: 17px; }
   color: var(--text-secondary); text-decoration: none; background: var(--bg-tertiary);
   padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border-color);
 }
-.sources a:hover { color: var(--text-main); border-color: var(--border-focus); }
+@media (hover: hover) { .sources a:hover { color: var(--text-main); border-color: var(--border-focus); } }
 
 .typing { display: inline-flex; gap: 4px; padding: 4px 0; }
 .typing span {
@@ -226,7 +232,7 @@ body[data-fs="l"] { --chat-fs: 17px; }
   color: var(--text-secondary); font: inherit; font-size: 13.5px; text-align: left; cursor: pointer;
   transition: border-color var(--transition-fast), transform var(--transition-fast);
 }
-.suggest:hover { border-color: var(--border-focus); color: var(--text-main); transform: translateY(-1px); }
+@media (hover: hover) { .suggest:hover { border-color: var(--border-focus); color: var(--text-main); transform: translateY(-1px); } }
 .suggest b { display: block; color: var(--text-main); font-weight: 600; margin-bottom: 3px; font-size: 14px; }
 
 /* ---------- ввод ---------- */
@@ -249,7 +255,7 @@ body[data-fs="l"] { --chat-fs: 17px; }
   background: transparent; color: var(--text-secondary); font: inherit; font-size: 13px; cursor: pointer;
   display: inline-flex; align-items: center; gap: 6px; transition: background var(--transition-fast);
 }
-.tool:hover { background: var(--bg-hover); color: var(--text-main); }
+@media (hover: hover) { .tool:hover { background: var(--bg-hover); color: var(--text-main); } }
 .tool[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--border-focus); color: var(--text-main); }
 .counter { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
 .send {
@@ -257,7 +263,7 @@ body[data-fs="l"] { --chat-fs: 17px; }
   background: var(--accent-gradient); color: #fff; font-size: 15px; display: grid; place-items: center;
   transition: transform var(--transition-fast), opacity var(--transition-fast), background var(--transition-fast);
 }
-.send:hover:not(:disabled) { transform: scale(1.05); }
+@media (hover: hover) { .send:hover:not(:disabled) { transform: scale(1.05); } }
 .send:disabled { opacity: .35; cursor: default; }
 .send.stop { background: var(--bg-active); color: var(--text-main); }
 
@@ -313,11 +319,15 @@ body.compact .bubble { padding: 8px 12px; }
 /* ---------- адаптив ---------- */
 @media (max-width: 860px) {
   .app { grid-template-columns: 1fr; }
+  /* iOS Safari зумит страницу при фокусе на поле меньше 16px */
+  #input, .search input { font-size: 16px; }
   .sidebar {
     position: fixed; top: 0; bottom: 0; left: 0; width: min(300px, 84vw); z-index: 50;
-    transform: translateX(-104%); transition: transform .25s ease; box-shadow: var(--shadow-xl);
+    transform: translateX(-104%); visibility: hidden;
+    transition: transform .25s ease, visibility .25s;
+    box-shadow: var(--shadow-xl);
   }
-  .app.nav-open .sidebar { transform: none; }
+  .app.nav-open .sidebar { transform: none; visibility: visible; }
   .scrim {
     display: block; position: fixed; inset: 0; z-index: 40; background: rgba(0,0,0,.5);
     opacity: 0; pointer-events: none; transition: opacity .25s;
@@ -336,7 +346,7 @@ body.compact .bubble { padding: 8px 12px; }
 
 /* SVG-иконки в кнопках действий */
 .act svg { opacity: .75; }
-.act:hover svg { opacity: 1; }
+@media (hover: hover) { .act:hover svg { opacity: 1; } }
 
 /* Подсказка и индикатор генерации */
 .link-btn { background: none; border: none; color: var(--text-main); text-decoration: underline; cursor: pointer; font: inherit; padding: 0; }
