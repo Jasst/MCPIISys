@@ -25,6 +25,7 @@
     stop: '/ai/chat/stop',
     notify: '/ai/notifications/poll',
     health: '/health',
+    media: '/ai/ui-media',
   };
   // Чаты хранятся отдельно для каждого аккаунта: иначе другой человек на этом же
   // браузере увидит чужие разговоры. Настройки общие для браузера.
@@ -117,7 +118,7 @@
   let cache = {};                 // id -> живой массив сообщений открытого чата
   let currentId = null;           // открытый в интерфейсе чат
   let gen = null;                 // активная генерация: {sessionId, idx, controller, stopRequested}
-  let attachment = null;          // {url, base64, mime, name}
+  let attachment = null;          // {url, base64, mime, name, file?, mediaUrl?}
   let currentScopeUid = null;     // null — локальный режим без входа, синхронизация выключена
   let notifyTimer = null;
   let chips = { web: !!settings.webDefault, reason: !!settings.reasoningDefault };
@@ -381,9 +382,19 @@
     if (m.role === 'user') {
       if (m.image) {
         const img = new Image();
-        img.className = 'gen';
+        img.className = 'gen zoomable';
         img.src = m.image;
         img.alt = 'Прикреплённое изображение';
+        img.loading = 'lazy';
+        // тяжёлые data URL раньше молча не дорисовывались после перезагрузки
+        // (квота хранилища резала запись); теперь это явный, кликабельный статус
+        img.addEventListener('error', () => {
+          img.style.display = 'none';
+          const s = document.createElement('div');
+          s.className = 'meta-line';
+          s.textContent = '🖼 Фото недоступно локально — загрузите его заново';
+          bubble.appendChild(s);
+        });
         bubble.appendChild(img);
       }
       if (m.text) {
@@ -432,7 +443,7 @@
 
     for (const url of m.images || []) {
       const img = new Image();
-      img.className = 'gen';
+      img.className = 'gen zoomable';
       img.src = url;
       img.alt = 'Изображение';
       img.loading = 'lazy';
@@ -901,12 +912,15 @@
     if (msgs.length === 0 && s && s.name === DEFAULT_NAME) {
       s.name = (text || 'Фото').replace(/\s+/g, ' ').slice(0, 48);
     }
-    msgs.push({
+    // фото покажем ссылкой сразу после загрузки на сервер (см. ниже): тяжёлые
+    // data URL в истории не храним — они забивали квоту и роняли показ после перезагрузки
+    const userMsg = {
       role: 'user',
       text,
       time: Date.now(),
       image: img && img.url.length < MAX_IMAGE_STORE ? img.url : null,
-    });
+    };
+    msgs.push(userMsg);
     msgs.push(newBotMessage());
     const idx = msgs.length - 1;
     commit(id);
@@ -920,7 +934,21 @@
       reasoning: chips.reason,
     };
     if (img) { body.image_base64 = img.base64; body.image_mime = img.mime; }
-    startGeneration(id, idx, 'send', body);
+
+    // Тяжёлое фото грузим в медиатеку параллельно с генерацией: ответ модели
+    // не ждёт загрузки, а ссылка для истории появляется, как только готова.
+    let pendingMedia = null;
+    if (img && img.url.length >= MAX_IMAGE_STORE) {
+      pendingMedia = ensureMediaUrl(img).then((u) => {
+        if (!u) return;
+        userMsg.image = u;
+        commit(id);                       // короткая ссылка вместо «фото пропало»
+        if (currentId === id) renderMessages({ scroll: false });
+      });
+    }
+    startGeneration(id, idx, 'send', body).finally(() => {
+      if (pendingMedia) pendingMedia.catch(() => {});
+    });
   }
 
   async function stopGeneration() {
@@ -930,7 +958,7 @@
     gen.controller.abort();
   }
 
-  function regenerate(idx) {
+  async function regenerate(idx) {
     if (gen) { toast('Дождитесь окончания ответа'); return; }
     const id = currentId;
     const msgs = loadMsgs(id);
@@ -940,15 +968,34 @@
     }
     if (u < 0) return;
     const prompt = msgs[u].text || 'Продолжи';
+    // картинка вопроса: data URL режем до base64, ссылку медиатеки скачиваем обратно —
+    // иначе «получить другой ответ» на вопрос с фото терял изображение
+    let regenImg = null;
+    const im = msgs[u].image;
+    if (im && typeof im === 'string' && im.startsWith('data:')) {
+      regenImg = { base64: im.split(',')[1] || '', mime: (im.slice(5).split(';')[0] || 'image/png') };
+    } else if (im && !/^data:/i.test(im)) {
+      try {
+        const r = await fetch(im, { credentials: 'same-origin' });
+        if (r.ok) {
+          const buf = new Uint8Array(await r.arrayBuffer());
+          let bin = '';
+          for (let i = 0; i < buf.length; i += 0x8000) {
+            bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+          }
+          regenImg = { base64: btoa(bin), mime: r.headers.get('content-type') || 'image/png' };
+        }
+      } catch { /* сеть — перегенерируем без фото */ }
+    }
     msgs.splice(u + 1);
     msgs.push(newBotMessage());
     const nidx = msgs.length - 1;
     commit(id);
     renderMessages({ scroll: false });
     refreshUI();
-    startGeneration(id, nidx, 'send', {
-      message: prompt, stream: true, web_search: chips.web, reasoning: chips.reason,
-    });
+    const body = { message: prompt, stream: true, web_search: chips.web, reasoning: chips.reason };
+    if (regenImg && regenImg.base64) { body.image_base64 = regenImg.base64; body.image_mime = regenImg.mime; }
+    startGeneration(id, nidx, 'send', body);
   }
 
   function onSendButton() {
@@ -957,6 +1004,40 @@
   }
 
   // ------------------------------------------------------------------ вложения
+
+  // Тяжёлые картинки (> MAX_IMAGE_STORE) храним не base64-строкой в истории,
+  // а ссылкой на серверную медиатеку: иначе архив чатов быстро раздувал и
+  // IndexedDB, и синхронизацию. Файл отдаётся по sha256 — повторная загрузка
+  // того же изображения ничего не пишет (дедупликация на сервере).
+  async function ensureMediaUrl(img) {
+    if (!img) return null;
+    if (img.mediaUrl) return img.mediaUrl;
+    if (img.url.length < MAX_IMAGE_STORE) return img.url;   // маленький data URL оставим как есть
+    try {
+      let r;
+      if (img.file) {
+        // multipart с сырым файлом: без двойного раздувания base64 в памяти/сети
+        const fd = new FormData();
+        fd.append('file', img.file, img.name || 'image');
+        r = await fetch(API.media, { method: 'POST', credentials: 'same-origin', body: fd });
+      } else {
+        r = await fetch(API.media, { method: 'POST', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ data: img.base64, mime: img.mime }) });
+      }
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
+      if (j && typeof j.url === 'string') {
+        img.mediaUrl = j.url;
+        return j.url;
+      }
+      throw new Error('нет url в ответе');
+    } catch (e) {
+      console.warn('media upload failed:', e);
+      toast('Фото не сохранится в истории (не удалось загрузить на сервер), но отправлено');
+      return null;
+    }
+  }
 
   function renderAttachment() {
     els.attachChip.hidden = !attachment;
@@ -1207,10 +1288,178 @@
     const reader = new FileReader();
     reader.onload = () => {
       const url = String(reader.result);
-      attachment = { url, base64: url.split(',')[1] || '', mime: f.type, name: f.name };
+      attachment = { url, base64: url.split(',')[1] || '', mime: f.type, name: f.name, file: f };
       renderAttachment();
     };
     reader.readAsDataURL(f);
+  });
+
+  // drag&drop изображения на область чата — тот же путь, что и через кнопку
+  els.inner.addEventListener('dragover', (e) => { e.preventDefault(); });
+  els.inner.addEventListener('drop', (e) => {
+    const f = [...(e.dataTransfer?.files || [])].find((x) => x.type.startsWith('image/'));
+    if (!f) return;
+    e.preventDefault();
+    if (f.size > MAX_IMAGE_BYTES) { toast('Изображение больше 8 МБ'); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const url = String(reader.result);
+      attachment = { url, base64: url.split(',')[1] || '', mime: f.type, name: f.name, file: f };
+      renderAttachment();
+    };
+    reader.readAsDataURL(f);
+  });
+
+  // ------------------------------------------------------------------ лайтбокс фото
+  // Клик по любому изображению в чате открывает полноэкранный просмотр:
+  // колесо/пинч — масштаб, перетаскивание — панорама (особенно полезно для
+  // скриншотов с мелким текстом), ←/→ — переход между фото этого же ответа,
+  // Esc или клик по тёмному фону — закрыть.
+  const lb = { root: null, img: null, cap: null, counter: null, prev: null, next: null,
+               urls: [], idx: -1, scale: 1, tx: 0, ty: 0, drag: null };
+
+  function buildLightbox() {
+    if (lb.root) return;
+    lb.root = document.createElement('div');
+    lb.root.className = 'lightbox';
+    lb.root.hidden = true;
+    lb.root.setAttribute('role', 'dialog');
+    lb.root.setAttribute('aria-modal', 'true');
+    lb.root.setAttribute('aria-label', 'Просмотр изображения');
+
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'lb-btn lb-close';
+    close.textContent = '✕';
+    close.setAttribute('aria-label', 'Закрыть');
+    close.addEventListener('click', () => closeLightbox());
+
+    const prev = document.createElement('button');
+    prev.type = 'button';
+    prev.className = 'lb-btn lb-nav lb-prev';
+    prev.textContent = '‹';
+    prev.setAttribute('aria-label', 'Предыдущее изображение');
+    prev.addEventListener('click', () => stepLightbox(-1));
+
+    const next = document.createElement('button');
+    next.type = 'button';
+    next.className = 'lb-btn lb-nav lb-next';
+    next.textContent = '›';
+    next.setAttribute('aria-label', 'Следующее изображение');
+    next.addEventListener('click', () => stepLightbox(1));
+
+    lb.img = new Image();
+    lb.img.alt = '';
+    lb.img.draggable = false;
+
+    lb.cap = document.createElement('div');
+    lb.cap.className = 'lb-cap';
+    lb.counter = document.createElement('span');
+    lb.counter.className = 'lb-counter';
+    lb.counter.hidden = true;
+
+    lb.prev = prev;
+    lb.next = next;
+    lb.root.append(close, prev, next, lb.img, lb.cap, lb.counter);
+    document.body.appendChild(lb.root);
+
+    // клик по тёмному фону (не по картинке/кнопкам) закрывает
+    lb.root.addEventListener('click', (e) => {
+      if (e.target === lb.root) closeLightbox();
+    });
+    lb.root.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      zoomBy(Math.exp(-e.deltaY * 0.0015));
+    }, { passive: false });
+    lb.root.addEventListener('pointerdown', (e) => {
+      if (e.target !== lb.img) return;
+      lb.drag = { x: e.clientX, y: e.clientY, tx: lb.tx, ty: lb.ty };
+      lb.root.classList.add('grabbing');
+      lb.img.setPointerCapture(e.pointerId);
+    });
+    lb.root.addEventListener('pointermove', (e) => {
+      if (!lb.drag) return;
+      lb.tx = lb.drag.tx + (e.clientX - lb.drag.x);
+      lb.ty = lb.drag.ty + (e.clientY - lb.drag.y);
+      applyLbTransform();
+    });
+    const endDrag = () => { lb.drag = null; lb.root.classList.remove('grabbing'); };
+    lb.root.addEventListener('pointerup', endDrag);
+    lb.root.addEventListener('pointercancel', endDrag);
+    // двойной клик — сброс масштаба / быстрый зум 2x
+    lb.img.addEventListener('dblclick', () => {
+      if (lb.scale > 1.01) { lb.scale = 1; lb.tx = 0; lb.ty = 0; }
+      else lb.scale = 2;
+      applyLbTransform();
+    });
+  }
+
+  function applyLbTransform() {
+    lb.img.style.transform = `translate(${lb.tx}px, ${lb.ty}px) scale(${lb.scale})`;
+  }
+
+  function zoomBy(k) {
+    lb.scale = Math.min(8, Math.max(1, lb.scale * k));
+    if (lb.scale === 1) { lb.tx = 0; lb.ty = 0; }
+    applyLbTransform();
+  }
+
+  function showLbImage() {
+    lb.img.src = lb.urls[lb.idx];
+    lb.img.alt = 'Изображение ' + (lb.idx + 1) + ' из ' + lb.urls.length;
+    lb.counter.textContent = `${lb.idx + 1} / ${lb.urls.length}`;
+    lb.counter.hidden = lb.urls.length < 2;
+    lb.prev && (lb.prev.hidden = lb.urls.length < 2);
+    lb.next && (lb.next.hidden = lb.urls.length < 2);
+    lb.scale = 1; lb.tx = 0; lb.ty = 0;
+    applyLbTransform();
+  }
+
+  function stepLightbox(d) {
+    if (lb.urls.length < 2) return;
+    lb.idx = (lb.idx + d + lb.urls.length) % lb.urls.length;
+    showLbImage();
+  }
+
+  function openLightbox(imgEl) {
+    buildLightbox();
+    // галерея = все картинки этого пузыря сообщения (несколько картинок в ответе листаются)
+    const bubble = imgEl.closest('.bubble');
+    const list = [...(bubble ? bubble.querySelectorAll('img.zoomable') : [imgEl])];
+    lb.urls = list.map((i) => i.src);
+    lb.idx = Math.max(0, list.indexOf(imgEl));
+    lb.cap.textContent = imgEl.alt || '';
+    lb.root.hidden = false;
+    document.documentElement.classList.add('lb-open');
+    showLbImage();
+    lb.root.querySelector('.lb-close').focus();
+  }
+
+  let lbReturnFocus = null;
+  function closeLightbox() {
+    if (!lb.root || lb.root.hidden) return;
+    lb.root.hidden = true;
+    lb.img.removeAttribute('src');       // не держим картинку в памяти/запросах
+    document.documentElement.classList.remove('lb-open');
+    if (lbReturnFocus && lbReturnFocus.isConnected) lbReturnFocus.focus();
+    lbReturnFocus = null;
+  }
+
+  els.messages.addEventListener('click', (e) => {
+    const img = e.target.closest('img.zoomable');
+    if (!img) return;
+    lbReturnFocus = img;
+    openLightbox(img);
+  });
+
+  window.addEventListener('keydown', (e) => {
+    if (!lb.root || lb.root.hidden) return;
+    if (e.key === 'Escape') { e.stopPropagation(); closeLightbox(); }
+    else if (e.key === 'ArrowLeft') stepLightbox(-1);
+    else if (e.key === 'ArrowRight') stepLightbox(1);
+    else if (e.key === '+' || e.key === '=') zoomBy(1.25);
+    else if (e.key === '-') zoomBy(0.8);
+    else if (e.key === '0') { lb.scale = 1; lb.tx = 0; lb.ty = 0; applyLbTransform(); }
   });
 
   els.rename.addEventListener('click', renameCurrent);
