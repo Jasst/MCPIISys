@@ -287,7 +287,7 @@ def _merge_msgs(base: list, incoming: list) -> list:
     return result[-MAX_MSGS_PER_CHAT:]
 
 
-def _merge_sessions(base: list, incoming: list) -> list:
+def _merge_sessions(base: list, incoming: list, partial: bool = False) -> list:
     """Слияние списков чатов по id: last-write-wins по полю updated.
 
     Пришедший список замещает записи тех же id (переименование, удаление из
@@ -323,11 +323,21 @@ def _merge_sessions(base: list, incoming: list) -> list:
     # и устройство B получало дубли записей чатов устройства A («чат
     # копируется» в списке после sync). Повторная доставка того же снимка
     # идемпотентна: состав и порядок не меняются.
+    # В порядок входят ВСЕ пришедшие id (в т.ч. незнакомые серверу — новые чаты),
+    # иначе новый чат устройства A отбрасывался merge'ом и никогда не появлялся
+    # на B («на новом устройстве ничего не появляется»).
+    # «Хвост» из base дописывается только когда присланный список НЕ полный
+    # (_partial: дельта содержит лишь изменённые записи) — иначе собственные
+    # старые записи вставлялись перед пользовательским порядком отправителя и
+    # перестановка чатов терялась при каждом sync.
     incoming_ids = [s['id'] for s in incoming if isinstance(s, dict) and s.get('id')]
-    known_incoming = [i for i in incoming_ids if i in base_ids]
-    tail = [s.get('id') for s in base if isinstance(s, dict) and s.get('id')
-            and s.get('id') not in set(known_incoming)]
-    order = known_incoming + tail
+    seen = set(incoming_ids)
+    if partial:
+        tail = [s.get('id') for s in base if isinstance(s, dict) and s.get('id')
+                and s.get('id') not in seen]
+        order = incoming_ids + tail
+    else:
+        order = incoming_ids
     out = [by_id[i] for i in dict.fromkeys(order)]
     legacy = [s for s in base if isinstance(s, dict) and not s.get('id')]
     return out + legacy
@@ -396,7 +406,11 @@ def _apply_delta(current: dict, delta: dict) -> tuple[dict, list]:
                       None) if key else None
             if at is not None:                              # тот же объект — патч поверх
                 old = hist[at]
-                hist[at] = {**old, **m} if isinstance(old, dict) and isinstance(m, dict) else m
+                if at != i - 1:                             # пересланный повторно хвост
+                    hist.pop(at)                            # (delta сдвинулась после
+                hist.insert(min(i - 1, len(hist)),          # tombstone-удаления) —
+                          {**old, **m}                      # переставляем на заявленную
+                          if isinstance(old, dict) and isinstance(m, dict) else m)
                 changed = True
             elif key and key in server_keys:                # копия уже известного — игнор
                 continue
@@ -406,6 +420,12 @@ def _apply_delta(current: dict, delta: dict) -> tuple[dict, list]:
             elif key is None and i > len(hist):
                 conflicts.append({'sid': sid, 'i': i})      # позиции нет — не дописываем вслепую
                 continue
+            elif i - 1 >= len(hist):                        # новый хвост — только дописка
+                hist.append(m)                              # строго подряд: дыра в позициях
+                if len(hist) - 1 > i - 1:                   # означает пропущенное сообщение
+                    conflicts.append({'sid': sid, 'i': i})  # (перепутанные очереди дельт)
+                else:
+                    changed = True
             else:                                           # новое сообщение — вставка по ключу
                 j = min(i - 1, len(hist))
                 while j < len(hist):
@@ -452,7 +472,10 @@ def _apply_delta(current: dict, delta: dict) -> tuple[dict, list]:
         # факт: ни один merge не возвращает tombstone-чат, повторное создание
         # даёт новый id и старых реестров не касается.
         explicit = set(deleted)
-        merged = _merge_sessions(current.get('sessions') or [], delta['sessions'])
+        # дельта-список прислан клиентом целиком (sessionsChanged — весь массив
+        # sessions), поэтому partial=False: порядок отправителя — эталонный.
+        merged = _merge_sessions(current.get('sessions') or [], delta['sessions'],
+                                 partial=bool(delta.get('_partial')))
         merged = [s for s in merged if not isinstance(s, dict) or s.get('id') not in (gone - explicit)]
         out['sessions'] = merged
     else:                                                   # списка в дельте нет —
