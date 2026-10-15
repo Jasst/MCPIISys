@@ -956,6 +956,10 @@
       else bot.error = err.message || String(err);
     } finally {
       if (g.authLost) {
+        // 401 в разгар генерации: иначе myGen-флаг залипнет и на следующем
+        // логине блокировал pullState/scheduleSync до истечения TTL сервера.
+        genFlagSet(false);
+        releaseGenLock();
         if (gen === g) gen = null;
         refreshUI();
       } else {
@@ -1836,7 +1840,13 @@
       if (cache[s.id]) { cache[s.id] = merged; lastSeen[s.id] = merged; }
     }
     saveSessions();
+    // Раньше при quiet сброс cache не делался совсем. Теперь принудительно
+    // перечитываем currentId из хранилища (удаляем его кеш-строку), чтобы
+    // фоновый merge, изменивший открытый диалог, гарантированно попал на
+    // экран — иначе пользователь видел «ничего не изменилось». Остальной
+    // cache при quiet не трогаем: перерисовка всё равно только для currentId.
     if (!opts.quiet) cache = {};
+    else if (currentId) delete cache[currentId];
     await reloadDirtySafe();
     if (currentId) renderMessages({ scroll: false });
     refreshUI();
@@ -2008,12 +2018,15 @@
 
   async function pushState() {
     if (!SYNC.ready || SYNC.busy || !currentScopeUid) return;
-    if (genFlagGet() && !gen) {
-      // финальная синхронизация завершённого ответа: снимаем лок ДО PUT
-      // (сервер пропустил бы запись только с флагом владельца, но точнее
-      // отпустить лок явно — другие устройства сразу разморозятся)
-      await releaseGenLock();
-    }
+    // Раньше releaseGenLock() вызывался ДО PUT: genFlagSet(false) внутри
+    // снимал флаг, и заголовок X-Client-Gen ниже уже не выставлялся.
+    // PUT уходил на сервер без признака владельца, и при живой чужой
+    // генерации (или после гонки при снятии лока) сервер отвечал 429,
+    // вместо того чтобы принять финальный commit завершённого ответа.
+    // Теперь лок отпускается ПОСЛЕ успешного PUT (в finally), а во время
+    // запроса флаг остаётся взведённым — заголовок владельца уходит вместе
+    // с финальным снапшотом.
+    const wasOwner = genFlagGet() && !gen;
     SYNC.busy = true;
     try {
       const localRev = await store().currentRev();
@@ -2039,7 +2052,15 @@
         body.delta = { messages: d.messages, deleted_chats: d.deletedChats, _allDeleted: await store().deletedRegistry() };
         if (d.sessionsChanged) body.delta.sessions = sessions;
         if (Object.keys(d.messages).length === 0 && d.deletedChats.length === 0 && !d.sessionsChanged) {
-          SYNC.base = d.rev;               // расходимостей нет — просто поднимаем версию
+          // Расходимостей нет. Раньше здесь SYNC.base присваивался локальный
+          // rev (Date.now()), и следующий pollRemoteState сравнивал серверный
+          // updated с этим ЛОКАЛЬНЫМ значением — при отставании серверных
+          // часов от клиентских условие `server.updated <= SYNC.base` было
+          // истинным, и опрос навсегда переставал тянуть свежие данные.
+          // SYNC.base всегда должен оставаться СЕРВЕРНОЙ версией; пустую
+          // дельту всё равно фиксируем как сохранённую (markSessionsSaved
+          // ниже не дойдёт — выходим раньше, делаем это сами).
+          try { await store().markSessionsSaved(SYNC.base); } catch { /* ignore */ }
           return;
         }
       }
@@ -2069,7 +2090,12 @@
         location.href = '/login';
       }
     } catch { /* нет связи — повторим при следующем изменении или при возврате сети */ }
-    finally { SYNC.busy = false; }
+    finally {
+      SYNC.busy = false;
+      // Финальный PUT завершённого ответа отправлен (или не удался) — только
+      // теперь отпускаем лок генерации, чтобы другие устройства разморозились.
+      if (wasOwner) await releaseGenLock();
+    }
   }
 
   // Сервер вернул конфликты: позиции/версии наших сообщений не совпали с его
@@ -2103,18 +2129,40 @@
   // состояние и показываем готовый ответ (единый источник истины — сервер).
   let remoteGenTimer = null;
   let remoteGenPaused = false;
+  let remoteGenGuard = null;   // аварийный выход из паузы, если статус-канал врёт
   async function checkRemoteGen() {
     if (!currentScopeUid) return;
     try {
-      const r = await fetch(API.genStatus, { credentials: 'same-origin', cache: 'no-store' });
+      const r = await fetch(API.genStatus + '?cid=' + encodeURIComponent(CID), { credentials: 'same-origin', cache: 'no-store' });
       if (!r.ok) return;
       const st = await r.json();
       if (st.active && !st.may_write) {
         remoteGenPaused = true;
         clearTimeout(SYNC.timer);                 // наша синхронизация на паузе до конца чужой генерации
         if (!remoteGenTimer) remoteGenTimer = setInterval(checkRemoteGen, 5000);
+        // Страховка: если сервер возвращает active:true, may_write:false,
+        // may_watch:false (задача «жива», но ни писать, ни смотреть нельзя —
+        // например, зависший лок на другом конце), эта ветка повторялась бы
+        // вечно. Раз в 30 с всё равно проверяем версию состояния и
+        // размораживаемся, если снапшот стал новее нашей базы.
+        if (!remoteGenGuard) remoteGenGuard = setTimeout(async () => {
+          remoteGenGuard = null;
+          try {
+            const rv = await fetch('/ai/ui-state/version', { credentials: 'same-origin', cache: 'no-store' });
+            if (rv.ok) {
+              const v = await rv.json();
+              if ((v.updated || 0) > (SYNC.base || 0)) {
+                remoteGenPaused = false;
+                clearInterval(remoteGenTimer); remoteGenTimer = null;
+                SYNC.ready = await pullState(true);
+                scheduleSync();
+              }
+            }
+          } catch { /* нет связи — следующий интервал checkRemoteGen повторит */ }
+        }, 30000);
       } else if (!st.active && remoteGenPaused) {
         remoteGenPaused = false;
+        clearTimeout(remoteGenGuard); remoteGenGuard = null;
         clearInterval(remoteGenTimer); remoteGenTimer = null;
         SYNC.ready = await pullState(true);       // тянем финальный ответ другого устройства
         scheduleSync();
@@ -2133,6 +2181,39 @@
     await store().init(currentScopeUid);
     await store().guardScope();   // в общей IndexedDB не должно быть чужого аккаунта
     await store().migrateLegacy(currentScopeUid);
+
+    // Восстановление от залипшего myGen-флага. Флаг ставится в localStorage
+    // при старте генерации и снимается при нормальном завершении. Если
+    // вкладку закрыли посреди ответа (или процесс убит), флаг остаётся '1',
+    // и он блокирует pullState/scheduleSync — второе устройство навсегда
+    // остаётся без синхронизации. Спрашиваем сервер, ведёт ли он вообще
+    // активную генерацию: если нет — флаг наш, осиротевший, снимаем.
+    if (genFlagGet()) {
+      try {
+        const r = await fetch(API.genStatus + '?cid=' + encodeURIComponent(CID),
+                              { credentials: 'same-origin', cache: 'no-store' });
+        if (r.ok) {
+          const st = await r.json();
+          if (!st.active) {
+            // сервер ничего не пишет — наш флаг не подкреплён живой задачей
+            genFlagSet(false);
+            try {
+              await fetch(API.genLock, {
+                method: 'DELETE', credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ client: true, cid: CID }),
+              });
+            } catch { /* TTL на сервере снимет лок сам */ }
+          } else if (st.mine) {
+            // сервер считает задачу нашей, но живой генерации в этой вкладке
+            // нет (gen === null) — тоже осиротевший флаг после перезагрузки
+            genFlagSet(false);
+            await releaseGenLock();
+          }
+        }
+      } catch { /* нет связи — решаем консервативно, флаг оставляем */ }
+    }
+
     try { sessions = await store().getSessions(); } catch { sessions = []; }
     SYNC.ready = await pullState();
     init();
