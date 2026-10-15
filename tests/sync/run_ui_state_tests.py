@@ -92,6 +92,11 @@ check('9f gen-status/get exposes deleted_chats to clients', isinstance(st.get('d
 big = {'base': c.get('/ai/ui-state').json()['updated'], 'sessions': [], 'messages': {'x': ['a' * 9_000_000]}}
 r = c.put('/ai/ui-state', json=big)
 check('8 oversized state refused (413)', r.status_code == 413)
+# 413 должен срабатывать ДО записи на диск: пересланный после отказа снимок
+# не должен удваивать историю («чат копируется сам себя»)
+st = c.get('/ai/ui-state').json()
+check('8a rejected write left no trace (no history duplication)',
+      all(len(h) <= 2 for h in st['messages'].values()))
 
 ui._read  # noqa
 bad = TestClient(FastAPI())
