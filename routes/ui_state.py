@@ -296,34 +296,41 @@ def _merge_sessions(base: list, incoming: list) -> list:
     наоборот, теряло новые. Порядок — как в присланном списке (пользовательский),
     незнакомые серверу чаты — в начало."""
     by_id = {s.get('id'): s for s in base if isinstance(s, dict) and s.get('id')}
+    base_ids = set(by_id)
     for s in incoming:
         if not isinstance(s, dict) or not s.get('id'):
             continue
-        by_id[s['id']] = s
-    # порядок НЕ пересортировывается: список чатов — это пользовательский
-    # порядок (ручная сортировка, архив), sort по updated «прыгал» между sync
-    # и ронял свежие/переименованные чаты в конец. Новые id — в начало списка.
+        # тот же объект с другим updated (например, локальный Date.now() устройства
+        # отстаёт от серверных меток): не понижаем свежую запись — поля берём из
+        # пришедшей, а updated оставляем максимальным из двух. Иначе переименование
+        # с телефона с отстающими часами «омолаживало» бы чат и merge на других
+        # устройствах считал бы его устаревшим.
+        prev = by_id.get(s['id'])
+        merged = dict(s)
+        if isinstance(prev, dict):
+            try:
+                a, b = float(prev.get('updated') or 0), float(s.get('updated') or 0)
+                if b > a:
+                    merged['updated'] = s.get('updated')
+                elif b >= a:
+                    merged['updated'] = prev.get('updated')
+            except (TypeError, ValueError):
+                pass
+        by_id[s['id']] = merged
+    # порядок — как в ПРИСЛАННОМ списке (это пользовательский порядок: ручная
+    # сортировка, архив). Чаты, о которых в присланном списке ничего нет,
+    # дописываются СХЛОПНУТЫМИ позади — раньше их вставляли сырыми копиями,
+    # и устройство B получало дубли записей чатов устройства A («чат
+    # копируется» в списке после sync). Повторная доставка того же снимка
+    # идемпотентна: состав и порядок не меняются.
     incoming_ids = [s['id'] for s in incoming if isinstance(s, dict) and s.get('id')]
-    new_ids = [i for i in incoming_ids if i not in {s.get('id') for s in base if isinstance(s, dict)}]
-    ordered = [s for s in incoming if isinstance(s, dict) and s.get('id')] + \
-              [s for s in base if isinstance(s, dict) and s.get('id') and s['id'] not in set(incoming_ids)]
-    seen: set = set()
-    out: list = []
-    for s in ordered:
-        sid = s['id']
-        if sid in seen:
-            continue
-        seen.add(sid)
-        out.append(by_id[sid])
+    known_incoming = [i for i in incoming_ids if i in base_ids]
+    tail = [s.get('id') for s in base if isinstance(s, dict) and s.get('id')
+            and s.get('id') not in set(known_incoming)]
+    order = known_incoming + tail
+    out = [by_id[i] for i in dict.fromkeys(order)]
     legacy = [s for s in base if isinstance(s, dict) and not s.get('id')]
-    return new_ids_order(out, new_ids) + legacy
-
-
-def new_ids_order(items: list, new_ids: list) -> list:
-    """Свежие (ещё не известные серверу) чаты — первыми, в присланном порядке."""
-    first = [s for s in items if s['id'] in set(new_ids)]
-    rest = [s for s in items if s['id'] not in set(new_ids)]
-    return first + rest
+    return out + legacy
 
 
 def _apply_delta(current: dict, delta: dict) -> tuple[dict, list]:
@@ -437,15 +444,16 @@ def _apply_delta(current: dict, delta: dict) -> tuple[dict, list]:
            'deleted_chats': reg}
     gone = known                                            # tombstone побеждает stale-снимок:
     if isinstance(delta.get('sessions'), list):             # список чатов менялся
-        incoming_ids = {s.get('id') for s in delta['sessions']
-                        if isinstance(s, dict) and s.get('id')}
+        # «Явно удалён» = id есть в deleted_chats этой же дельты. Раньше сюда
+        # попадал и _allDeleted (реестр клиента за 7 дней): устройство, на
+        # котором чат удалили давно, каждый sync подсовывал его старую копию в
+        # sessions, и tombstone-запрет обходился («не могу удалить то, что
+        # удалено явно») — чат воскресал в списке. Теперь удаление — абсолютный
+        # факт: ни один merge не возвращает tombstone-чат, повторное создание
+        # даёт новый id и старых реестров не касается.
+        explicit = set(deleted)
         merged = _merge_sessions(current.get('sessions') or [], delta['sessions'])
-        # удаление — факт: исключаем tombstone-ы, отсутствующие в пришедшем
-        # списке явно. Раньше приоритет updated из дельты над удалением
-        # позволял любому устройству со чуть более свеzym updated воскресить
-        # чат (погрешность часов между ПК/телефоном это гарантирует).
-        # Повторное создание чата даёт новый id — старые tombstone его не касаются.
-        merged = [s for s in merged if s.get('id') not in gone or s.get('id') in incoming_ids]
+        merged = [s for s in merged if not isinstance(s, dict) or s.get('id') not in (gone - explicit)]
         out['sessions'] = merged
     else:                                                   # списка в дельте нет —
         out['sessions'] = [s for s in out['sessions'] if s.get('id') not in gone]
@@ -545,6 +553,16 @@ async def get_state(user_id: str = Depends(require_auth)):
     return _read(user_id)
 
 
+@router.get('/ui-state/version')
+async def get_state_version(user_id: str = Depends(require_auth)):
+    """Только версия состояния — для периодического опроса другими устройствами.
+
+    Дешевле полного GET /ui-state при больших архивах: если updated не изменился,
+    тянуть снапшот незачем. Изменения чужого аккаунта этот ответ не раскрывает."""
+    st = _read(user_id)
+    return {'updated': st.get('updated', 0)}
+
+
 @router.put('/ui-state')
 async def put_state(body: StateBody, request: Request, user_id: str = Depends(require_auth)):
     # Генерационный лок: пока ответ пишется, состояние аккаунта имеет право
@@ -617,7 +635,13 @@ async def put_state(body: StateBody, request: Request, user_id: str = Depends(re
     # когда payload мог разрастись за счёт серверной истории (или урезаться
     # лимитом сообщений) — валидный снимок клиента ошибочно отклонялся, а
     # пересланный повторно удваивал историю. Теперь сравниваем ровно то, что
-    # будет записано на диск.
+    # будет записано на диск; если отказ случился из-за чужих данных на сервере,
+    # клиент при следующем pull получит свежий снапшот и почистит локальный архив.
+    incoming_bytes = len(json.dumps(
+        {'sessions': body.sessions, 'messages': body.messages, 'delta': body.delta},
+        ensure_ascii=False).encode('utf-8'))
+    if incoming_bytes > MAX_BYTES:
+        raise HTTPException(413, detail='Слишком много данных. Удалите старые чаты.')
     data = json.dumps(payload, ensure_ascii=False)
     if len(data.encode('utf-8')) > MAX_BYTES:
         raise HTTPException(413, detail='Слишком много данных. Удалите старые чаты.')
