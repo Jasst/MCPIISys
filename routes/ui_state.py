@@ -58,72 +58,111 @@ class StateBody(BaseModel):
 # Единый механизм генерации для всех устройств аккаунта. Пока один клиент пишет
 # ответ (фоновая SSE-задача на сервере живёт даже после закрытия вкладки),
 # PUT /ui-state от других устройств отклоняется с 429 — иначе они перезатёрли бы
-# чат черновиком/обрывком, и итоговый ответ превратился бы в «кашу».
+# чат черновиком/обрывком, и итоговый ответ превратился бы в «кашу». Остальные
+# устройства при этом НЕ слепые: они подключаются к той же живой задаче через
+# GET /ai/chat/attach?watch=1 (только подписка на буфер, новый запуск никогда)
+# и видят печать ответа в реальном времени; право финальной записи остаётся
+# у владельца лока.
 # Лок держится в памяти процесса (TTL-страховка на случай зависшей задачи);
 # GET /gen-status — тот же ключ, что использует /ai/chat/attach, поэтому статус
 # корректен даже после рестарта сервера (просто активные генерации при этом сбросятся).
+#
+# Владелец лока — НЕ аккаунт, а конкретное устройство (cid — стабильный id
+# клиента из localStorage). Это позволяет второму устройству БЕЗОПАСНО
+# подключаться к живой генерации через /ai/chat/attach: сервер знает, кому
+# принадлежит ответ, и отличает подписчика от постороннего писателя.
 
 _ACTIVE_TTL_MS = 10 * 60 * 1000        # предельная длительность одной генерации
 _ACTIVE_MAX = 500                       # защита от разрастания словаря
-_active_generations: "OrderedDict[str, float]" = OrderedDict()   # uid -> deadline_ms
+_active_generations: "OrderedDict[str, dict]" = OrderedDict()   # uid -> {deadline, cid}
 _active_lock = asyncio.Lock()
 
 
-def _active_deadline(uid: str) -> float:
-    """ms до снятия лока; <=0 — активной генерации нет (просроченный ключ чистим)."""
-    d = _active_generations.get(uid, 0.0) - time.time() * 1000
-    if d <= 0:
+def _active_state(uid: str) -> dict | None:
+    """Записи о локактивных генерациях аккаунта; просроченный ключ чистим."""
+    g = _active_generations.get(uid)
+    if g is None:
+        return None
+    if g['deadline'] - time.time() * 1000 <= 0:
         _active_generations.pop(uid, None)
-    return d
+        return None
+    return g
 
 
-def _active_touch(uid: str) -> None:
+def _active_touch(uid: str, cid: str) -> dict:
     now = time.time() * 1000
-    _active_generations[uid] = now + _ACTIVE_TTL_MS
+    g = {'deadline': now + _ACTIVE_TTL_MS, 'cid': cid or ''}
+    _active_generations[uid] = g
     _active_generations.move_to_end(uid)
     while len(_active_generations) > _ACTIVE_MAX:
         _active_generations.popitem(last=False)
+    return g
 
 
-def _active_release(uid: str) -> None:
+def _active_release(uid: str, cid: str | None = None) -> None:
+    """Снятие лока. Если указан cid — снимает только владелец (защита от
+    опоздавшего release'а другого устройства, сбросившего бы живой лок)."""
+    g = _active_generations.get(uid)
+    if g is None:
+        return
+    if cid is not None and g.get('cid') != cid:
+        return
     _active_generations.pop(uid, None)
 
 
 @router.get('/gen-status')
-async def gen_status(user_id: str = Depends(require_auth)):
-    """Есть ли у аккаунта активная генерация и можно ли данному устройству
-    писать состояние. active — по серверному локу; may_write — активна ли
-    генерация ИМЕННО этого устройства (совпадает с флагом X-Client-Gen его PUT).
-    Клиенты, у которых may_write=false и active=true, ждут окончания ответа."""
+async def gen_status(cid: str = '', user_id: str = Depends(require_auth)):
+    """Есть ли у аккаунта активная генерация и кто её ведёт.
+    active      — пишет ли кто-то ответ прямо сейчас;
+    mine        — эта генерация ведёт ИМЕННО это устройство (сверено по cid);
+    may_watch   — можно ли подключиться к потоку (/chat/attach): своё или чужое,
+                  но ТОЛЬКО живая задача сервера — иначе второй параллельный
+                  запуск перезатёр бы историю (это и была «каша»);
+    may_write   — может ли это устройство писать PUT /ui-state без флага
+                  X-Client-Gen (активной генерации нет вообще).
+    Клиенты, у которых active && !mine && !may_watch, ждут финального commit'а."""
     async with _active_lock:
-        remaining = _active_deadline(user_id)
-    return {'active': remaining > 0, 'may_write': remaining > 0, 'ttl_ms': max(0, int(remaining))}
+        g = _active_state(user_id)
+    if g is None:
+        return {'active': False, 'mine': False, 'may_watch': False,
+                'may_write': True, 'ttl_ms': 0}
+    mine = bool(cid) and g['cid'] == cid
+    return {'active': True, 'mine': mine, 'may_watch': True, 'may_write': False,
+            'ttl_ms': int(g['deadline'] - time.time() * 1000)}
 
 
 @router.post('/gen-lock')
 async def gen_lock(body: dict, user_id: str = Depends(require_auth)):
     """Занять/продлить генерационный лок перед стартом POST /ai/chat.
-    {client: true} — лок берёт это же устройство (его PUT разрешён);
-    {client: false} — генерацию запустило другое устройство, свой лок не трогаем.
+    {client: true, cid} — продление/захват СВОЕГО лока (это устройство будет
+    вести генерацию и имеет право писать состояние во время неё);
+    {client: false, cid} — проверка: не мешает ли чужая ЖИВАЯ генерация новому
+    запросу. Свой осиротевший флаг (вкладка закрылась в разгар ответа) сюда
+    не приходит — клиент шлёт client:false, и старый лок перезахватывается,
+    а не блокирует навсегда.
     Ответ: {ok, held_by_me}. ok=false — чужая генерация ещё пишется, новый
     запрос начинать нельзя (клиент показывает «дождитесь окончания»)."""
     mine = isinstance(body, dict) and bool(body.get('client'))
+    cid = str(body.get('cid') or '') if isinstance(body, dict) else ''
     async with _active_lock:
-        remaining = _active_deadline(user_id)
-        if remaining > 0 and not mine:
-            return {'ok': False, 'held_by_me': False, 'ttl_ms': int(remaining)}
+        g = _active_state(user_id)
+        if g is not None and not mine:
+            return {'ok': False, 'held_by_me': g['cid'] == cid,
+                    'ttl_ms': int(g['deadline'] - time.time() * 1000)}
         if mine:
-            _active_touch(user_id)
-        return {'ok': True, 'held_by_me': mine, 'ttl_ms': _ACTIVE_TTL_MS if mine else int(remaining)}
+            g = _active_touch(user_id, cid)
+        return {'ok': True, 'held_by_me': mine,
+                'ttl_ms': int(g['deadline'] - time.time() * 1000)}
 
 
 @router.delete('/gen-lock')
 async def gen_unlock(body: dict, user_id: str = Depends(require_auth)):
     """Снять лок по окончании генерации. client:false (чужая генерация) — no-op,
-    чтобы «умный» клиент не снял чужую защиту."""
+    чтобы «умный» клиент не снял чужую защиту. cid сверяется дополнительно:
+    даже с client:true чужой release невозможен."""
     if isinstance(body, dict) and body.get('client'):
         async with _active_lock:
-            _active_release(user_id)
+            _active_release(user_id, str(body.get('cid') or ''))
     return {'released': True}
 
 
@@ -459,8 +498,8 @@ async def put_state(body: StateBody, request: Request, user_id: str = Depends(re
     # считаем генерацию чужой — защита работает по умолчанию.
     client_gen = request.headers.get('x-client-gen', '') in ('1', 'true')
     async with _active_lock:
-        remaining = _active_deadline(user_id)
-        if remaining > 0 and not client_gen:
+        g = _active_state(user_id)
+        if g is not None and not client_gen:
             raise HTTPException(429, detail='На другом устройстве идёт генерация — синхронизация приостановлена')
 
     current = _read(user_id)

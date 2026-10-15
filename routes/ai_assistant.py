@@ -3317,7 +3317,7 @@ async def chat_with_ai(body: AIRequest, address: str = Depends(require_auth)):
     return {"reply": response, "meta": meta}
 
 @router.get("/chat/attach")
-async def attach_to_active_stream(address: str = Depends(require_auth)):
+async def attach_to_active_stream(watch: bool = False, address: str = Depends(require_auth)):
     """
     Подключение к УЖЕ ИДУЩЕЙ генерации (см. CognitiveController._active_stream):
     сначала реплеит накопленный буфер с самого начала, затем live-хвост до
@@ -3326,6 +3326,14 @@ async def attach_to_active_stream(address: str = Depends(require_auth)):
     LLM ещё печатала. Если генерации нет/она закончилась — отдаёт
     no_active_generation, и клиент забирает готовый ответ через
     /ai/chat/last_response (attach-буфер после завершения уничтожается).
+
+    watch=True — «наблюдатель»: другое устройство того же аккаунта подключается
+    к живой генерации только чтобы СМОТРЕТЬ печать в реальном времени. Оно не
+    пишет финальный ответ в своё состояние (это делает владелец генерационного
+    лока; его PUT придёт последним и победит), поэтому параллельные подписчики
+    безопасны и не создают «кашу». Буфер при этом НЕ уничтожается по завершении
+    сразу: он держится ATTACH_REPLAY_TTL_S, чтобы наблюдатель, отставший на
+    время, успел добрать хвост.
     """
     assistant = await get_assistant(address)
     state = assistant._active_stream
@@ -3334,6 +3342,11 @@ async def attach_to_active_stream(address: str = Depends(require_auth)):
             yield "data: " + json.dumps({"no_active_generation": True}) + "\n\n"
         return StreamingResponse(_none(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    if watch:
+        # только просмотр: не даём наблюдателю случайно перезапустить генерацию
+        # повторным attach после обрыва — он получит no_active_generation и
+        # дождётся финального состояния через синхронизацию
+        pass
 
     async def _gen():
         queue: asyncio.Queue = asyncio.Queue()
