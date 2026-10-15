@@ -26,13 +26,16 @@
     notify: '/ai/notifications/poll',
     health: '/health',
     media: '/ai/ui-media',
+    genStatus: '/ai/gen-status',
+    genLock: '/ai/gen-lock',
   };
   // Чаты хранятся отдельно для каждого аккаунта: иначе другой человек на этом же
   // браузере увидит чужие разговоры. Настройки общие для браузера.
-  const KEY = { sessions: 'ai_sessions', msgs: 'ai_messages_', settings: 'ai_settings_v2' };
+  const KEY = { sessions: 'ai_sessions', msgs: 'ai_messages_', settings: 'ai_settings_v2', gen: 'ai_gen' };
   function setScope(uid) {
     KEY.sessions = uid ? `ai:${uid}:sessions` : 'ai_sessions';
     KEY.msgs = uid ? `ai:${uid}:messages_` : 'ai_messages_';
+    KEY.gen = uid ? `ai:${uid}:gen` : 'ai_gen';
     LS_MSGS = uid ? `ai:${uid}:messages_` : 'ai_messages_';
   }
   let LS_MSGS = 'ai_messages_';   // ключ-префикс localStorage-зеркала (устанавливается в setScope)
@@ -103,6 +106,7 @@
 
   function newBotMessage() {
     return {
+      id: uid(),   // устойчивый id: по нему сервер схлопывает повторы при слиянии
       role: 'assistant', text: '', reasoning: '', sources: [], images: [], notes: [],
       error: null, time: Date.now(), pending: true,
     };
@@ -188,8 +192,44 @@
       cache[id] = Array.isArray(v) ? v : [];
       lastSeenAt[id] = 0;
     }
+    // dedupeByKeys — единый механизм против дублей при повторном открытии чата.
+    // История может прийти из двух источников (IndexedDB и localStorage-зеркало),
+    // а после слияний на сервере — содержать одинаковые сообщения на разных
+    // позициях. Оставляем первое вхождение каждого устойчивого ключа (id либо
+    // role+time+text): «открыл и закрыл диалог — он скопировался» становится
+    // невозможным локально, ещё до отправки на сервер.
+    cache[id] = dedupeByKeys(cache[id]);
     reconcile(id);
     return cache[id];
+  }
+  function dedupeByKeys(msgs) {
+    let hasDup = false;
+    for (let i = 1; i < msgs.length && !hasDup; i++) {
+      if (!msgs[i]) continue;
+      const k = msgKey(msgs[i]);
+      if (!k) continue;
+      for (let j = 0; j < i; j++) {
+        if (msgs[j] && msgKey(msgs[j]) === k) { hasDup = true; break; }
+      }
+    }
+    if (!hasDup) return msgs;                 // обычный путь: без аллокаций
+    const seen = new Set();
+    const out = [];
+    for (const m of msgs) {
+      if (!m) continue;
+      const k = msgKey(m);
+      if (k) {
+        if (seen.has(k)) continue;
+        seen.add(k);
+      }
+      out.push(m);
+    }
+    return out;
+  }
+  function msgKey(m) {
+    if (typeof m.id === 'string' && m.id) return 'id:' + m.id;
+    if (typeof m.time === 'number') return `ct:${m.role || ''}|${m.time}|${(m.text || '').slice(0, 80)}`;
+    return null;
   }
   function reconcile(id) {
     const prev = lastSeen[id];
@@ -204,7 +244,7 @@
     try {
       const arr = await store().loadMessages(id);
       const msgs = arr.map((x) => x.m).filter(Boolean);
-      lastSeen[id] = msgs.slice(-MAX_STORED);
+      lastSeen[id] = dedupeByKeys(msgs).slice(-MAX_STORED);
       lastSeenAt[id] = Date.now();
     } catch { /* оставляем прежний снимок */ }
     return lastSeen[id] || [];
@@ -214,7 +254,7 @@
   async function reloadFromStore(id) {
     try {
       const arr = await store().loadMessages(id);
-      const msgs = arr.map((x) => x.m).filter(Boolean);
+      const msgs = dedupeByKeys(arr.map((x) => x.m).filter(Boolean));
       if (msgs.length >= (cache[id] || []).length) { cache[id] = msgs.slice(-MAX_STORED); lastSeen[id] = cache[id]; }
     } catch { /* оставляем прежний кеш */ }
   }
@@ -706,6 +746,43 @@
     els.input.focus();
   }
 
+  // ------------------------------------------------------------------ генерационный лок
+  // Единый механизм для всех устройств: ответ пишет ровно одно устройство,
+  // сервер хранит активную генерацию как фоновую задачу и знает её владельца.
+  // Флаг myGen (localStorage в scope аккаунта) переживает перезагрузку вкладки —
+  // именно то устройство, которое начало генерацию, подхватывает её через attach
+  // и имеет право синхронизировать чат; остальные ждут финального ответа.
+
+  const genFlagGet = () => { try { return localStorage.getItem(KEY.gen) === '1'; } catch { return false; } };
+  const genFlagSet = (v) => { try { v ? localStorage.setItem(KEY.gen, '1') : localStorage.removeItem(KEY.gen); } catch { /* ignore */ } };
+
+  async function acquireGenLock() {
+    if (!currentScopeUid) return true;              // локальный режим без входа — лок не нужен
+    try {
+      const r = await fetch(API.genLock, {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client: !!(gen || genFlagGet()) }),   // продление своей vs попытка занять чужой
+      });
+      if (!r.ok) return true;                       // старый/недоступный сервер — не блокируем отправку
+      const j = await r.json();
+      if (j.held_by_me) genFlagSet(true);
+      return !!j.ok;
+    } catch { return true; }                        // нет связи — решаем локально (как раньше)
+  }
+
+  async function releaseGenLock() {
+    if (!currentScopeUid || !genFlagGet()) return;
+    genFlagSet(false);
+    try {
+      await fetch(API.genLock, {
+        method: 'DELETE', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client: true }),
+      });
+    } catch { /* TTL на сервере снимет лок сам */ }
+  }
+
   // ------------------------------------------------------------------ SSE
 
   // Возвращает true, если поток завершился маркером [DONE]; false — если оборвался
@@ -790,6 +867,7 @@
     const controller = new AbortController();
     const g = { sessionId: id, idx, controller, stopRequested: false, interrupted: false, authLost: false };
     gen = g;
+    if (mode === 'send') genFlagSet(true);   // это устройство — владелец генерации до её завершения
     refreshUI();
 
     const msgs = loadMsgs(id);
@@ -851,6 +929,7 @@
         } else {
           if (!bot.text && !bot.error) bot.text = '(пустой ответ)';
           bot.pending = false;
+          genFlagSet(false);            // ответ завершён — синхронизация снова открыта всем
         }
         if (gen === g) gen = null;
         commit(id);
@@ -858,6 +937,7 @@
         refreshUI();
         if (g.interrupted && !g.stopRequested) scheduleResume(5000);
         else els.input.focus();
+        if (!g.interrupted) releaseGenLock();   // владение локом снято (await вне критической секции)
       }
     }
   }
@@ -870,9 +950,16 @@
 
   // Подхватываем незавершённые ответы, например после перезагрузки страницы.
   // Открытый/активный чат проверяем сразу, закрытые — асинхронно из хранилища.
+  // Единый механизм для всех устройств: attach делаем ТОЛЬКО если генерацию
+  // ведём мы (флаг myGen) или на сервере активной генерации нет вовсе. Иначе
+  // второе устройство стало бы «вторым подписчиком» чужого ответа: его реплей
+  // затирал бы локальную версию сообщения, оба клиента гоняли бы persist/PUT
+  // параллельно, и итоговый ответ превращался бы в кашу. Чужой ответ дойдёт
+  // через синхронизацию состояния, когда владелец генерации её завершит.
   async function resumePending() {
     clearTimeout(resumeTimer);
     if (gen) return;
+    let serverActive = null;      // есть ли активная генерация на сервере (null — не проверено)
     const priority = [currentId, gen && gen.sessionId].filter(Boolean);
     const rest = sessions.map((s) => s.id).filter((id) => !priority.includes(id));
     for (const id of priority.concat(rest)) {
@@ -880,6 +967,15 @@
       const msgs = await peekMsgs(id);
       const idx = msgs.findIndex((m) => m.pending);
       if (idx >= 0) {
+        if (!genFlagGet()) {
+          if (serverActive === null) {
+            try {
+              const r = await fetch(API.genStatus, { credentials: 'same-origin', cache: 'no-store' });
+              serverActive = !!(r.ok && (await r.json()).active);
+            } catch { serverActive = false; }   // нет связи — попробуем подхватить (как раньше)
+          }
+          if (serverActive) continue;           // пишет другое устройство — не мешаем
+        }
         await startGeneration(id, idx, 'attach', null);
         if (currentId === id) renderMessages({ scroll: false });
       }
@@ -887,7 +983,17 @@
     refreshUI();
   }
 
+  // Отправка — асинхронная обёртка над sync-логикой sendNow (см. ниже):
+  // перед новым запросом занимаем генерационный лок, чтобы другие устройства
+  // на время нашего ответа заморозили свою синхронизацию этого аккаунта.
   function send(override) {
+    acquireGenLock().then((ok) => {
+      if (!ok) { toast('Дождитесь окончания ответа на другом устройстве'); updateHint(); return; }
+      sendNow(override);
+    });
+  }
+
+  function sendNow(override) {
     const text = (override !== undefined ? override : els.input.value).trim();
     if (!text && !attachment) return;
 
@@ -915,6 +1021,7 @@
     // фото покажем ссылкой сразу после загрузки на сервер (см. ниже): тяжёлые
     // data URL в истории не храним — они забивали квоту и роняли показ после перезагрузки
     const userMsg = {
+      id: uid(),   // устойчивый id: по нему сервер схлопывает повторы при слиянии
       role: 'user',
       text,
       time: Date.now(),
@@ -1142,7 +1249,11 @@
         const text = typeof it === 'string'
           ? it
           : (it.text || it.message || it.content || it.summary || JSON.stringify(it));
+        // детерминированный id: одна и та же находка, полученная на двух
+        // устройствах, схлопнётся в одну запись при слиянии на сервере
+        const nid = typeof it === 'object' && it && (it.id || it.uid || it.hash);
         msgs.push({
+          id: 'ntf_' + (nid || btoa(encodeURIComponent(String(text)).slice(0, 64))),
           role: 'assistant', text, reasoning: '', sources: [], images: [], notes: [],
           error: null, time: Date.now(),
         });
@@ -1552,6 +1663,11 @@
 
   function scheduleSync() {
     if (!SYNC.ready || !currentScopeUid) return;
+    // Пока это устройство ведёт генерацию, синхронизация не нужна: ответ ещё
+    // не готов, а partial-дельты только создавали бы конфликты на других
+    // устройствах. Финальный commit после окончания ответа всё равно вызовет
+    // scheduleSync — данные уйдут на сервер ровно один раз и целиком.
+    if (genFlagGet()) return;
     clearTimeout(SYNC.timer);
     SYNC.timer = setTimeout(pushState, 1500);
   }
@@ -1564,15 +1680,57 @@
     for (const s of st.sessions || []) byId.set(s.id, s);
     for (const s of sessions) if (!byId.has(s.id)) byId.set(s.id, s);
     sessions = [...byId.values()];
+    // Единый механизм слияния на всех устройствах: серверная история не
+    // затирает локальную молча, а мержится по устойчивым ключам сообщений.
+    // Если оба устройства успели записать одно и то же сообщение (или чат
+    // «копировался» при повторном открытии), схлопкаем дубли в одну запись —
+    // ровно как это делает серверный _merge_msgs для PUT со снимком.
     for (const s of sessions) {
       const server = st.messages && st.messages[s.id];
-      if (Array.isArray(server)) await store().commitMessages(s.id, server.slice(-MAX_STORED), null);
+      if (!Array.isArray(server)) continue;
+      let local = [];
+      try { local = (await store().loadMessages(s.id)).map((x) => x.m).filter(Boolean); } catch { /* нет локальной копии */ }
+      const merged = mergeMsgLists(local, server.slice(-MAX_STORED));
+      await store().commitMessages(s.id, merged, null);
     }
     saveSessions();
     cache = {};
     await reloadDirtySafe();
     if (currentId) renderMessages({ scroll: false });
     refreshUI();
+  }
+
+  // Клиентская партия серверного _merge_msgs: совпадения по ключу схлопаются,
+  // новые сообщения вставляются в свою позицию, порядок сохраняется.
+  function mergeMsgLists(base, incoming) {
+    const result = base.map((m) => (m && typeof m === 'object' ? Object.assign({}, m) : m)).filter(Boolean);
+    const keyToIdx = new Map();
+    const usedKeys = new Set();
+    result.forEach((m, i) => {
+      const k = msgKey(m);
+      if (k && !keyToIdx.has(k)) { keyToIdx.set(k, i); usedKeys.add(k); }
+    });
+    incoming.forEach((item, pos) => {
+      if (!item || typeof item !== 'object') return;
+      const k = msgKey(item);
+      if (k && keyToIdx.has(k)) {
+        Object.assign(result[keyToIdx.get(k)], item);   // тот же объект — патч полями
+        return;
+      }
+      let j = Math.min(pos, result.length);
+      while (j < result.length) {
+        const ek = msgKey(result[j]);
+        if ((!k && !ek) || (k && ek && k !== ek && !usedKeys.has(ek))) break;
+        j++;
+      }
+      result.splice(j, 0, Object.assign({}, item));
+      if (k) { keyToIdx.set(k, j); usedKeys.add(k); }
+      for (let p = j + 1; p < result.length; p++) {
+        const pk = msgKey(result[p]);
+        if (pk) { keyToIdx.set(pk, p); usedKeys.add(pk); }
+      }
+    });
+    return dedupeByKeys(result).slice(-MAX_STORED);
   }
 
   // После записи в обход живых массивов перечитываем в память только открытый
@@ -1584,7 +1742,16 @@
 
   // Дельта с сервера: обновляем только пришедшие сообщения; открытые чаты
   // перечитываем из хранилища, закрытые дождутся loadMsgs при следующем обращении.
+  // Удалённые чаты (tombstone) обрабатываются ДО применения сообщений: иначе
+  // «припозднившаяся» дельта могла бы воскресить историю удалённого на другом
+  // устройстве чата — это и есть второй источник «каши» в списке.
   async function applyServerDelta(delta) {
+    if (Array.isArray(delta.deleted_chats) && delta.deleted_chats.length) {
+      const before = sessions.length;
+      sessions = sessions.filter((s) => !delta.deleted_chats.includes(s.id));
+      for (const id of delta.deleted_chats) { delete cache[id]; delete lastSeen[id]; }
+      if (sessions.length !== before) { saveSessions(); refreshUI(); }
+    }
     const msgs = delta.messages || {};
     let touchedCurrent = false;
     for (const [sid, list] of Object.entries(msgs)) {
@@ -1604,12 +1771,6 @@
         delete lastSeen[sid];
       }
     }
-    if (Array.isArray(delta.deleted_chats) && delta.deleted_chats.length) {
-      const before = sessions.length;
-      sessions = sessions.filter((s) => !delta.deleted_chats.includes(s.id));
-      for (const id of delta.deleted_chats) { delete cache[id]; delete lastSeen[id]; }
-      if (sessions.length !== before) { saveSessions(); refreshUI(); }
-    }
     if (Array.isArray(delta.sessions)) {
       const byId = new Map();
       for (const s of delta.sessions) byId.set(s.id, s);
@@ -1620,8 +1781,13 @@
     if (touchedCurrent) renderMessages({ scroll: false });
   }
 
-  async function pullState() {
-    if (!currentScopeUid || gen) return false;   // во время генерации не трогаем локальные сообщения
+  async function pullState(force) {
+    // во время генерации локальные сообщения трогает ТОЛЬКО владелец генерации
+    // (он же их пишет): ему нужен свежий base для финального PUT после ответа.
+    // Остальные устройства ждут — иначе mergeFull затёр бы живой ответ.
+    if (!currentScopeUid) return false;
+    if (genFlagGet() && !force) return false;
+    if (gen && !genFlagGet()) return false;
     try {
       const r = await fetch('/ai/ui-state', { credentials: 'same-origin', cache: 'no-store' });
       if (!r.ok) return false;
@@ -1634,6 +1800,12 @@
 
   async function pushState() {
     if (!SYNC.ready || SYNC.busy || !currentScopeUid) return;
+    if (genFlagGet() && !gen) {
+      // финальная синхронизация завершённого ответа: снимаем лок ДО PUT
+      // (сервер пропустил бы запись только с флагом владельца, но точнее
+      // отпустить лок явно — другие устройства сразу разморозятся)
+      await releaseGenLock();
+    }
     SYNC.busy = true;
     try {
       const localRev = await store().currentRev();
@@ -1653,19 +1825,24 @@
           return;
         }
       }
+      const headers = { 'Content-Type': 'application/json' };
+      if (genFlagGet()) headers['X-Client-Gen'] = '1';   // мы ведём генерацию — сервер не заморозит наш PUT
       const r = await fetch('/ai/ui-state', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         credentials: 'same-origin',
         body: JSON.stringify(body),
       });
       if (r.status === 409) {
         // Другое устройство уже сохранило свою версию: берём её и не перезаписываем
-        await pullState();
+        await pullState(true);
         scheduleSync();
+      } else if (r.status === 429) {
+        // На другом устройстве идёт генерация — ждём её окончания и тянем статус
+        await checkRemoteGen();
       } else if (r.ok) {
         const j = await r.json();
-        if (j.conflicts) await applyServerDelta(j.conflicts);
+        if (j.conflicts) await resolveConflicts(j.conflicts);
         SYNC.base = j.updated || SYNC.base;
         await store().markSessionsSaved(SYNC.base);
       } else if (r.status === 413) {
@@ -1675,6 +1852,63 @@
       }
     } catch { /* нет связи — повторим при следующем изменении или при возврате сети */ }
     finally { SYNC.busy = false; }
+  }
+
+  // Сервер вернул конфликты: позиции/версии наших сообщений не совпали с его
+  // историей (другое устройство успел изменить или укоротить тот же чат).
+  // Разрешаем детерминированно: эталон — серверная история; наши изменения
+  // поверх неё будут отправлены следующей дельтой как обычные патчи.
+  async function resolveConflicts(conflicts) {
+    let dirty = false;
+    for (const c of conflicts) {
+      const sid = c && c.sid;
+      if (!sid) continue;
+      if (sid === currentId || (gen && gen.sessionId === sid)) {
+        await reloadFromStore(sid);           // открытый чат: берём серверную версию целиком
+        dirty = true;
+      } else {
+        try {
+          const fresh = await store().loadMessages(sid);
+          if (fresh.length >= (lastSeen[sid] ? lastSeen[sid].length : 0)) {
+            if (cache[sid]) { cache[sid] = fresh.map((x) => x.m).filter(Boolean); lastSeen[sid] = cache[sid]; }
+            else lastSeen[sid] = fresh.map((x) => x.m).filter(Boolean);
+            delete lastSeenAt[sid];
+          }
+        } catch { /* оставляем прежний снимок */ }
+      }
+    }
+    if (dirty) { renderMessages({ scroll: false }); refreshUI(); }
+  }
+
+  // Заморозка синхронизации, пока генерацию ведёт другое устройство. Периодически
+  // проверяем сервер: как только ответ закончился — размораживаемся, подтягиваем
+  // состояние и показываем готовый ответ (единый источник истины — сервер).
+  let remoteGenTimer = null;
+  let remoteGenPaused = false;
+  async function checkRemoteGen() {
+    if (!currentScopeUid) return;
+    try {
+      const r = await fetch(API.genStatus, { credentials: 'same-origin', cache: 'no-store' });
+      if (!r.ok) return;
+      const st = await r.json();
+      if (st.active && !st.may_write) {
+        remoteGenPaused = true;
+        clearTimeout(SYNC.timer);                 // наша синхронизация на паузе до конца чужой генерации
+        if (!remoteGenTimer) remoteGenTimer = setInterval(checkRemoteGen, 5000);
+      } else if (!st.active && remoteGenPaused) {
+        remoteGenPaused = false;
+        clearInterval(remoteGenTimer); remoteGenTimer = null;
+        SYNC.ready = await pullState(true);       // тянем финальный ответ другого устройства
+        scheduleSync();
+      } else if (st.active && st.may_write) {
+        // сервер считает генерацию нашей, а мы её не ведём — осиротевший флаг
+        // (например, вкладка закрылась в разгар ответа): снимаем, чтобы не
+        // блокировать синхронизацию остальным устройствам бесконечно
+        genFlagSet(false);
+        await releaseGenLock();
+        scheduleSync();
+      }
+    } catch { /* нет связи — попробуем позже */ }
   }
 
   async function bootstrap() {
