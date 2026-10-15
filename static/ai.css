@@ -101,8 +101,19 @@ body[data-fs="l"] { --chat-fs: 17px; }
 .only-mobile { display: none; }
 
 /* ---------- сообщения ---------- */
-.messages { flex: 1; overflow-y: auto; padding: 22px 16px 10px; }
+.messages { flex: 1; overflow-y: auto; padding: 22px 16px 10px; position: relative; }
 .msgs-inner { max-width: 780px; min-height: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+
+/* Кнопка «к концу переписки» — появляется, когда пользователь ушёл вверх от низа */
+.scroll-bottom {
+  position: sticky; bottom: 8px; left: 50%; z-index: 5;
+  width: 34px; height: 34px; border-radius: 50%;
+  display: grid; place-items: center; cursor: pointer; padding: 0;
+  background: var(--bg-surface); color: var(--text-muted);
+  border: 1px solid var(--border-color); box-shadow: var(--shadow-md);
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+.scroll-bottom:hover { color: var(--text-main); background: var(--bg-hover); }
 
 .msg { display: flex; gap: 12px; align-items: flex-start; animation: fadeUp .25s ease both; }
 .msg.user { justify-content: flex-end; }
