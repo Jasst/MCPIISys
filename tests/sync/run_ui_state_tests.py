@@ -91,8 +91,8 @@ r = c.put('/ai/ui-state', json={'base': st['updated'], 'sessions': [{'id': 's1',
                                 'messages': {}})
 check('9g SSE notified on state write', r.status_code == 200 and q_evt.qsize() == 1
       and q_evt.get_nowait() == 'state-changed')
-routes_paths = {(rt.path, getattr(rt, 'methods', None)) for rt in ui.router.routes}
-check('9h events channel registered', ('/ai/ui-state/events', {'GET'}) in routes_paths)
+routes_paths = {(rt.path, frozenset(getattr(rt, 'methods', None) or ())) for rt in ui.router.routes}
+check('9h events channel registered', ('/ai/ui-state/events', frozenset({'GET'})) in routes_paths)
 # tombstone из дельты без sessions-списка тоже вырезает запись из sessions
 st = c.get('/ai/ui-state').json()
 r = c.put('/ai/ui-state', json={'base': st['updated'], 'rev': 6, 'delta': {
@@ -103,14 +103,34 @@ check('9e tombstone without sessions list removes session entry',
 # GET отдаёт реестр — mergeFull клиента обязан вырезать эти чаты локально
 check('9f gen-status/get exposes deleted_chats to clients', isinstance(st.get('deleted_chats'), list))
 
-big = {'base': c.get('/ai/ui-state').json()['updated'], 'sessions': [], 'messages': {'x': ['a' * 9_000_000]}}
+before = c.get('/ai/ui-state').json()
+big = {'base': before['updated'], 'sessions': [], 'messages': {'x': ['a' * 9_000_000]}}
 r = c.put('/ai/ui-state', json=big)
 check('8 oversized state refused (413)', r.status_code == 413)
-# 413 должен срабатывать ДО записи на диск: пересланный после отказа снимок
-# не должен удваивать историю («чат копируется сам себя»)
-st = c.get('/ai/ui-state').json()
-check('8a rejected write left no trace (no history duplication)',
-      all(len(h) <= 2 for h in st['messages'].values()))
+# 413 должен срабатывать ДО записи на диск и быть идемпотентным: повторный
+# отказ не должен двигать updated и менять содержимое («чат копируется сам себя»)
+after = c.get('/ai/ui-state').json()
+check('8a rejected write left no trace (state byte-identical)',
+      after == before)
+
+# Регресс боевого лога: POST /gen-lock {client:false} при СВОБОДНОМ локе
+# давал TypeError ('NoneType' object is not subscriptable) -> nginx 502,
+# и новый чат на втором устройстве не стартовал.
+r = c.post('/ai/gen-lock', json={'client': False, 'cid': 'cA'})
+check('10a gen-lock check with free lock returns ok (no 500)',
+      r.status_code == 200 and r.json().get('ok') is True)
+r = c.post('/ai/gen-lock', json={'client': True, 'cid': 'cA'})
+check('10b gen-lock capture returns ttl_ms > 0',
+      r.status_code == 200 and r.json().get('held_by_me') and r.json()['ttl_ms'] > 0)
+r = c.post('/ai/gen-lock', json={'client': False, 'cid': 'cB'})
+check('10c second device blocked while lock held',
+      r.status_code == 200 and r.json().get('ok') is False)
+r = c.request('DELETE', '/ai/gen-lock', json={'client': True, 'cid': 'cB'})
+check('10d foreign release cannot drop live lock',
+      r.status_code == 200 and c.post('/ai/gen-lock', json={'client': False, 'cid': 'cB'}).json().get('ok') is False)
+r = c.request('DELETE', '/ai/gen-lock', json={'client': True, 'cid': 'cA'})
+check('10e owner release frees the lock',
+      r.status_code == 200 and c.post('/ai/gen-lock', json={'client': False, 'cid': 'cB'}).json().get('ok') is True)
 
 ui._read  # noqa
 bad = TestClient(FastAPI())
