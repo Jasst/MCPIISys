@@ -74,7 +74,7 @@ def _split_reasoning(text: str) -> Tuple[str, str]:
 from collections import OrderedDict, defaultdict
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 from GCN.mcp_client_manager import MCPToolManager
 
@@ -2583,7 +2583,8 @@ class CognitiveController:
 
     async def stream_response(self, message: str, web_search: bool = False,
                               image_base64: str = None, image_mime: str = None,
-                              reasoning: bool = False, char_by_char: bool = None):
+                              reasoning: bool = False, char_by_char: bool = None,
+                              gen_key: Optional[str] = None):
         """
         Тонкая обёртка над StreamingResponse. Реальная генерация выполняется в
         self._stream_response_worker, запущенном как отдельная asyncio.Task
@@ -2608,7 +2609,8 @@ class CognitiveController:
         state = self._active_stream
         if state is None or state.get("done"):
             gen_id = f"{self.user_id}:{time.time_ns()}"
-            state = {"gen_id": gen_id, "buffer": [], "subscribers": set(), "done": False}
+            state = {"gen_id": gen_id, "buffer": [], "subscribers": set(), "done": False,
+                     "key": gen_key}
             self._active_stream = state
             push = self._make_push(gen_id)
             task = self._spawn_background_task(
@@ -2621,8 +2623,12 @@ class CognitiveController:
             )
             state["task"] = task
         else:
-            gen_id = state["gen_id"]
-            logger.info(f"stream_response: подключаюсь к уже идущей генерации {gen_id} вместо новой")
+            # Раньше здесь новый запрос подключался к ЧУЖОЙ идущей генерации и получал её
+            # ответ. Теперь честно отказываем: клиент покажет «ответ уже пишется».
+            logger.info(f"stream_response: генерация {state['gen_id']} уже идёт, отказ")
+            yield f"data: {json.dumps({'error': 'generation_busy'})}\n\n"
+            yield "data: [DONE]\n\n"
+            return
 
         queue: asyncio.Queue = asyncio.Queue()
         # ИСПРАВЛЕНИЕ race condition:
@@ -3318,6 +3324,8 @@ class AIRequest(BaseModel):
     # Раньше поля не было в модели — FastAPI/pydantic отбрасывали его молча,
     # и ссылка оставалась только в тексте сообщения на усмотрение LLM.
     url_to_fetch: Optional[str] = Field(None, max_length=2000)
+    # id сообщения-ответа на клиенте: поток привязан к нему, чужой не подхватывается
+    gen_key: Optional[str] = Field(None, max_length=200)
 
 class ResearchRequest(BaseModel):
     goal: str = Field(..., min_length=1, max_length=2000)
@@ -3337,6 +3345,11 @@ async def chat_with_ai(body: AIRequest, address: str = Depends(require_auth)):
         body.message = f"{body.message}\n{body.url_to_fetch}".strip()
     assistant = await get_assistant(address)
     if body.stream:
+        busy = assistant._active_stream
+        if busy is not None and not busy.get("done"):
+            # Другая генерация уже идёт (другое устройство, другой чат): раньше новый
+            # запрос молча подключался к её потоку и получал ЧУЖОЙ ответ.
+            return JSONResponse({"detail": "generation_busy"}, status_code=409)
         return StreamingResponse(
             assistant.stream_response(
                 message=body.message,
@@ -3344,7 +3357,8 @@ async def chat_with_ai(body: AIRequest, address: str = Depends(require_auth)):
                 image_base64=body.image_base64,
                 image_mime=body.image_mime,
                 reasoning=body.reasoning,
-                char_by_char=body.char_by_char
+                char_by_char=body.char_by_char,
+                gen_key=body.gen_key
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache,no-store,must-revalidate", "X-Accel-Buffering": "no"}
@@ -3359,7 +3373,8 @@ async def chat_with_ai(body: AIRequest, address: str = Depends(require_auth)):
     return {"reply": response, "meta": meta}
 
 @router.get("/chat/attach")
-async def attach_to_active_stream(watch: bool = False, address: str = Depends(require_auth)):
+async def attach_to_active_stream(watch: bool = False, key: Optional[str] = None,
+                                  address: str = Depends(require_auth)):
     """
     Подключение к УЖЕ ИДУЩЕЙ генерации (см. CognitiveController._active_stream):
     сначала реплеит накопленный буфер с самого начала, затем live-хвост до
@@ -3390,9 +3405,13 @@ async def attach_to_active_stream(watch: bool = False, address: str = Depends(re
         if not fin:
             return None
         st = next(reversed(fin.values()))
-        return st if st.get("done") else None
+        return st if (st.get("done") and _ours(st)) else None
 
-    state = assistant._active_stream
+    def _ours(st):
+        # подключаемся только к потоку этого сообщения; без key — как раньше
+        return st is not None and (not key or not st.get("key") or st.get("key") == key)
+
+    state = assistant._active_stream if _ours(assistant._active_stream) else None
     # ВАЖНО: отсутствие _active_stream проверяем ВНУТРИ SSE-генератора, а не
     # здесь. Между POST /gen-lock (пишет _active_generations в ui_state.py) и
     # моментом, когда владелец дойдёт до stream_response (создаёт _active_stream
@@ -3413,7 +3432,7 @@ async def attach_to_active_stream(watch: bool = False, address: str = Depends(re
             async def _wait_start():
                 waited = 0.0
                 while True:
-                    st = assistant._active_stream
+                    st = assistant._active_stream if _ours(assistant._active_stream) else None
                     was_done = bool(st is not None and st.get("done"))
                     if was_done:
                         # активный state уже done — он сейчас и так в TTL-реестре

@@ -901,7 +901,7 @@
     else if (ev.image_url) m.images = (m.images || []).concat([ev.image_url]);
     else if (ev.tool_call) m.notes = (m.notes || []).concat(['🔧 ' + ev.tool_call]);
     else if (ev.warning) m.notes = (m.notes || []).concat(['⚠ ' + ev.warning]);
-    else if (ev.error) m.error = String(ev.error);
+    else if (ev.error) m.error = ev.error === 'generation_busy' ? 'Ответ уже пишется на другом устройстве или в другом чате. Дождитесь окончания и попробуйте снова.' : String(ev.error);
   }
 
   // Если сервер уже закончил, берём готовый ответ по тексту вопроса
@@ -954,7 +954,8 @@
     if (watch) pushNote(bot, '👁 Ответ печатается на другом устройстве');
     try {
       const res = mode === 'attach'
-        ? await fetch(API.attach + (watch ? '?watch=1' : ''), { credentials: 'same-origin', signal: controller.signal })
+        ? await fetch(API.attach + '?' + [watch ? 'watch=1' : '', 'key=' + encodeURIComponent(bot.id)].filter(Boolean).join('&'),
+            { credentials: 'same-origin', signal: controller.signal })
         : await fetch(API.chat, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -963,6 +964,7 @@
             signal: controller.signal,
           });
       if (res.status === 401) { g.authLost = true; location.href = '/login'; return; }
+      if (res.status === 409) { bot.error = 'Ответ уже пишется на другом устройстве или в другом чате. Дождитесь окончания и попробуйте снова.'; return; }
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
 
       // attach replays the whole buffer from the start: start from a clean slate
@@ -981,12 +983,14 @@
 
       if (!controller.signal.aborted) {
         if (none) {
+          const userMsg = msgs[idx - 1] && msgs[idx - 1].role === 'user' ? msgs[idx - 1].text : null;
           if (watch) {
-            // чужая генерация уже завершилась, пока мы подключались:
-            // ждём финального состояния от синхронизации, не трогаем историю
-            g.interrupted = true;
+            // чужая генерация уже завершилась: готовый ответ забираем с сервера
+            if (!bot.text && !bot.error) {
+              const ok = await recoverFromLast(bot, userMsg);
+              if (ok !== true) g.interrupted = true;   // ответа пока нет — повторим позже
+            }
           } else if (!bot.text && !bot.error) {
-            const userMsg = msgs[idx - 1] && msgs[idx - 1].role === 'user' ? msgs[idx - 1].text : null;
             const ok = await recoverFromLast(bot, userMsg);
             if (ok === null) g.interrupted = true;
             else if (!ok) bot.error = 'Ответ не найден на сервере (возможно, сервер перезапускался)';
@@ -1015,7 +1019,12 @@
           // временная, pending остаётся. Придёт commit владельца -> pullState/дельта
           // схлопнет это сообщение по id с серверным и очистит pending.
           if (gen === g) gen = null;
-          if (!g.interrupted) { pushNote(bot, '⏳ Ожидаем сохранение ответа…'); persistSoon(id); }
+          if (!g.interrupted) {
+            // ответ получен целиком — завершаем локально; владелец не нужен
+            bot.pending = false;
+            bot.notes = (bot.notes || []).filter((n) => !String(n).startsWith('👁'));
+            persistSoon(id);
+          }
           scheduleResume(5000);
           if (id === currentId) renderMessages({ scroll: false });
           refreshUI();
@@ -1187,6 +1196,7 @@
       stream: true,
       web_search: chips.web,
       reasoning: chips.reason,
+      gen_key: msgs[idx].id,
     };
     if (img) { body.image_base64 = img.base64; body.image_mime = img.mime; }
 
@@ -1251,7 +1261,8 @@
       scheduleSync(true);   // форс-пул начального состояния ДО genFlag в startGeneration
       renderMessages({ scroll: false });
       refreshUI();
-      const body = { message: prompt, stream: true, web_search: chips.web, reasoning: chips.reason };
+      const body = { message: prompt, stream: true, web_search: chips.web, reasoning: chips.reason,
+                     gen_key: loadMsgs(id)[nidx].id };
       if (regenImg && regenImg.base64) { body.image_base64 = regenImg.base64; body.image_mime = regenImg.mime; }
       startGeneration(id, nidx, 'send', body);
     };
