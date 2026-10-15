@@ -347,6 +347,14 @@ class CognitiveController:
         # Текущая фоновая генерация ответа (см. stream_response) — не привязана
         # к конкретному HTTP-соединению, живёт пока не допишется целиком.
         self._active_stream: Optional[Dict] = None
+        # Завершённые потоки, ещё доступные для attach-реплея (gen_id -> state).
+        # _finish_generation помечает state["done"]=True и выставляет его сюда на
+        # ATTACH_REPLAY_TTL_S перед тем как отцепить от _active_stream: подписчик
+        # /chat/attach?watch=1 успевает добрать хвост финального ответа, не дожидаясь
+        # PUT владельца через синхронизацию. Хранится только ссылка на тот же dict —
+        # буфер не копируется; новые чанки после done не пишутся (push сверяется с
+        # _active_stream), так что состояние здесь неизменно и потокобезопасно.
+        self._finished_streams: "OrderedDict[str, Dict]" = OrderedDict()
         # Лок на мутации _active_stream state (subscribers/done/buffer):
         # гарантирует атомарность «подписаться → снять снимок буфера» и
         # «пометить done → разослать None → очистить subscribers».
@@ -2685,6 +2693,11 @@ class CognitiveController:
         подписчик из stream_response, который добавился к subscribers под тем же
         локом, либо застанет done=True сразу при снятии снимка буфера,
         либо получит None от _finish_generation, но никак не оба раза.
+
+        Завершённый state НЕ исчезает мгновенно: он выставляется в
+        _finished_streams на ATTACH_REPLAY_TTL_S (см. attach_to_active_stream),
+        чтобы запоздавший наблюдатель (watch=1) мог replay-нуть финальный ответ
+        из буфера, не дожидаясь PUT владельца через синхронизацию.
         """
         state = self._active_stream
         if state is None or state.get("gen_id") != gen_id:
@@ -2697,6 +2710,17 @@ class CognitiveController:
                 await q.put(None)
             state["subscribers"].clear()
         if self._active_stream is state:
+            # держим ссылку на неизменный done-state для TTL-реплея; чистим
+            # просроченные записи и ограничиваем размер (защита от разрастания)
+            now = time.time()
+            state["_finished_at"] = now
+            fin = self._finished_streams
+            fin[gen_id] = state
+            fin.move_to_end(gen_id)
+            while fin and next(iter(fin.values())).get("_finished_at", now) < now - ATTACH_REPLAY_TTL_S:
+                fin.popitem(last=False)
+            while len(fin) > _FINISHED_STREAMS_MAX:
+                fin.popitem(last=False)
             self._active_stream = None
 
     async def _stream_response_worker(self, gen_id: str, push, message: str, web_search: bool = False,
@@ -3276,6 +3300,12 @@ async def get_assistant(user_id: str):
 # =====================================================================
 router = APIRouter(prefix='/ai', tags=['ai'])
 
+# TTL-окно, в котором завершённая генерация остаётся доступной для
+# /chat/attach?watch=1 (replay финального буфера вместо ожидания PUT-владельца
+# через синхронизацию), и ограничение на число хранимых done-state'ов.
+ATTACH_REPLAY_TTL_S = 60.0
+_FINISHED_STREAMS_MAX = 8
+
 class AIRequest(BaseModel):
     message: str = Field(..., min_length=MIN_MESSAGE_LENGTH, max_length=MAX_MESSAGE_LENGTH)
     stream: bool = True
@@ -3348,6 +3378,20 @@ async def attach_to_active_stream(watch: bool = False, address: str = Depends(re
     время, успел добрать хвост.
     """
     assistant = await get_assistant(address)
+
+    def _fresh_finished():
+        """Самый свежий завершённый поток в TTL-окне (или None). Записи старше
+        ATTACH_REPLAY_TTL_S выбрасываются — иначе словарь рос бы до конца жизни
+        ассистента."""
+        now = time.time()
+        fin = assistant._finished_streams
+        while fin and next(iter(fin.values())).get("_finished_at", now) < now - ATTACH_REPLAY_TTL_S:
+            fin.popitem(last=False)
+        if not fin:
+            return None
+        st = next(reversed(fin.values()))
+        return st if st.get("done") else None
+
     state = assistant._active_stream
     # ВАЖНО: отсутствие _active_stream проверяем ВНУТРИ SSE-генератора, а не
     # здесь. Между POST /gen-lock (пишет _active_generations в ui_state.py) и
@@ -3370,11 +3414,18 @@ async def attach_to_active_stream(watch: bool = False, address: str = Depends(re
                 waited = 0.0
                 while True:
                     st = assistant._active_stream
-                    # ВАЖНО: ловим и уже завершённый поток (done=True): в TTL-окне
-                    # после ответа его буфер — самый быстрый способ показать
-                    # наблюдателю финал, чем ждать PUT-владельца/SSE state-changed.
-                    # Для владельца без watch поведение прежнее (no_active_generation
-                    # -> recoverFromLast/last_response).
+                    was_done = bool(st is not None and st.get("done"))
+                    if was_done:
+                        # активный state уже done — он сейчас и так в TTL-реестре
+                        st = None
+                    if st is None:
+                        # ВАЖНО: ловим и уже завершённый поток (done=True): в TTL-окне
+                        # после ответа его буфер — самый быстрый способ показать
+                        # наблюдателю финал, чем ждать PUT-владельца/SSE state-changed.
+                        # Для владельца без watch поведение прежнее (no_active_generation
+                        # -> recoverFromLast/last_response).
+                        st = _fresh_finished()
+                        was_done = st is not None
                     if st is not None:
                         queue: asyncio.Queue = asyncio.Queue()
                         async with assistant._stream_state_lock:
@@ -3382,8 +3433,9 @@ async def attach_to_active_stream(watch: bool = False, address: str = Depends(re
                             # что использует stream_response: чанк, отправленный
                             # между этими точками, попадёт ровно один раз
                             snapshot = list(st["buffer"])
-                            st["subscribers"].add(queue)
-                            was_done = bool(st.get("done"))
+                            if not was_done:
+                                st["subscribers"].add(queue)
+                            was_done = was_done or bool(st.get("done"))
                         try:
                             for chunk in snapshot:
                                 yield chunk
