@@ -1716,7 +1716,7 @@
   // Протокол дельтовый: PUT /ai/ui-state передаёт ТОЛЬКО изменённые с момента
   // последней отправки сообщения (версии > base) и id удалённых чатов, а не весь
   // контент. Сервер хранит снапшот, применяет дельту и отвечает новой версией.
-  const SYNC = { base: 0, ready: false, timer: null, busy: false };
+  const SYNC = { base: 0, ready: false, timer: null, busy: false, etag: '', etagMisses: 0 };
 
   // «Чужой pending» — сообщение, которое пишет НЕ это устройство (у наблюдателя
   // нет флага myGen). Его нельзя отправлять на сервер как своё: серверный merge
@@ -1751,7 +1751,14 @@
   // Слияние полного состояния (первый вход/409): серверные версии приоритетнее
   // для тех же id, локальные чаты, которых на сервере нет, сохраняются и уйдут
   // на сервер следующей дельтой.
-  async function mergeFull(st) {
+  async function mergeFull(st, opts = {}) {
+    // quiet-режим (фоновый опрос): если данные побайтово не изменились —
+    // ничего не перерисовываем. Это главный источник «дёрганья» чата:
+    // раньше каждый pullState безусловно гнал commitMessages по всем чатам,
+    // сбрасывал кеш и перестраивал весь DOM, хотя сервер мог просто поднять
+    // версию updated без реальных изменений.
+    if (opts.quiet && !stateChanged(st)) return false;
+    lastStateJson = JSON.stringify(st);
     // tombstone-реестр сервера: чаты, удалённые на другом устройстве, не
     // должны пережить merge — иначе они «воскресали» при первом же pullState/409
     const dels = new Set(Array.isArray(st.deleted_chats) ? st.deleted_chats : []);
@@ -1777,13 +1784,30 @@
       let local = [];
       try { local = (await store().loadMessages(s.id)).map((x) => x.m).filter(Boolean); } catch { /* нет локальной копии */ }
       const merged = mergeMsgLists(local, server.slice(-MAX_STORED));
+      // quiet: чат не менялся побайтово — не трогаем ни IndexedDB, ни кеш
+      if (opts.quiet && merged.length === local.length &&
+          JSON.stringify(merged) === JSON.stringify(local)) continue;
       await store().commitMessages(s.id, merged, null);
+      if (cache[s.id]) { cache[s.id] = merged; lastSeen[s.id] = merged; }
     }
     saveSessions();
-    cache = {};
+    if (!opts.quiet) cache = {};
     await reloadDirtySafe();
     if (currentId) renderMessages({ scroll: false });
     refreshUI();
+    return true;
+  }
+
+  // Побайтовая сигнатура значимых данных снапшота (без поля updated — оно
+  // меняется даже когда содержимое идентично). Равные строки = равное состояние.
+  let lastStateJson = '';
+  function stateSig(st) {
+    return JSON.stringify([st.sessions || [], st.messages || {},
+      (st.deleted_chats || []).map((d) => (typeof d === 'string' ? d : d.sid))]);
+  }
+  function stateChanged(st) {
+    try { return stateSig(st) !== stateSig(JSON.parse(lastStateJson)); }
+    catch { return true; }   // первой сверки нет — считаем, что изменилось
   }
 
   // Клиентская партия серверного _merge_msgs: совпадения по ключу схлопаются,
@@ -1841,33 +1865,53 @@
     const msgs = delta.messages || {};
     let touchedCurrent = false;
     for (const [sid, list] of Object.entries(msgs)) {
-      if (sid === currentId || (gen && gen.sessionId === sid)) {
-        await reloadFromStore(sid);       // живой кеш актуализируем из хранилища
-        if (sid === currentId) touchedCurrent = true;
-      } else {
-        const cur = await store().loadMessages(sid).then((arr) => arr.map((x) => x.m));
-        const next = cur.slice();
-        for (const it of list) {
-          if (it.i == null) continue;
-          if (it.m === null || it.m === undefined) next.splice(it.i, 1);
-          else if (it.i < next.length) next[it.i] = it.m;
-          else next.push(it.m);
+      if (Array.isArray(list) && list.length && list.every((x) => x && typeof x === 'object' && 'i' in x)) {
+        // Дельта PUT: [{i, m}] — точечные вставки/патчи по позициям.
+        if (sid === currentId || (gen && gen.sessionId === sid)) {
+          await reloadFromStore(sid);   // живой кеш актуализируем из хранилища
+          if (sid === currentId) touchedCurrent = true;
+        } else {
+          const cur = await store().loadMessages(sid).then((arr) => arr.map((x) => x.m));
+          const next = cur.slice();
+          for (const it of list) {
+            if (it.i == null) continue;
+            if (it.m === null || it.m === undefined) next.splice(it.i, 1);
+            else if (it.i < next.length) next[it.i] = it.m;
+            else next.push(it.m);
+          }
+          await store().commitMessages(sid, next.filter(Boolean), null);
+          delete lastSeen[sid];
         }
-        await store().commitMessages(sid, next.filter(Boolean), null);
-        delete lastSeen[sid];
+      } else if (Array.isArray(list)) {
+        // Снимок чата из GET /ui-state/delta: серверная история уже смержена,
+        // остаётся слить её с локальной по ключам — идемпотентно, без дублей.
+        let local = [];
+        try { local = (await store().loadMessages(sid)).map((x) => x.m).filter(Boolean); } catch { /* нет копии */ }
+        const merged = mergeMsgLists(local, list.slice(-MAX_STORED));
+        // «Дёрганье» убирается здесь же: если после слияния побайтово ничего не
+        // изменилось (чат прислан перестраховочно), не пишем IndexedDB и не
+        // трогаем кеш/DOM открытого диалога.
+        if (merged.length === local.length && JSON.stringify(merged) === JSON.stringify(local)) continue;
+        await store().commitMessages(sid, merged, null);
+        if (cache[sid]) { cache[sid] = merged; lastSeen[sid] = merged; }
+        if (sid === currentId || (gen && gen.sessionId === sid)) touchedCurrent = true;
       }
     }
     if (Array.isArray(delta.sessions)) {
+      const dels = new Set(Array.isArray(delta.deleted_chats) ? delta.deleted_chats : []);
       const byId = new Map();
-      for (const s of delta.sessions) byId.set(s.id, s);
-      for (const s of sessions) if (!byId.has(s.id)) byId.set(s.id, s);
-      sessions = [...byId.values()];
-      refreshUI();
+      for (const s of delta.sessions) if (s && !dels.has(s.id)) byId.set(s.id, s);
+      for (const s of sessions) if (!byId.has(s.id) && !dels.has(s.id)) byId.set(s.id, s);
+      const next = [...byId.values()];
+      // состав и порядок не изменились — боковую панель не перерисовываем
+      const same = next.length === sessions.length && next.every((s, i) => s === sessions[i]);
+      sessions = next;
+      if (!same) { saveSessions(); refreshUI(); }
     }
     if (touchedCurrent) renderMessages({ scroll: false });
   }
 
-  async function pullState(force) {
+  async function pullState(force, opts = {}) {
     // во время генерации локальные сообщения трогает ТОЛЬКО владелец генерации
     // (он же их пишет): ему нужен свежий base для финального PUT после ответа.
     // Остальные устройства ждут — иначе mergeFull затёр бы живой ответ.
@@ -1875,13 +1919,46 @@
     if (genFlagGet() && !force) return false;
     if (gen && !genFlagGet()) return false;
     try {
-      const r = await fetch('/ai/ui-state', { credentials: 'same-origin', cache: 'no-store' });
+      const r = await fetch('/ai/ui-state', {
+        credentials: 'same-origin', cache: 'no-store',
+        headers: SYNC.etag ? { 'If-None-Match': SYNC.etag } : {},
+      });
+      if (r.status === 304) {                 // снапшот не менялся — ничего не делаем
+        SYNC.etagMisses = 0;                  // сервер поддерживает ETag: канал рабочий
+        return true;
+      }
       if (!r.ok) return false;
+      const etag = r.headers.get('etag');
+      if (etag) { SYNC.etag = etag; SYNC.etagMisses = 0; }
+      else if (opts.quiet) {                  // ETag не поддерживается и это фоновый опрос:
+        SYNC.etagMisses = (SYNC.etagMisses || 0) + 1;
+        if (SYNC.etagMisses >= 3) {           // три тика подряд без ETag — сервер старый,
+          stopRemotePoll();                   // перестаём гонять мегабайтные снимки каждые
+          return true;                        // POLL_MS; мгновенные события SSE живы
+        }
+      }
       const st = await r.json();
-      if (st.updated) await mergeFull(st);
+      if (st.updated) await mergeFull(st, { quiet: !!opts.quiet });
       SYNC.base = st.updated || 0;
       return true;
     } catch { return false; }
+  }
+
+  // Дельта-канал: GET /ui-state/delta?since=base отдаёт только изменённые чаты.
+  // Применяется точечно (как дельта от PUT), поэтому DOM открытого диалога не
+  // перестраивается целиком — именно это и убирало периодическое «дёрганье».
+  async function pullDelta() {
+    if (!currentScopeUid || !SYNC.ready || SYNC.busy) return null;
+    try {
+      const r = await fetch('/ai/ui-state/delta?since=' + (SYNC.base || 0),
+        { credentials: 'same-origin', cache: 'no-store' });
+      if (!r.ok) return null;
+      const d = await r.json();
+      if (d.need_full) return 'full';         // базы нет — нужен полный снимок
+      if (d.changed) await applyServerDelta(d);
+      if (d.updated) SYNC.base = d.updated;
+      return true;
+    } catch { return null; }
   }
 
   async function pushState() {
@@ -2029,14 +2106,23 @@
     if (pollTimer) return;
     pollTimer = setInterval(pollRemoteState, POLL_MS);
   }
+  function stopRemotePoll() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
   async function pollRemoteState() {
     if (!currentScopeUid || !SYNC.ready || SYNC.busy) return;
     if (genFlagGet() || remoteGenPaused) return;   // своя генерация / пауза до конца чужой
+    if (document.hidden) return;                   // фоновая вкладка не дёргает сеть и DOM
+    // Сначала дешёвая сверка версии: если сервер не новее — на этом цикл кончается
+    // (именно так убирается «дёрганье» каждые несколько секунд при простое).
     try {
       const r = await fetch('/ai/ui-state/version', { credentials: 'same-origin', cache: 'no-store' });
       if (!r.ok) return;
       const v = await r.json();
-      if ((v.updated || 0) > (SYNC.base || 0)) await pullState(true);
+      if ((v.updated || 0) <= (SYNC.base || 0)) return;
+      // Сервер новее: пробуем дельту (только изменённые чаты, точечное применение).
+      const res = await pullDelta();
+      if (res === 'full' || res === null) await pullState(true, { quiet: true });
     } catch { /* нет связи — следующий тик */ }
   }
 
@@ -2166,9 +2252,10 @@
     if (stateES || !currentScopeUid) return;
     try { stateES = new EventSource('/ai/ui-state/events', { withCredentials: true }); }
     catch { return; }
-    stateES.addEventListener('state-changed', () => {
+    stateES.addEventListener('state-changed', async () => {
       if (genFlagGet() || SYNC.busy) return;   // своя запись / идёт синхронизация
-      pullState(true);
+      const res = await pullDelta();            // только изменённое; без перерисовки всего
+      if (res === 'full' || res === null) await pullState(true, { quiet: true });
     });
     stateES.onerror = () => { /* браузер сам переподключится; если нет — работает poll */ };
   }
