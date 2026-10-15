@@ -1,7 +1,7 @@
 """Тесты общего состояния интерфейса: запись, чтение, версии, размер.
 Запуск из папки проекта: python tests/sync/run_ui_state_tests.py
 """
-import os, sys, tempfile
+import os, sys, time, tempfile
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.insert(0, ROOT)
 os.environ.setdefault('SECRET_KEY', 'x' * 40)
@@ -132,7 +132,44 @@ r = c.request('DELETE', '/ai/gen-lock', json={'client': True, 'cid': 'cA'})
 check('10e owner release frees the lock',
       r.status_code == 200 and c.post('/ai/gen-lock', json={'client': False, 'cid': 'cB'}).json().get('ok') is True)
 
-ui._read  # noqa
+# ------------------------------------------------------------------ «дёрганье» чата: дешёвый фоновый опрос
+st2 = c.get('/ai/ui-state').json()
+base_v = st2['updated']
+
+# (а) PUT-дельта без реальных изменений не должна двигать updated — иначе
+# каждое устройство каждые секунды получало «новую версию» и перерисовывало чат.
+r = c.put('/ai/ui-state', json={'base': base_v, 'rev': base_v + 1,
+                                'delta': {'messages': {}, 'deleted_chats': [], '_allDeleted': []}})
+check('11a no-op delta does not bump version', r.status_code == 200 and r.json()['updated'] == base_v)
+
+# (б) GET с If-None-Match на неизменённый снапшот -> 304 (ни тела, ни merge на клиенте)
+etag = c.get('/ai/ui-state').headers.get('etag')
+check('11b GET exposes ETag', bool(etag))
+r = c.get('/ai/ui-state', headers={'if-none-match': etag})
+check('11c unchanged GET returns 304', r.status_code == 304 and not r.content)
+
+# (в) дельта-канал: без изменений — changed:false; после записи нового сообщения
+# в один чат — только этот чат, список сессий не отдаётся (он не менялся)
+r = c.get('/ai/ui-state/delta', params={'since': base_v})
+check('11d delta channel: nothing changed', r.status_code == 200 and r.json().get('changed') is False)
+mid_time = int(time.time() * 1000) + 5_000     # чуть в будущем: надежнее детекции по time > since
+r = c.put('/ai/ui-state', json={'base': base_v, 'rev': base_v + 1, 'delta': {
+    'messages': {'s1': [{'i': 99, 'm': {'role': 'assistant', 'text': 'live', 'time': mid_time, 'id': 'm-live'}}]},
+    'deleted_chats': []}})
+check('11e write with new message accepted', r.status_code == 200)
+v2 = r.json()['updated']
+r = c.get('/ai/ui-state/delta', params={'since': base_v})
+d = r.json()
+check('11f delta returns only the changed chat',
+      d.get('changed') is True and set(d.get('messages') or {}) == {'s1'} and 'sessions' not in d)
+check('11g delta carries new version', d.get('updated') == v2)
+# повторный запрос с актуальной базой — снова пусто (клиент ничего не перерисует)
+r = c.get('/ai/ui-state/delta', params={'since': v2})
+check('11h delta at current base is empty', r.json().get('changed') is False)
+# неизвестная база -> need_full (клиент честно тянет снимок один раз)
+r = c.get('/ai/ui-state/delta', params={'since': 1})
+check('11i unknown base asks for full snapshot', r.json().get('need_full') is True)
+
 bad = TestClient(FastAPI())
 bad.app.include_router(ui.router)
 bad.app.dependency_overrides[require_auth] = lambda: '../etc'

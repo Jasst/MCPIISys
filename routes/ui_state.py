@@ -24,7 +24,7 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from config import BASE_DIR
@@ -189,6 +189,51 @@ def _read(user_id: str) -> dict:
     except (OSError, ValueError):
         logger.error(f'Повреждён файл состояния: {path}')
         return {'updated': 0, 'sessions': [], 'messages': {}, 'deleted_chats': []}
+
+
+# Кэш прочитанного снапшота на процесс: GET /ui-state и GET /ui-state/version
+# вызываются каждым устройством каждые несколько секунд; перечитывать с диска
+# многосоткилобайтный JSON ради одной версии — чистая расточительность.
+# Запись (_write_state) сбрасывает кэш немедленно, поэтому stale-данные не
+# отдаются: инвалидация по path при любой записи в тот же файл.
+_STATE_CACHE: dict[str, tuple[int, float, dict]] = {}   # path -> (mtime_ns, size, data)
+_STATE_CACHE_TTL = 2.0          # защита от записи другим процессом мимо кэша
+_STATE_CACHE_MAX = 256
+
+
+def _cached_read(user_id: str) -> dict:
+    key = str(_path(user_id))
+    now = time.time()
+    hit = _STATE_CACHE.get(key)
+    if hit and now - hit[1] < _STATE_CACHE_TTL:
+        return hit[2]
+    st = _read(user_id)
+    try:
+        stamp = os.stat(key).st_mtime_ns
+        if hit and hit[0] == stamp:          # файл не менялся — держим прежний объект
+            _STATE_CACHE[key] = (stamp, now, hit[2])
+            return hit[2]
+    except OSError:
+        stamp = 0
+    if len(_STATE_CACHE) >= _STATE_CACHE_MAX:
+        _STATE_CACHE.clear()
+    _STATE_CACHE[key] = (stamp, now, st)
+    return st
+
+
+def _write_state(user_id: str, payload: dict) -> None:
+    """Атомарная запись снапшота + инвалидация кэша прочтений.
+
+    Раньше запись была встроена в put_state; вынесение нужно, чтобы ни один
+    путь обновления состояния не мог оставить в _STATE_CACHE устаревший снимок."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    path = _path(user_id)
+    tmp = path.with_suffix('.tmp')
+    data = json.dumps(payload, ensure_ascii=False)
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write(data)
+    os.replace(tmp, path)            # атомарная замена: файл не остаётся наполовину записанным
+    _STATE_CACHE.pop(str(path), None)
 
 
 def _msg_key(m) -> str | None:
@@ -452,18 +497,30 @@ def _apply_delta(current: dict, delta: dict) -> tuple[dict, list]:
     if not isinstance(reg, list):
         reg = []
     now_ms = int(time.time() * 1000)
-    reg = [r for r in reg if isinstance(r, dict) and isinstance(r.get('sid'), str)
-           and now_ms - int(r.get('at') or 0) < _TOMB_TTL_MS]
-    known = {r['sid'] for r in reg}
+    fresh_reg = [r for r in reg if isinstance(r, dict) and isinstance(r.get('sid'), str)
+                 and now_ms - int(r.get('at') or 0) < _TOMB_TTL_MS]
+    known = {r['sid'] for r in fresh_reg}
+    touched = len(fresh_reg) != len(reg)
     for sid in set(deleted) | {d for d in (delta.get('_allDeleted') or []) if isinstance(d, str)}:
         messages.pop(sid, None)                             # историю удаляем всегда:
         if sid not in known:                                # без записи в sessions она
-            reg.append({'sid': sid, 'at': now_ms})          # не видима никому и merge
+            fresh_reg.append({'sid': sid, 'at': now_ms})     # не видима никому и merge
             known.add(sid)                                  # уже не «воскресит»
+            touched = True
+    # Реестр tombstone'ов меняется крайне редко (только при удалениях), а он
+    # входит в каждый ответ GET /ui-state. Если состав реестра идентичен
+    # прежнему — оставляем прежний список объектов: тогда сериализованный JSON
+    # снапшота побайтово совпадает с предыдущим, и клиент может пропустить
+    # пустой merge (см. pullState). Это убирает периодическое «дёрганье»
+    # интерфейса: раньше каждое устройство каждые POLL_MS тянуло полный снимок,
+    # получало на микросекунду более свежий updated и перерисовывало весь чат,
+    # хотя данные не изменились вовсе.
+    same_reg = (not touched and len(fresh_reg) == len(reg)
+                and all(a is b or a == b for a, b in zip(fresh_reg, reg)))
     out = {'updated': current.get('updated', 0),
            'messages': messages,
            'sessions': current.get('sessions') or [],
-           'deleted_chats': reg}
+           'deleted_chats': reg if same_reg else fresh_reg}
     gone = known                                            # tombstone побеждает stale-снимок:
     if isinstance(delta.get('sessions'), list):             # список чатов менялся
         # «Явно удалён» = id есть в deleted_chats этой же дельты. Раньше сюда
@@ -574,8 +631,21 @@ async def get_media(name: str, user_id: str = Depends(require_auth)):
 
 
 @router.get('/ui-state')
-async def get_state(user_id: str = Depends(require_auth)):
-    return _read(user_id)
+async def get_state(request: Request, user_id: str = Depends(require_auth)):
+    """Полный снимок состояния с ETag.
+
+    Если снапшот побайтово не менялся с последнего запроса этого клиента
+    (If-None-Match), отдаём 304 — ни трафика, ни разбора мегабайтного JSON на
+    клиенте. Это второй эшелон против «дёрганья»: даже когда дельта-канал
+    недоступен и устройство тянет полный GET, повторяющийся опрос ничего не
+    перерисовывает."""
+    st = _cached_read(user_id)
+    data = json.dumps(st, ensure_ascii=False)
+    etag = _state_etag(data)
+    if request.headers.get('if-none-match') == etag:
+        return Response(status_code=304, headers={'ETag': etag})
+    return Response(content=data, media_type='application/json',
+                    headers={'ETag': etag, 'Cache-Control': 'no-store'})
 
 
 @router.get('/ui-state/version')
@@ -584,7 +654,7 @@ async def get_state_version(user_id: str = Depends(require_auth)):
 
     Дешевле полного GET /ui-state при больших архивах: если updated не изменился,
     тянуть снапшот незачем. Изменения чужого аккаунта этот ответ не раскрывает."""
-    st = _read(user_id)
+    st = _cached_read(user_id)
     return {'updated': st.get('updated', 0)}
 
 
@@ -603,7 +673,7 @@ async def put_state(body: StateBody, request: Request, user_id: str = Depends(re
         if g is not None and not client_gen:
             raise HTTPException(429, detail='На другом устройстве идёт генерация — синхронизация приостановлена')
 
-    current = _read(user_id)
+    current = _cached_read(user_id)
     if body.base != current.get('updated', 0):
         raise HTTPException(409, detail='Состояние изменено на другом устройстве')
 
@@ -671,17 +741,80 @@ async def put_state(body: StateBody, request: Request, user_id: str = Depends(re
     if len(data.encode('utf-8')) > MAX_BYTES:
         raise HTTPException(413, detail='Слишком много данных. Удалите старые чаты.')
 
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    path = _path(user_id)
-    tmp = path.with_suffix('.tmp')
-    with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(data)
-    os.replace(tmp, path)            # атомарная замена: файл не остаётся наполовину записанным
-    _notify_state(user_id)           # мгновенно будим SSE-подписчиков других устройств
+    _write_state(user_id, payload)                   # атомарная замена + сброс кэша
+    _notify_state(user_id)                           # мгновенно будим SSE-подписчиков других устройств
     out = {'updated': payload['updated']}
     if conflicts:
-        out['conflicts'] = conflicts   # клиент перестроит историю чата по серверной версии
+        out['conflicts'] = conflicts                 # клиент перестроит историю чата по серверной версии
     return out
+
+
+# ------------------------------------------------------------------ дельта состояния (GET)
+# «Дёрганье» чата каждые несколько секунд: каждое устройство периодически
+# сверяет версию (/ui-state/version) и при расхождении тянет ПОЛНЫЙ снимок —
+# десятки мегабайт на архив, тяжёлый merge, полная перерисовка DOM. При этом
+# реальное изменение обычно крошечное (одно сообщение в одном чате).
+# GET /ui-state/delta?since=<версия> возвращает только то, что изменилось с
+# этой версии: изменённые/новые чаты целиком (они и так маленькие), удалённые
+# tombstone'ы и новый sessions list, если список менялся. Клиент применяет
+# дельту точечно и НЕ трогает открытые чаты, которых в дельте нет.
+# Ответ дополняется ETag: побайтово идентичный снимок отдаёт 304 Not Modified,
+# и даже полный GET становится дешёвым для повторяющихся опросов.
+
+def _state_etag(data: str) -> str:
+    import hashlib
+    return '"' + hashlib.sha1(data.encode('utf-8')).hexdigest() + '"'
+
+
+@router.get('/ui-state/delta')
+async def get_state_delta(request: Request, since: int = 0,
+                          user_id: str = Depends(require_auth)):
+    st = _cached_read(user_id)
+    updated = st.get('updated', 0)
+    try:
+        since = max(0, int(since))
+    except (TypeError, ValueError):
+        since = 0
+    # Просьба без известной базы или «свежеее» ответа — полной дельты не
+    # существует: клиенту нужен снимок целиком (он и запрашивает его при false).
+    if since >= updated or since <= 0:
+        return {'changed': False, 'need_full': True, 'updated': updated}
+
+    msgs = st.get('messages') or {}
+    # Точная история изменений между двумя версиями не ведётся (это был бы
+    # отдельный журнал); вместо неё — консервативная оценка: чат считается
+    # изменённым, если любой из его message-объекков обновился позже `since`.
+    changed_msgs = {}
+    for sid, hist in msgs.items():
+        if not isinstance(hist, list):
+            continue
+        latest = 0
+        for m in hist:
+            if isinstance(m, dict):
+                for k in ('time', 'updated'):
+                    v = m.get(k)
+                    if isinstance(v, (int, float)) and v > latest:
+                        latest = v
+        if latest > since:
+            changed_msgs[sid] = hist
+    sess_list = [s for s in (st.get('sessions') or []) if isinstance(s, dict)]
+    sess_latest = max((int(s.get('updated') or s.get('created') or 0) for s in sess_list),
+                      default=0)
+    dels = [r.get('sid') for r in (st.get('deleted_chats') or [])
+            if isinstance(r, dict) and isinstance(r.get('sid'), str)
+            and int(r.get('at') or 0) > since]
+    sessions_changed = sess_latest > since or bool(dels)
+    if not changed_msgs and not sessions_changed:
+        return {'changed': False, 'updated': updated}
+    return {
+        'changed': True,
+        'updated': updated,
+        'messages': changed_msgs,
+        'deleted_chats': dels,
+        # список чатов присылаем только когда он реально менялся — иначе
+        # лишняя перерисовка боковой панели на каждом тике
+        **({'sessions': sess_list} if sessions_changed else {}),
+    }
 
 
 # ------------------------------------------------------------------ события состояния (SSE)
