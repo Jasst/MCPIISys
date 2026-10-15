@@ -179,6 +179,7 @@
     attachName: $('#attachName'),
     fileInput: $('#fileInput'),
     scrollBottom: $('#scrollBottomBtn'),
+    pullIndicator: $('#pullIndicator'),
     dialog: $('#settingsDialog'),
     openSettings: $('#openSettings'),
     exportAll: $('#exportAll'),
@@ -1412,6 +1413,12 @@
   // Прокрутка: кнопка «вниз» видна, только когда пользователь ушёл от конца
   els.messages.addEventListener('scroll', updateScrollButton, { passive: true });
   els.scrollBottom.addEventListener('click', () => scrollToBottom(true));
+
+  // Pull-to-refresh: потянуть диалог вниз — мгновенное обновление чатов с
+  // сервера (не дожидаясь тика pollRemoteState). Работает на touch-устройствах;
+  // на десктопе тот же эффект даёт focus/visibilitychange -> resumePending.
+  initPullToRefresh();
+
   els.hintBtn.addEventListener('click', () => { if (gen) selectSession(gen.sessionId); });
 
   els.send.addEventListener('click', onSendButton);
@@ -2005,6 +2012,7 @@
     SYNC.ready = await pullState();
     init();
     startRemotePoll();
+    startStateEvents();   // мгновенное получение чужих сохранений (откат к poll, если канал недоступен)
     if (SYNC.ready && (SYNC.base === 0 || sessions.length)) scheduleSync();
   }
 
@@ -2030,6 +2038,94 @@
       const v = await r.json();
       if ((v.updated || 0) > (SYNC.base || 0)) await pullState(true);
     } catch { /* нет связи — следующий тик */ }
+  }
+
+  // Принудительное обновление «по требованию» (pull-to-refresh, кнопка в шапке):
+  // не ждём сравнения версий — тянем состояние целиком. Возвращает true, если
+  // сервер оказался новее (что-то реально подтянулось).
+  async function refreshFromServer() {
+    if (!currentScopeUid) { toast('Нет активного аккаунта'); return false; }
+    if (SYNC.busy) { toast('Синхронизация уже выполняется…'); return false; }
+    if (genFlagGet()) { await scheduleSync(); return false; }  // своя генерация: свой же поток и так виден
+    const prevBase = SYNC.base;
+    const ok = await pullState(true);
+    if (!ok) { toast('Не удалось обновить: нет связи с сервером'); return false; }
+    if (SYNC.base > prevBase) { toast('Чаты обновлены'); return true; }
+    toast('Обновлений нет'); return false;
+  }
+
+  // ------------------------------------------------------------------ pull-to-refresh
+  // На мобильных браузеры отдают touchstart/touchmove/touchend ПЕРЕД native
+  // scroll-событиями, поэтому слушатели навешаны прямо на контейнер сообщений
+  // с { passive: false }. Тянем вниз только когда прокрутка уже в самом верху
+  // (scrollTop <= 0) и нет активной ГЕНЕРАЦИИ В ЭТОМ ЧАТЕ (иначе сдвинули бы
+  // живой поток). Пороги: START_PX — после какого натяжения считаем жест
+  // «обновлением»; TRIGGER_PX — при каком смещении отпускание запускает refresh.
+  function initPullToRefresh() {
+    if (!('ontouchstart' in window) && navigator.maxTouchPoints <= 0) return; // десктоп — не нужен
+    const box = els.messages, inner = els.inner, ind = els.pullIndicator;
+    if (!box || !inner || !ind) return;
+    const MAX_PX = 90, START_PX = 8, TRIGGER_PX = 56;
+    let startY = null, pulling = false, dist = 0, refreshing = false;
+
+    const setShift = (px) => {
+      inner.style.transform = px ? `translateY(${px}px)` : '';
+      ind.classList.toggle('visible', px > 4);
+      const pct = Math.min(1, px / TRIGGER_PX);
+      ind.querySelector('.pi-spin').style.transform = `rotate(${Math.round(pct * 360)}deg)`;
+      ind.querySelector('.pi-text').textContent =
+        refreshing ? 'Обновляем…' : (px >= TRIGGER_PX ? 'Отпустите — обновим чаты' : 'Потяните вниз, чтобы обновить чаты');
+    };
+    const settle = () => {
+      inner.style.transition = 'transform .2s ease';
+      setShift(refreshing ? 34 : 0);
+      if (!refreshing) setTimeout(() => { inner.style.transition = ''; }, 220);
+    };
+
+    box.addEventListener('touchstart', (e) => {
+      if (refreshing || e.touches.length !== 1) return;
+      if (box.scrollTop > 0) return;                    // не в самом верху — обычный скролл
+      if (gen && gen.sessionId === currentId) return;   // активная генерация здесь — не мешаем
+      startY = e.touches[0].clientY; pulling = false; dist = 0;
+    }, { passive: true });
+
+    box.addEventListener('touchmove', (e) => {
+      if (startY == null) return;
+      const dy = e.touches[0].clientY - startY;
+      if (dy <= 0) {                                    // пошёл вверх — отменяем жест
+        if (pulling) { pulling = false; setShift(0); }
+        return;
+      }
+      if (box.scrollTop > 0) { startY = null; if (pulling) { pulling = false; setShift(0); } return; }
+      if (!pulling) {
+        if (dy < START_PX) return;                      // ещё не жест
+        pulling = true;
+      }
+      e.preventDefault();                               // забираем скролл у браузера
+      dist = Math.min(MAX_PX, dy * 0.5);                // сопротивление резинки
+      setShift(dist);
+    }, { passive: false });
+
+    const endGesture = async () => {
+      if (startY == null) return;
+      const wasPulling = pulling, wasTrigger = dist >= TRIGGER_PX;
+      startY = null; pulling = false; dist = 0;
+      if (!wasPulling) return;
+      if (wasTrigger) {
+        refreshing = true;
+        ind.classList.add('refreshing');
+        setShift(34);
+        try { await refreshFromServer(); } finally {
+          refreshing = false;
+          ind.classList.remove('refreshing');
+          settle();
+        }
+      } else {
+        settle();
+      }
+    };
+    box.addEventListener('touchend', endGesture, { passive: true });
+    box.addEventListener('touchcancel', endGesture, { passive: true });
   }
 
   function init() {
@@ -2060,9 +2156,27 @@
     bootstrap();
   });
 
+  // Когда ПК (или любое другое устройство) сохраняет состояние, сервер может
+  // прислать событие SSE. Подписываемся один раз: на «state-changed» мгновенно
+  // тянем свежий снимок — чаты появляются без перезагрузки страницы и без
+  // ожидания тика поллинга. Если сервер не поддерживает этот канал или обрыв —
+  // тихий откат к штатному опросу версии (startRemotePoll).
+  let stateES = null;
+  function startStateEvents() {
+    if (stateES || !currentScopeUid) return;
+    try { stateES = new EventSource('/ai/ui-state/events', { withCredentials: true }); }
+    catch { return; }
+    stateES.addEventListener('state-changed', () => {
+      if (genFlagGet() || SYNC.busy) return;   // своя запись / идёт синхронизация
+      pullState(true);
+    });
+    stateES.onerror = () => { /* браузер сам переподключится; если нет — работает poll */ };
+  }
+
   window.addEventListener('online', async () => {
     if (!SYNC.ready && currentScopeUid) SYNC.ready = await pullState();
     scheduleSync();
     resumePending();
+    startStateEvents();
   });
 })();

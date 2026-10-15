@@ -675,7 +675,65 @@ async def put_state(body: StateBody, request: Request, user_id: str = Depends(re
     with open(tmp, 'w', encoding='utf-8') as f:
         f.write(data)
     os.replace(tmp, path)            # атомарная замена: файл не остаётся наполовину записанным
+    _notify_state(user_id)           # мгновенно будим SSE-подписчиков других устройств
     out = {'updated': payload['updated']}
     if conflicts:
         out['conflicts'] = conflicts   # клиент перестроит историю чата по серверной версии
     return out
+
+
+# ------------------------------------------------------------------ события состояния (SSE)
+# Второе устройство узнаёт о сохранении первого без перезагрузки страницы и не
+# дожидаясь тика поллинга: PUT /ui-state после записи дергает _notify_state, а
+# подписанные GET /ui-state/events клиенты мгновенно получают «state-changed» и
+# сами тянут свежий снимок. Буферизация событий не нужна — событие лишь сигнал
+# «посмотри сервер», данные всегда читаются из файла. Соединение живёт вёрстку
+# браузера; heartbeat каждые 25 с не даёт nginx/прокси закрыть его как мёртвое.
+
+_state_listeners: dict[str, list[asyncio.Queue]] = {}
+_STATE_LISTENERS_MAX = 300   # всего открытых подписок (защита от утечки при обрывах)
+
+
+def _notify_state(uid: str) -> None:
+    for q in _state_listeners.get(uid, ()):
+        try:
+            q.put_nowait('state-changed')     # очередь набита — подписчик и так перезапросит
+        except asyncio.QueueFull:
+            pass
+
+
+@router.get('/ui-state/events')
+async def state_events(request: Request, user_id: str = Depends(require_auth)):
+    from starlette.responses import StreamingResponse
+
+    uid = str(user_id)
+    if sum(len(v) for v in _state_listeners.values()) >= _STATE_LISTENERS_MAX:
+        raise HTTPException(503, detail='Слишком много подписок')
+    q: asyncio.Queue = asyncio.Queue(maxsize=4)
+    _state_listeners.setdefault(uid, []).append(q)
+
+    async def stream():
+        try:
+            # преамбула уходит сразу при старте генератора (до первого await) —
+            # иначе клиент/TestClient зависает в ожидании заголовков сообщения
+            yield 'retry: 5000\n\n'          # EventSource переподключится через 5 с после обрыва
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    ev = await asyncio.wait_for(q.get(), timeout=25)
+                    yield f'event: {ev}\ndata: 1\n\n'
+                except asyncio.TimeoutError:
+                    yield ': hb\n\n'         # heartbeat против таймаутов обратного прокси
+        finally:
+            lst = _state_listeners.get(uid, ())
+            if q in lst:
+                lst.remove(q)
+            if not lst:
+                _state_listeners.pop(uid, None)
+
+    return StreamingResponse(stream(), media_type='text/event-stream', headers={
+        'Cache-Control': 'no-cache',
+        'X-Accel-Buffering': 'no',           # nginx: не буферизовать поток
+        'Connection': 'keep-alive',
+    })
