@@ -9,3 +9,4 @@ __pycache__/
 *.db
 *.zip
 /ui_state
+assistant.log
