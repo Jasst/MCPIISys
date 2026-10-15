@@ -1198,6 +1198,7 @@
       } catch { /* сеть — перегенерируем без фото */ }
     }
     const goRegen = () => {
+      if (gen) { toast('Дождитесь окончания ответа'); return; }   // не допускать второй параллельный стрим
       msgs.splice(u + 1);
       msgs.push(newBotMessage());
       const nidx = msgs.length - 1;
@@ -1217,12 +1218,17 @@
     // коммита. Страховка по таймауту — как в send(): проверка лока не должна
     // задерживать старт дольше 1.2 с (настоящий конфликт остановит server-side
     // лок на POST /ai/chat кодом 409/429).
-    if (!currentScopeUid) { goRegen(); return; }
+    // Exactly-once-гард, как в send(): без него и .then(), и setTimeout() ниже
+    // успевали вызвать goRegen() (на быстрой сети лок приходит раньше 1.2 с),
+    // что давало второй splice/push/startGeneration поверх уже идущего стрима.
+    let started = false;
+    const start = () => { if (started) return; started = true; goRegen(); };
+    if (!currentScopeUid) { start(); return; }
     acquireGenLock().then((ok) => {
       if (!ok) { toast('Дождитесь окончания ответа на другом устройстве'); updateHint(); return; }
-      goRegen();
+      start();
     });
-    setTimeout(goRegen, 1200);
+    setTimeout(start, 1200);
   }
 
   function onSendButton() {
