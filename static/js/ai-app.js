@@ -790,7 +790,16 @@
       const r = await fetch(API.genLock, {
         method: 'POST', credentials: 'same-origin', signal: ctrl.signal,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ client: !!(gen || genFlagGet()), cid: CID }),   // продление своей vs попытка занять чужой
+        // ВСЕГДА объявляем себя владельцем: перед POST /ai/chat мы хотим
+        // ЗАНЯТЬ серверный лок, чтобы /gen-status для другого устройства
+        // возвращал active:true, may_watch:true и оно могло подключиться к
+        // живому потоку через attach?watch=1. Раньше здесь стояло
+        // `client: !!(gen || genFlagGet())` — на первом сообщении это false,
+        // и сервер НЕ захватывал лок (put_state зависел от того, есть ли
+        // активная генерация в _active_generations). Симптом: на телефоне
+        // печать появлялась только после того, как ПК завершал ответ и
+        // присылал финальный PUT.
+        body: JSON.stringify({ client: true, cid: CID }),
       });
       if (!r.ok) return true;                       // старый/недоступный сервер — не блокируем отправку
       const j = await r.json();
@@ -2285,6 +2294,11 @@
       // Сервер новее: пробуем дельту (только изменённые чаты, точечное применение).
       const res = await pullDelta();
       if (res === 'full' || res === null) await pullState(true, { quiet: true });
+      // Тот же смысл, что и в SSE-подписчике: после sync проверяем, не
+      // появилось ли pending-сообщение (чужая генерация) — если да, цепляемся
+      // к живому потоку через attach?watch=1. Без этого клиент узнавал о
+      // чужой генерации только по focus/visibilitychange.
+      scheduleResume(200);
     } catch { /* нет связи — следующий тик */ }
   }
 
@@ -2418,6 +2432,16 @@
       if (genFlagGet() || SYNC.busy) return;   // своя запись / идёт синхронизация
       const res = await pullDelta();            // только изменённое; без перерисовки всего
       if (res === 'full' || res === null) await pullState(true, { quiet: true });
+      // После sync в локальной истории мог появиться чат с сообщением
+      // pending:true — это значит, что другое устройство прямо сейчас пишет
+      // ответ. Раньше клиент узнавал об этом только по focus/visibilitychange
+      // или по таймеру после своего же attach — то есть на практике НИКОГДА,
+      // пока пользователь сам не переключит вкладку. Теперь после каждого
+      // подтягивания состояния мы сами проверяем /gen-status и, если на
+      // сервере идёт чужая генерация (may_watch), подключаемся к её
+      // живому потоку через attach?watch=1 и показываем печать в реальном
+      // времени.
+      scheduleResume(200);
     });
     stateES.onerror = () => { /* браузер сам переподключится; если нет — работает poll */ };
   }
