@@ -781,12 +781,18 @@ async def put_state(body: StateBody, request: Request, user_id: str = Depends(re
 
     if body.delta is not None and _delta_is_noop(body.delta):
         # No-op дельта (пустые messages/deleted_chats/sessions): состояние НЕ
-        # трогаем, версию НЕ двигаем, SSE не будим. Это главный источник
-        # «каскада 409»: каждое фоновое сохранение каждого устройства поднимало
-        # updated без реальных изменений, соседи получали «новую версию», их
-        # собственные PUT-основания устаревали, и синхронизация превращалась в
-        # бесконечное перетягивание версий вместо доставки реальных сообщений.
+        # трогаем, версию НЕ двигаем. Это главный источник «каскада 409»:
+        # каждое фоновое сохранение каждого устройства поднимало updated без
+        # реальных изменений, соседи получали «новую версию», их собственные
+        # PUT-основания устаревали, и синхронизация превращалась в бесконечное
+        # перетягивание версий вместо доставки реальных сообщений.
+        # Подписчиков всё же будим сигналом «state-changed» — он дешёвый:
+        # клиент по нему лишь сверяет версию/ETag (304 при неизменности), а не
+        # перерисовывает чат. Раньше здесь не было уведомления, и тест 9g
+        # («PUT принят -> событие в очереди подписчика») падал; заодно любое
+        # подтверждённое сохранение теперь честно оповещает соседей.
         # Ответ отдаём БЕЗ conflicts: пустая дельта ничего не могла сконфликтовать.
+        _notify_state(user_id)
         return {'updated': current.get('updated', 0)}
 
     if body.delta is not None:
@@ -867,6 +873,11 @@ async def put_state(body: StateBody, request: Request, user_id: str = Depends(re
         if stamp_now != fresh_stamp:
             raise HTTPException(409, detail='Состояние изменено на другом устройстве')
     _write_state(user_id, payload)                   # атомарная замена + сброс кэша
+    # Журнал изменений для точного дельта-канала: что сдвинулось на этом PUT.
+    # before — смерженный предыдущий снимок (тот же «до», относительно которого
+    # решалось что писать), после no-op проверок здесь всегда есть реальная разница.
+    before_for_log = {**current, 'updated': current.get('updated', 0)}
+    _record_change(str(user_id), payload['updated'], before_for_log, payload)
     _notify_state(user_id)                           # мгновенно будим SSE-подписчиков других устройств
     out = {'updated': payload['updated']}
     if conflicts:
@@ -891,6 +902,47 @@ def _state_etag(data: str) -> str:
     return '"' + hashlib.sha1(data.encode('utf-8')).hexdigest() + '"'
 
 
+# Журнал последних записей аккаунта: uid -> deque[(version, diff)], где diff —
+# {messages:{sid:история}, sessions:[...]|None, deleted:[sid,...]} — что именно
+# изменил тот PUT. Дельта-канал отвечает по этому журналу точно: «изменилось
+# вот это с версии N», а не эвристикой по времени сообщений. Без журнала любое
+# редактирование старого сообщения (time остаётся прежним) или переименование
+# чата (updated может быть локальным временем отстающего устройства) не
+# детектировалось, и второе устройство НИКОГДА не видело правку — «свой чат на
+# каждом устройстве». Журнал живёт в памяти процесса; при рестарте или выходе
+# за окно клиент честно получает need_full и один раз тянет снимок.
+from collections import deque as _deque
+_CHANGELOG_MAX = 64               # версий в журнале на аккаунт
+_CHANGELOG_ACCOUNTS = 256         # аккаунтов одновременно
+_changelog: "OrderedDict[str, _deque]" = OrderedDict()
+
+
+def _record_change(uid: str, version: int, before: dict, after: dict) -> None:
+    """Запоминает что изменилось при переходе before->after (для GET /delta)."""
+    diff = {'messages': {}, 'sessions': None, 'deleted': []}
+    bm, am = before.get('messages') or {}, after.get('messages') or {}
+    for sid, hist in am.items():
+        if bm.get(sid) != hist:
+            diff['messages'][sid] = hist
+    for sid in bm:
+        if sid not in am:
+            diff['messages'][sid] = []          # история удалена (tombstone)
+    if before.get('sessions') != after.get('sessions'):
+        diff['sessions'] = after.get('sessions') or []
+    bdel = {d.get('sid') for d in (before.get('deleted_chats') or [])
+            if isinstance(d, dict) and isinstance(d.get('sid'), str)}
+    adel = {d.get('sid') for d in (after.get('deleted_chats') or [])
+            if isinstance(d, dict) and isinstance(d.get('sid'), str)}
+    diff['deleted'] = sorted(adel - bdel)
+    q = _changelog.get(uid)
+    if q is None:
+        if len(_changelog) >= _CHANGELOG_ACCOUNTS:
+            _changelog.popitem(last=False)
+        q = _changelog[uid] = _deque(maxlen=_CHANGELOG_MAX)
+    _changelog.move_to_end(uid)
+    q.append((version, diff))
+
+
 @router.get('/ui-state/delta')
 async def get_state_delta(request: Request, since: int = 0,
                           user_id: str = Depends(require_auth)):
@@ -900,46 +952,43 @@ async def get_state_delta(request: Request, since: int = 0,
         since = max(0, int(since))
     except (TypeError, ValueError):
         since = 0
-    # Просьба без известной базы или «свежеее» ответа — полной дельты не
-    # существует: клиенту нужен снимок целиком (он и запрашивает его при false).
-    if since >= updated or since <= 0:
+    # База «свежеее» ответа (например часы клиента впереди) — дельты не
+    # существует: снимок целиком.
+    if since > updated:
         return {'changed': False, 'need_full': True, 'updated': updated}
-
-    msgs = st.get('messages') or {}
-    # Точная история изменений между двумя версиями не ведётся (это был бы
-    # отдельный журнал); вместо неё — консервативная оценка: чат считается
-    # изменённым, если любой из его message-объекков обновился позже `since`.
-    changed_msgs = {}
-    for sid, hist in msgs.items():
-        if not isinstance(hist, list):
-            continue
-        latest = 0
-        for m in hist:
-            if isinstance(m, dict):
-                for k in ('time', 'updated'):
-                    v = m.get(k)
-                    if isinstance(v, (int, float)) and v > latest:
-                        latest = v
-        if latest > since:
-            changed_msgs[sid] = hist
-    sess_list = [s for s in (st.get('sessions') or []) if isinstance(s, dict)]
-    sess_latest = max((int(s.get('updated') or s.get('created') or 0) for s in sess_list),
-                      default=0)
-    dels = [r.get('sid') for r in (st.get('deleted_chats') or [])
-            if isinstance(r, dict) and isinstance(r.get('sid'), str)
-            and int(r.get('at') or 0) > since]
-    sessions_changed = sess_latest > since or bool(dels)
-    if not changed_msgs and not sessions_changed:
+    if since == updated:
         return {'changed': False, 'updated': updated}
-    return {
-        'changed': True,
-        'updated': updated,
-        'messages': changed_msgs,
-        'deleted_chats': dels,
-        # список чатов присылаем только когда он реально менялся — иначе
-        # лишняя перерисовка боковой панели на каждом тике
-        **({'sessions': sess_list} if sessions_changed else {}),
-    }
+    # since < updated: есть разошедшиеся версии. Если журнал их помнит —
+    # точная дельта; если нет (первый sync, рестарт сервера, длинное отсутствие)
+    # — честный need_full: клиент потянет снимок один раз. Раньше при since<=0
+    # всегда возвращался пустой changed:false, и новое устройство никогда не
+    # получало чаты других устройств («у каждого своя копия чата»).
+    q = _changelog.get(str(user_id))
+    covered = q and q[0][0] > since
+    if not covered:
+        return {'changed': False, 'need_full': True, 'updated': updated}
+    changed_msgs: dict = {}
+    sess_list = None
+    dels: set = set()
+    for version, diff in q:
+        if version <= since:
+            continue
+        for sid, hist in diff['messages'].items():
+            changed_msgs[sid] = hist
+        if diff['sessions'] is not None:
+            sess_list = diff['sessions']
+        dels.update(diff['deleted'])
+    # tombstone побеждает: история удалённого чата не уезжает клиенту, даже
+    # если в какой-то версии она ещё была в диффе
+    for sid in dels:
+        changed_msgs.pop(sid, None)
+    if not changed_msgs and sess_list is None and not dels:
+        return {'changed': False, 'updated': updated}
+    out = {'changed': True, 'updated': updated,
+           'messages': changed_msgs, 'deleted_chats': sorted(dels)}
+    if sess_list is not None:
+        out['sessions'] = sess_list
+    return out
 
 
 # ------------------------------------------------------------------ события состояния (SSE)
