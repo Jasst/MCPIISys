@@ -1133,6 +1133,7 @@
     msgs.push(newBotMessage());
     const idx = msgs.length - 1;
     commit(id);
+    scheduleSync(true);   // форс-пул начального состояния ДО genFlag в startGeneration
     renderMessages();
     refreshUI();
 
@@ -1200,6 +1201,7 @@
     msgs.push(newBotMessage());
     const nidx = msgs.length - 1;
     commit(id);
+    scheduleSync(true);   // форс-пул начального состояния ДО genFlag в startGeneration
     renderMessages({ scroll: false });
     refreshUI();
     const body = { message: prompt, stream: true, web_search: chips.web, reasoning: chips.reason };
@@ -1788,13 +1790,19 @@
     return kept.length ? kept : null;
   }
 
-  function scheduleSync() {
+  function scheduleSync(force) {
     if (!SYNC.ready || !currentScopeUid) return;
-    // Пока это устройство ведёт генерацию, синхронизация не нужна: ответ ещё
-    // не готов, а partial-дельты только создавали бы конфликты на других
-    // устройствах. Финальный commit после окончания ответа всё равно вызовет
-    // scheduleSync — данные уйдут на сервер ровно один раз и целиком.
-    if (genFlagGet()) return;
+    // Пока это устройство ведёт генерацию, синхронизация не нужна: частичные
+    // дельты на каждый чанк стриминга только создавали бы конфликты и флуд
+    // запросами на сервер. НО первичное состояние (вопрос пользователя +
+    // pending-бот) обязано уйти на сервер ДО startGeneration: иначе второе
+    // устройство не увидит state-changed по SSE и не сможет подхватить поток
+    // через gen-status/attach. Для этого sendNow/regenerate вызывают
+    // scheduleSync(true) — ровно один форс-пул начального снапшота; таймер
+    // уже стоит, а pushState отправит заголовок X-Client-Gen: 1, который
+    // сервер принимает от владельца лока. Финальный commit после окончания
+    // ответа уходит обычным путём (без force).
+    if (genFlagGet() && !force) return;
     clearTimeout(SYNC.timer);
     SYNC.timer = setTimeout(pushState, 1500);
   }
