@@ -338,6 +338,29 @@
     await deleteChat(sid, 0, bumpMem());
   }
 
+  // Удаление чата, пришедшее с сервера (другое устройство удалило): историю
+  // трём, но tombstone НЕ пишем — id принадлежит другому устройству/scope,
+  // и наш реестр удалений не должен потом «удалять» его повторно.
+  async function deleteChatSilent(sid) {
+    const rev = bumpMem();
+    if (!idbBroken && db) {
+      try {
+        await new Promise((res, rej) => {
+          const t = db.transaction('messages', 'readwrite');
+          const s = t.objectStore('messages');
+          const req = s.index('bySid').openCursor(IDBKeyRange.bound([sid, 0, 1], [sid, Infinity, Infinity]));
+          req.onsuccess = () => { const cur = req.result; if (cur) { cur.delete(); cur.continue(); } else res(); };
+          req.onerror = () => rej(req.error);
+          t.onerror = t.onabort = () => rej(t.error || new Error('transaction aborted'));
+        });
+      } catch { /* ignore */ }
+    }
+    lsDel('messages_' + sid);
+    await writeRev(rev);
+    emit({ type: 'chatDeleted', sid, rev });
+    return rev;
+  }
+
   // ------------------------------------------------------------------ дельты
 
   async function currentRev() {
@@ -379,6 +402,19 @@
   async function markSessionsSaved(rev) {
     if (idbBroken) { lsSet('sessions_rev', String(rev)); return; }
     try { await tx('meta', 'readwrite', (s) => s.put(rev, 'sessions_rev')); } catch { /* ignore */ }
+  }
+
+  // Весь tombstone-реестр (удаления за 7 дней). Отдаётся серверу в каждом PUT:
+  // удалённый чат должен вырезаться из слитого списка сессий всегда — иначе
+  // устаревший снимок другого устройства воскрешает его («чат не удаляется»).
+  async function deletedRegistry() {
+    if (idbBroken) {
+      try { return JSON.parse(lsGet('deleted_chats') || '[]').map((d) => d.sid); } catch { return []; }
+    }
+    try {
+      const list = (await tx('meta', 'readonly', (s) => s.get('deleted_chats'))) || [];
+      return list.map((d) => d.sid);
+    } catch { return []; }
   }
   async function recordDeletedChat(sid, rev) {
     if (idbBroken) {
@@ -449,8 +485,8 @@
 
   global.AiStore = {
     init, guardScope, getSessions, saveSessions, loadMessages, commitMessages, patchMessage,
-    appendMessage, removeSession, since, currentRev, applyDelta, migrateLegacy,
-    markSessionsSaved, recordDeletedChat, onEvent: (fn) => listeners.push(fn),
+    appendMessage, removeSession, deleteChatSilent, since, currentRev, applyDelta, migrateLegacy,
+    markSessionsSaved, recordDeletedChat, deletedRegistry, onEvent: (fn) => listeners.push(fn),
     get broken() { return idbBroken; },
   };
 })(window);
