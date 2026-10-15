@@ -261,9 +261,9 @@
     sessions = sessions.filter((s) => s.id !== id);
     delete cache[id];
     delete lastSeen[id];
-    try {
-      store().removeSession(id).then(() => store().recordDeletedChat(id, Date.now()));
-    } catch { /* ignore */ }
+    // tombstone пишется внутри store().removeSession (deleteChat) — раньше его
+    // записывали отдельно и гоняли транзакции одна за другой
+    try { store().removeSession(id); } catch { /* ignore */ }
     localStorage.removeItem(LS_MSGS + id);
     saveSessions();
   }
@@ -1430,6 +1430,7 @@
 
   async function bootstrap() {
     await store().init(currentScopeUid);
+    await store().guardScope();   // в общей IndexedDB не должно быть чужого аккаунта
     await store().migrateLegacy(currentScopeUid);
     try { sessions = await store().getSessions(); } catch { sessions = []; }
     SYNC.ready = await pullState();
