@@ -1,0 +1,1 @@
+{"updated": 1792094931399, "messages": {"s1": [{"role": "user", "text": "привет"}, {"role": "assistant", "text": "ответ"}]}, "sessions": [{"id": "s1", "name": "Чат", "updated": null}, {"id": "s3", "name": "Третий"}, {"id": "s2", "name": "Второй"}], "deleted_chats": []}

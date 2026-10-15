@@ -2004,7 +2004,32 @@
     try { sessions = await store().getSessions(); } catch { sessions = []; }
     SYNC.ready = await pullState();
     init();
+    startRemotePoll();
     if (SYNC.ready && (SYNC.base === 0 || sessions.length)) scheduleSync();
+  }
+
+  // Живая синхронизация между устройствами без перезагрузки страницы.
+  // Раньше новое устройство получало чаты только при старте (pullState в
+  // bootstrap) — пока не перезагрузишь страницу, список пустой. Теперь раз в
+  // POLL_MS сравниваем дешёвую версию состояния (/ui-state/version) со своей
+  // SYNC.base: если сервер стал новее (другое устройство что-то сохранило) —
+  // тянем полное состояние и мержим. Во время НАШЕЙ генерации пропускаем цикл
+  // (мы и так источник изменений), при ошибке сети — молчим, повторим позже.
+  const POLL_MS = 4000;
+  let pollTimer = null;
+  function startRemotePoll() {
+    if (pollTimer) return;
+    pollTimer = setInterval(pollRemoteState, POLL_MS);
+  }
+  async function pollRemoteState() {
+    if (!currentScopeUid || !SYNC.ready || SYNC.busy) return;
+    if (genFlagGet() || remoteGenPaused) return;   // своя генерация / пауза до конца чужой
+    try {
+      const r = await fetch('/ai/ui-state/version', { credentials: 'same-origin', cache: 'no-store' });
+      if (!r.ok) return;
+      const v = await r.json();
+      if ((v.updated || 0) > (SYNC.base || 0)) await pullState(true);
+    } catch { /* нет связи — следующий тик */ }
   }
 
   function init() {
