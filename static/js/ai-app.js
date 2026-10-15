@@ -1928,11 +1928,23 @@
         } else {
           const cur = await store().loadMessages(sid).then((arr) => arr.map((x) => x.m));
           const next = cur.slice();
+          // КРИТИЧНО: серверный _apply_delta трактует it.i как ПОЗИЦИЮ С 1
+          // (см. `if not isinstance(i, int) or i < 1: continue` и hist[i-1]).
+          // Раньше здесь it.i использовался как 0-based индекс массива:
+          // splice(it.i,1) срезал НЕ то сообщение, a next[it.i]=m при i==len
+          // перезаписывало последнее/уходило в дыру — чужие точечные правки
+          // портили локальную историю («сообщения путались/пропадали»).
           for (const it of list) {
-            if (it.i == null) continue;
-            if (it.m === null || it.m === undefined) next.splice(it.i, 1);
-            else if (it.i < next.length) next[it.i] = it.m;
-            else next.push(it.m);
+            if (it.i == null || it.i < 1) continue;
+            const pos = it.i - 1;                          // 1-based -> 0-based
+            if (it.m === null || it.m === undefined) {
+              if (pos < next.length) next[pos] = null;     // tombstone
+            } else if (pos < next.length) {
+              next[pos] = it.m;                            // патч существующего
+            } else {
+              while (next.length < pos) next.push(null);   // вставка в хвост
+              next.push(it.m);
+            }
           }
           await store().commitMessages(sid, next.filter(Boolean), null);
           delete lastSeen[sid];
@@ -1994,7 +2006,11 @@
       }
       const st = await r.json();
       if (st.updated) await mergeFull(st, { quiet: !!opts.quiet });
-      SYNC.base = st.updated || 0;
+      // SYNC.base — СЕРВЕРНАЯ версия. Присваиваем максимум, а не замену:
+      // если параллельный PUT уже поднял base выше, чем вернул этот GET
+      // (гонка чтения/записи), откат базы назад ломает delta-канал —
+      // следующий since=<старый> не покрывается журналом -> need_full.
+      SYNC.base = Math.max(st.updated || 0, SYNC.base || 0);
       return true;
     } catch { return false; }
   }
@@ -2081,9 +2097,23 @@
         await checkRemoteGen();
       } else if (r.ok) {
         const j = await r.json();
-        if (j.conflicts) await resolveConflicts(j.conflicts);
-        SYNC.base = j.updated || SYNC.base;
-        await store().markSessionsSaved(SYNC.base);
+        // КРИТИЧНО: сервер на no-op-дельте (пустые messages/deleted_chats при
+        // фоновом тике) НЕ двигает updated и отвечает {'updated': <текущий>}.
+        // Присвоение SYNC.base = j.updated могло откатить базу НАЗАД, если наш
+        // base уже был поднят более ранним PUT'ом этой же версии — после чего
+        // следующий delta-запрос with since=<старый base> не покрывался
+        // журналом и давал need_full -> лишний полный снимок на каждом тике.
+        // Поэтому берём максимум, а не замену. Конфликты разрешаем ВСЕГДА,
+        // даже когда версия не выросла: они означают, что сервер отклонил
+        // часть наших записей (позиции не совпали) — молча оставлять локальную
+        // историю расходящейся нельзя, иначе соседние устройства никогда не
+        // увидят эти сообщения («чат есть на ПК, пустой на телефоне»).
+        const newBase = Math.max(j.updated || 0, SYNC.base || 0);
+        if (j.conflicts && j.conflicts.length) await resolveConflicts(j.conflicts);
+        if (newBase !== SYNC.base) {
+          SYNC.base = newBase;
+          await store().markSessionsSaved(newBase);
+        }
       } else if (r.status === 413) {
         toast('Сервер отклонил синхронизацию: слишком много данных');
       } else if (r.status === 401) {
@@ -2169,8 +2199,11 @@
       } else if (st.active && st.may_write) {
         // сервер считает генерацию нашей, а мы её не ведём — осиротевший флаг
         // (например, вкладка закрылась в разгар ответа): снимаем, чтобы не
-        // блокировать синхронизацию остальным устройствам бесконечно
-        genFlagSet(false);
+        // блокировать синхронизацию остальным устройствам бесконечно.
+        // ВАЖНО: не снимать genFlagSet(false) заранее — releaseGenLock
+        // проверяет genFlagGet() и при снятом флаге уйдёт в ранний return,
+        // DELETE на сервер не уйдёт и лок будет висеть до TTL. Флаг снимает
+        // сам releaseGenLock.
         await releaseGenLock();
         scheduleSync();
       }
