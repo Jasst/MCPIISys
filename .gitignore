@@ -15,3 +15,4 @@ routes/__pycache__/ai_assistant.cpython-313.pyc
 /.idea
 /ui_state
 *.log
+assistant.log
