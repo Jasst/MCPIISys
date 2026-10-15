@@ -115,6 +115,26 @@ body[data-fs="l"] { --chat-fs: 17px; }
 }
 .scroll-bottom:hover { color: var(--text-main); background: var(--bg-hover); }
 
+/* Pull-to-refresh — «потянуть диалог вниз, чтобы обновить чаты» (мобильные).
+   Индикатор живёт над списком сообщений; JS сдвигает msgs-inner transform'ом
+   и показывает этот блок пропорционально натяжению. */
+.pull-indicator {
+  position: absolute; top: 0; left: 50%; transform: translateX(-50%);
+  z-index: 6; display: flex; align-items: center; gap: 8px;
+  padding: 6px 14px; border-radius: 999px; pointer-events: none;
+  background: var(--bg-surface); color: var(--text-muted);
+  border: 1px solid var(--border-color); box-shadow: var(--shadow-md);
+  font-size: 13px; white-space: nowrap;
+  opacity: 0; visibility: hidden; transition: opacity .15s ease;
+}
+.pull-indicator.visible { opacity: 1; visibility: visible; }
+.pull-indicator .pi-spin { display: inline-block; font-size: 15px; transition: transform .1s linear; }
+.pull-indicator.refreshing .pi-spin { animation: piRotate 0.9s linear infinite; }
+@keyframes piRotate { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .pull-indicator.refreshing .pi-spin { animation-duration: 2s; }
+}
+
 .msg { display: flex; gap: 12px; align-items: flex-start; animation: fadeUp .25s ease both; }
 .msg.user { justify-content: flex-end; }
 .avatar-bot {

@@ -80,7 +80,21 @@ r = c.put('/ai/ui-state', json={'base': st['updated'], 'sessions': [{'id': 's1',
                                 'messages': {'s3': [{'role': 'user', 'text': 'призрак'}]}})
 st = c.get('/ai/ui-state').json()
 check('9d full snapshot cannot resurrect deleted chat history', 's3' not in st['messages'])
+
+# --- мгновенная доставка изменений другим устройствам (SSE /ui-state/events).
+# TestClient не умеет читать бесконечный стрим в фоне, поэтому проверяем
+# механизм без открытия потока: PUT после записи должен поставить событие
+# в очередь подписчика; обработчик канала существует и смонтирован в роутере.
+q_evt = __import__('asyncio').Queue(maxsize=4)
+ui._state_listeners.setdefault('u1', []).append(q_evt)
+r = c.put('/ai/ui-state', json={'base': st['updated'], 'sessions': [{'id': 's1', 'name': 'Чат'}],
+                                'messages': {}})
+check('9g SSE notified on state write', r.status_code == 200 and q_evt.qsize() == 1
+      and q_evt.get_nowait() == 'state-changed')
+routes_paths = {(rt.path, getattr(rt, 'methods', None)) for rt in ui.router.routes}
+check('9h events channel registered', ('/ai/ui-state/events', {'GET'}) in routes_paths)
 # tombstone из дельты без sessions-списка тоже вырезает запись из sessions
+st = c.get('/ai/ui-state').json()
 r = c.put('/ai/ui-state', json={'base': st['updated'], 'rev': 6, 'delta': {
     'messages': {}, 'deleted_chats': ['s2']}})
 st = c.get('/ai/ui-state').json()
