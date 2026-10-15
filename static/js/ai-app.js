@@ -779,9 +779,16 @@
 
   async function acquireGenLock() {
     if (!currentScopeUid) return true;              // локальный режим без входа — лок не нужен
+    // Жёсткий таймаут 1.5 с: проверка лока НЕ должна задерживать отправку.
+    // При медленной сети/вешающемся сервере раньше fetch тянул до полного
+    // сетевого таймаута, и всё это время нажатие «отправить» выглядело мёртвым.
+    // Истекаем по timeout как при «нет связи»: решаем локально, а настоящую
+    // параллельную генерацию остановит server-side лок на старте POST /ai/chat.
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 1500);
     try {
       const r = await fetch(API.genLock, {
-        method: 'POST', credentials: 'same-origin',
+        method: 'POST', credentials: 'same-origin', signal: ctrl.signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ client: !!(gen || genFlagGet()), cid: CID }),   // продление своей vs попытка занять чужой
       });
@@ -789,7 +796,8 @@
       const j = await r.json();
       if (j.held_by_me) genFlagSet(true);
       return !!j.ok;
-    } catch { return true; }                        // нет связи — решаем локально (как раньше)
+    } catch { return true; }                        // нет связи/таймаут — решаем локально (как раньше)
+    finally { clearTimeout(timer); }
   }
 
   async function releaseGenLock() {
@@ -1038,10 +1046,40 @@
   // перед новым запросом занимаем генерационный лок, чтобы другие устройства
   // на время нашего ответа заморозили свою синхронизацию этого аккаунта.
   function send(override) {
+    // Оптимистичная отправка: интерфейс НЕ ждёт сетевой проверки генерационного
+    // лока. Раньше каждое нажатие «отправить» сначала блокировалось запросом
+    // POST /gen-lock (а при плохой сети — до полного таймаута fetch), и всё
+    // это время поле ввода и список сообщений не реагировали — «интерфейс
+    // виснет на несколько секунд, сообщение сразу не отправляется». Теперь
+    // сообщение мгновенно появляется в чате (sendNow сам берёт текст/вложение
+    // и рисует их до любого сетевого раунда), а лок проверяется параллельно;
+    // если он занят другим устройством — старт генерации не произойдёт, а
+    // сервер разберётся с конфликтом по своим кодам (429/409).
+    const text = (override !== undefined ? override : els.input.value).trim();
+    if (!text && !attachment) return;
+    if (gen) {
+      if (gen.sessionId !== currentId) {
+        toast('Дождитесь окончания ответа в другом чате');
+        updateHint();
+      }
+      return;
+    }
+
+    let started = false;
+    const go = () => { if (!started) { started = true; sendNow(override); } };
+    if (!currentScopeUid) { go(); return; }   // локальный режим без входа — лок не нужен
     acquireGenLock().then((ok) => {
-      if (!ok) { toast('Дождитесь окончания ответа на другом устройстве'); updateHint(); return; }
-      sendNow(override);
+      if (!ok) {
+        toast('Дождитесь окончания ответа на другом устройстве');
+        updateHint();
+        return;
+      }
+      go();
     });
+    // Страховка от «зависшей кнопки»: если проверка лока не отвечает дольше
+    // 1.2 с (медленная сеть), запускаем отправку сразу — server-side лок
+    // по-прежнему защищает от двух параллельных генераций одного аккаунта.
+    setTimeout(go, 1200);
   }
 
   function sendNow(override) {
