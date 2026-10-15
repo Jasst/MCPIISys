@@ -14,3 +14,4 @@ routes/__pycache__/ai_assistant.cpython-313.pyc
 /GCN/__pycache__
 /.idea
 /ui_state
+*.log

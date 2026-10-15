@@ -1275,3 +1275,5 @@ CancelTaskRequest.params.taskId
 2026-10-15 20:29:10 WARNING [GCN.web_search:936] DDG attempt 1/3 failed: No results found.
 2026-10-15 20:29:26 WARNING [GCN.web_search:936] DDG attempt 2/3 failed: error sending request for url (https://www.startpage.com/sp/search) > operation timed out
 2026-10-15 20:29:40 WARNING [GCN.web_search:936] DDG attempt 3/3 failed: error sending request for url (https://www.startpage.com/sp/search) > operation timed out
+2026-10-15 20:33:20 INFO [routes.ai_assistant:2546] [research] из ответа сохранено 2 фактов (scopes: ['private'])
+2026-10-15 20:35:51 INFO [routes.ai_assistant:880] Idle consolidation triggered
