@@ -3349,7 +3349,69 @@ async def attach_to_active_stream(watch: bool = False, address: str = Depends(re
     """
     assistant = await get_assistant(address)
     state = assistant._active_stream
+    # ВАЖНО: отсутствие _active_stream проверяем ВНУТРИ SSE-генератора, а не
+    # здесь. Между POST /gen-lock (пишет _active_generations в ui_state.py) и
+    # моментом, когда владелец дойдёт до stream_response (создаёт _active_stream
+    # здесь), есть окно: /gen-status уже говорит active:true/may_watch:true, а
+    # attach при синхронной проверке ответил бы no_active_generation — наблюдатель
+    # ушёл бы в g.interrupted и ждал scheduleResume(5000). Теперь watch-подписчик
+    # держит SSE открытым (keep-alive раз в 2 с) до ATTACH_START_WAIT_S и
+    # подхватывает буфер, как только генерация стартует; если так и не стартовала —
+    # честно отвечаем no_active_generation, и клиент заберёт финал через
+    # синхронизацию (как раньше). Для владельца (без watch) поведение прежнее.
+    # синхронной проверки достаточно только для решения «есть ли живой поток
+    # прямо сейчас»; для watch-подписчика отсутствие потока — не приговор,
+    # он может появиться с минуты на минуту (см. _wait_start выше)
     if not state or state.get("done"):
+        ATTACH_START_WAIT_S = 8.0
+        ATTACH_POLL_S = 0.25
+        if watch:
+            async def _wait_start():
+                waited = 0.0
+                while True:
+                    st = assistant._active_stream
+                    # ВАЖНО: ловим и уже завершённый поток (done=True): в TTL-окне
+                    # после ответа его буфер — самый быстрый способ показать
+                    # наблюдателю финал, чем ждать PUT-владельца/SSE state-changed.
+                    # Для владельца без watch поведение прежнее (no_active_generation
+                    # -> recoverFromLast/last_response).
+                    if st is not None:
+                        queue: asyncio.Queue = asyncio.Queue()
+                        async with assistant._stream_state_lock:
+                            # снимок буфера и подписка — атомарно под тем же локом,
+                            # что использует stream_response: чанк, отправленный
+                            # между этими точками, попадёт ровно один раз
+                            snapshot = list(st["buffer"])
+                            st["subscribers"].add(queue)
+                            was_done = bool(st.get("done"))
+                        try:
+                            for chunk in snapshot:
+                                yield chunk
+                            if was_done:
+                                yield "data: [DONE]\n\n"
+                                return
+                            while True:
+                                try:
+                                    chunk = await asyncio.wait_for(queue.get(), timeout=2.0)
+                                except asyncio.TimeoutError:
+                                    yield ": keep-alive\n\n"
+                                    continue
+                                if chunk is None:
+                                    break
+                                yield chunk
+                            yield "data: [DONE]\n\n"
+                        finally:
+                            st["subscribers"].discard(queue)
+                        return
+                    if waited >= ATTACH_START_WAIT_S:
+                        break
+                    await asyncio.sleep(ATTACH_POLL_S)
+                    waited += ATTACH_POLL_S
+                    yield ": keep-alive\n\n"
+                yield "data: " + json.dumps({"no_active_generation": True}) + "\n\n"
+            return StreamingResponse(_wait_start(), media_type="text/event-stream",
+                                     headers={"Cache-Control": "no-cache,no-store,must-revalidate",
+                                              "X-Accel-Buffering": "no"})
         async def _none():
             yield "data: " + json.dumps({"no_active_generation": True}) + "\n\n"
         return StreamingResponse(_none(), media_type="text/event-stream",
