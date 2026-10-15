@@ -32,7 +32,9 @@
   function setScope(uid) {
     KEY.sessions = uid ? `ai:${uid}:sessions` : 'ai_sessions';
     KEY.msgs = uid ? `ai:${uid}:messages_` : 'ai_messages_';
+    LS_MSGS = uid ? `ai:${uid}:messages_` : 'ai_messages_';
   }
+  let LS_MSGS = 'ai_messages_';   // ключ-префикс localStorage-зеркала (устанавливается в setScope)
   const NOTIFY_ID = 'ai_notifications';
   const DEFAULT_NAME = 'Новый чат';
   const MAX_STORED = 300;
@@ -112,7 +114,7 @@
 
   let settings = Object.assign({}, DEFAULTS, readJSON(KEY.settings, {}));
   let sessions = [];                 // загружаются в init() после определения аккаунта
-  let cache = {};                 // id -> массив сообщений (живой объект для генерации)
+  let cache = {};                 // id -> живой массив сообщений открытого чата
   let currentId = null;           // открытый в интерфейсе чат
   let gen = null;                 // активная генерация: {sessionId, idx, controller, stopRequested}
   let attachment = null;          // {url, base64, mime, name}
@@ -160,29 +162,84 @@
   };
 
   // ------------------------------------------------------------------ хранилище
+  // Основное место — IndexedDB (ai-store.js): лимиты сотни МБ, асинхронные записи,
+  // частичные обновления вместо перезаписи всего чата. localStorage остаётся
+  // best-effort зеркалом (быстрый старт, старые вкладки). Синхронизация с сервером
+  // передаёт только дельту — изменённые сообщения, а не весь контент.
 
-  const saveSessions = () => { writeJSON(KEY.sessions, sessions); scheduleSync(); };
+  const store = () => window.AiStore;   // есть всегда: скрипт грузится до этого
+
+  function saveSessions() {
+    try { store().saveSessions(sessions); } catch { /* ignore */ }
+    scheduleSync();
+  }
   const currentSession = () => sessions.find((s) => s.id === currentId) || null;
   const findSession = (id) => sessions.find((s) => s.id === id) || null;
 
+  // cache[id] — живой массив открытого/активного чата (его мутирует генерация).
+  // Закрытые чаты читаются из хранилища (ai-store.js) и кэшируются снимком;
+  // при расхождении версий берём более свежий снимок.
+  const lastSeen = {};        // id -> массив
+  const lastSeenAt = {};      // id -> время чтения снимка
   function loadMsgs(id) {
-    if (!(id in cache)) cache[id] = readJSON(KEY.msgs + id, []);
+    if (!(id in cache)) {
+      const v = readJSON(LS_MSGS + id, []);
+      cache[id] = Array.isArray(v) ? v : [];
+      lastSeenAt[id] = 0;
+    }
+    reconcile(id);
     return cache[id];
   }
+  function reconcile(id) {
+    const prev = lastSeen[id];
+    if (!prev || cache[id].length >= prev.length) lastSeen[id] = cache[id];
+    else cache[id] = prev;
+  }
+  // Снимок закрытого чата из хранилища; устаревший (<2 с) не перечитываем —
+  // isPending вызывается на каждой отрисовке списка чатов
+  async function peekMsgs(id) {
+    if (id in cache) return cache[id];
+    if (lastSeen[id] && Date.now() - (lastSeenAt[id] || 0) < 2000) return lastSeen[id];
+    try {
+      const arr = await store().loadMessages(id);
+      const msgs = arr.map((x) => x.m).filter(Boolean);
+      lastSeen[id] = msgs.slice(-MAX_STORED);
+      lastSeenAt[id] = Date.now();
+    } catch { /* оставляем прежний снимок */ }
+    return lastSeen[id] || [];
+  }
+  // Инвалидация кеша после записи в обход живых массивов (merge, remote-дельта):
+  // перечитываем из хранилища только те чаты, что уже держатся в памяти
+  async function reloadFromStore(id) {
+    try {
+      const arr = await store().loadMessages(id);
+      const msgs = arr.map((x) => x.m).filter(Boolean);
+      if (msgs.length >= (cache[id] || []).length) { cache[id] = msgs.slice(-MAX_STORED); lastSeen[id] = cache[id]; }
+    } catch { /* оставляем прежний кеш */ }
+  }
 
-  function persist(id) {
-    const ok = writeJSON(KEY.msgs + id, (cache[id] || []).slice(-MAX_STORED));
+  async function persist(id) {
+    const msgs = loadMsgs(id);
+    let ok = true;
+    try { await store().commitMessages(id, msgs.slice(-MAX_STORED), null); }
+    catch (e) { console.warn('persist:', e); ok = false; }
     scheduleSync();
     if (!ok) toast('Не удалось сохранить: переполнено локальное хранилище');
   }
-  // Частые обновления во время генерации сохраняем не чаще раза в PERSIST_DELAY_MS
+  // Частые обновления во время генерации сохраняем не чаще раза в PERSIST_DELAY_MS.
+  // Пока чат открыт — пишем только его; историю закрытых чатов дописываем сразу,
+  // чтобы после переключения вкладок ответ не терялся.
   function persistSoon(id) {
-    if (persistTimers[id]) return;
-    persistTimers[id] = setTimeout(() => { delete persistTimers[id]; persist(id); }, PERSIST_DELAY_MS);
+    if (id === currentId || (gen && gen.sessionId === id)) {
+      if (persistTimers[id]) return;
+      persistTimers[id] = setTimeout(() => { delete persistTimers[id]; persist(id); }, PERSIST_DELAY_MS);
+    } else {
+      persist(id);
+    }
   }
-  function commit(id) {
+  async function commit(id) {
     if (persistTimers[id]) { clearTimeout(persistTimers[id]); delete persistTimers[id]; }
-    persist(id);
+    await persist(id);
     const s = findSession(id);
     if (s) { s.updated = Date.now(); saveSessions(); }
   }
@@ -194,6 +251,7 @@
     const now = Date.now();
     sessions.unshift({ id, name, created: now, updated: now });
     cache[id] = [];
+    lastSeen[id] = cache[id];
     saveSessions();
     persist(id);
     return id;
@@ -202,7 +260,11 @@
   function removeSession(id) {
     sessions = sessions.filter((s) => s.id !== id);
     delete cache[id];
-    localStorage.removeItem(KEY.msgs + id);
+    delete lastSeen[id];
+    try {
+      store().removeSession(id).then(() => store().recordDeletedChat(id, Date.now()));
+    } catch { /* ignore */ }
+    localStorage.removeItem(LS_MSGS + id);
     saveSessions();
   }
 
@@ -248,12 +310,15 @@
       t.className = 't';
       t.textContent = s.name;
       b.appendChild(t);
-      if (isPending(s.id)) {
-        const dot = document.createElement('span');
-        dot.className = 'dot';
-        dot.title = 'Ответ пишется';
-        b.appendChild(dot);
+      const dot = document.createElement('span');
+      dot.className = 'dot';
+      dot.title = 'Ответ пишется';
+      dot.hidden = !isPending(s.id);
+      if (s.id !== currentId && !(gen && gen.sessionId === s.id)) {
+        // закрытый чат: проверяем «пишется» асинхронно из хранилища, без блокировки списка
+        peekMsgs(s.id).then((arr) => { dot.hidden = !arr.some((m) => m.pending); });
       }
+      b.appendChild(dot);
       b.addEventListener('click', () => { selectSession(s.id); closeNav(); });
       els.list.appendChild(b);
     }
@@ -601,8 +666,9 @@
   function openNav() { els.app.classList.add('nav-open'); }
   function closeNav() { els.app.classList.remove('nav-open'); }
 
-  function selectSession(id) {
+  async function selectSession(id) {
     if (id === currentId) return;
+    await peekMsgs(id);            // подтянуть историю закрытого чата из IndexedDB
     // Пустой «Новый чат», который пользователь бросил, убираем из списка
     const prev = currentSession();
     if (prev && isEmptyDefault(prev) && prev.id !== (gen && gen.sessionId)) removeSession(prev.id);
@@ -791,15 +857,20 @@
     resumeTimer = setTimeout(() => resumePending(), delay);
   }
 
-  // Подхватываем незавершённые ответы, например после перезагрузки страницы
+  // Подхватываем незавершённые ответы, например после перезагрузки страницы.
+  // Открытый/активный чат проверяем сразу, закрытые — асинхронно из хранилища.
   async function resumePending() {
     clearTimeout(resumeTimer);
-    for (const s of sessions) {
+    if (gen) return;
+    const priority = [currentId, gen && gen.sessionId].filter(Boolean);
+    const rest = sessions.map((s) => s.id).filter((id) => !priority.includes(id));
+    for (const id of priority.concat(rest)) {
       if (gen) return;
-      const idx = loadMsgs(s.id).findIndex((m) => m.pending);
+      const msgs = await peekMsgs(id);
+      const idx = msgs.findIndex((m) => m.pending);
       if (idx >= 0) {
-        await startGeneration(s.id, idx, 'attach', null);
-        if (currentId === s.id) renderMessages({ scroll: false });
+        await startGeneration(id, idx, 'attach', null);
+        if (currentId === id) renderMessages({ scroll: false });
       }
     }
     refreshUI();
@@ -1054,16 +1125,20 @@
     });
   }
 
-  function exportAllChats() {
+  async function exportAllChats() {
     const data = { exportedAt: new Date().toISOString(), sessions, messages: {} };
-    for (const s of sessions) data.messages[s.id] = loadMsgs(s.id);
+    for (const s of sessions) data.messages[s.id] = await peekMsgs(s.id);
     download('ai-chats-' + Date.now() + '.json', JSON.stringify(data, null, 2), 'application/json');
   }
 
-  function wipeAllChats() {
+  async function wipeAllChats() {
     if (gen) { toast('Дождитесь окончания ответа'); return; }
     if (!confirm('Удалить все чаты в этом браузере? Это нельзя отменить.')) return;
-    for (const s of sessions) { delete cache[s.id]; localStorage.removeItem(KEY.msgs + s.id); }
+    for (const s of sessions) {
+      delete cache[s.id]; delete lastSeen[s.id];
+      localStorage.removeItem(LS_MSGS + s.id);
+      try { await store().removeSession(s.id); } catch { /* ignore */ }
+    }
     sessions = [];
     saveSessions();
     const id = createSession(DEFAULT_NAME);
@@ -1221,6 +1296,9 @@
 
   // ------------------------------------------------------------------ синхронизация с сервером
   // Чаты одного аккаунта видны на всех устройствах. Локальное хранилище — кеш.
+  // Протокол дельтовый: PUT /ai/ui-state передаёт ТОЛЬКО изменённые с момента
+  // последней отправки сообщения (версии > base) и id удалённых чатов, а не весь
+  // контент. Сервер хранит снапшот, применяет дельту и отвечает новой версией.
   const SYNC = { base: 0, ready: false, timer: null, busy: false };
 
   function scheduleSync() {
@@ -1229,19 +1307,68 @@
     SYNC.timer = setTimeout(pushState, 1500);
   }
 
-  // Слияние: серверные версии приоритетнее для тех же id, локальные чаты, которых
-  // на сервере нет, сохраняются и уйдут на сервер при следующей отправке.
-  function mergeState(st) {
+  // Слияние полного состояния (первый вход/409): серверные версии приоритетнее
+  // для тех же id, локальные чаты, которых на сервере нет, сохраняются и уйдут
+  // на сервер следующей дельтой.
+  async function mergeFull(st) {
     const byId = new Map();
     for (const s of st.sessions || []) byId.set(s.id, s);
     for (const s of sessions) if (!byId.has(s.id)) byId.set(s.id, s);
     sessions = [...byId.values()];
-    saveSessions();
     for (const s of sessions) {
       const server = st.messages && st.messages[s.id];
-      if (server) writeJSON(KEY.msgs + s.id, server);
+      if (Array.isArray(server)) await store().commitMessages(s.id, server.slice(-MAX_STORED), null);
     }
+    saveSessions();
     cache = {};
+    await reloadDirtySafe();
+    if (currentId) renderMessages({ scroll: false });
+    refreshUI();
+  }
+
+  // После записи в обход живых массивов перечитываем в память только открытый
+  // чат и чат с активной генерацией — остальные подтянутся при обращении
+  async function reloadDirtySafe() {
+    const ids = new Set([currentId, gen && gen.sessionId]);
+    for (const id of ids) if (id) await reloadFromStore(id);
+  }
+
+  // Дельта с сервера: обновляем только пришедшие сообщения; открытые чаты
+  // перечитываем из хранилища, закрытые дождутся loadMsgs при следующем обращении.
+  async function applyServerDelta(delta) {
+    const msgs = delta.messages || {};
+    let touchedCurrent = false;
+    for (const [sid, list] of Object.entries(msgs)) {
+      if (sid === currentId || (gen && gen.sessionId === sid)) {
+        await reloadFromStore(sid);       // живой кеш актуализируем из хранилища
+        if (sid === currentId) touchedCurrent = true;
+      } else {
+        const cur = await store().loadMessages(sid).then((arr) => arr.map((x) => x.m));
+        const next = cur.slice();
+        for (const it of list) {
+          if (it.i == null) continue;
+          if (it.m === null || it.m === undefined) next.splice(it.i, 1);
+          else if (it.i < next.length) next[it.i] = it.m;
+          else next.push(it.m);
+        }
+        await store().commitMessages(sid, next.filter(Boolean), null);
+        delete lastSeen[sid];
+      }
+    }
+    if (Array.isArray(delta.deleted_chats) && delta.deleted_chats.length) {
+      const before = sessions.length;
+      sessions = sessions.filter((s) => !delta.deleted_chats.includes(s.id));
+      for (const id of delta.deleted_chats) { delete cache[id]; delete lastSeen[id]; }
+      if (sessions.length !== before) { saveSessions(); refreshUI(); }
+    }
+    if (Array.isArray(delta.sessions)) {
+      const byId = new Map();
+      for (const s of delta.sessions) byId.set(s.id, s);
+      for (const s of sessions) if (!byId.has(s.id)) byId.set(s.id, s);
+      sessions = [...byId.values()];
+      refreshUI();
+    }
+    if (touchedCurrent) renderMessages({ scroll: false });
   }
 
   async function pullState() {
@@ -1250,7 +1377,7 @@
       const r = await fetch('/ai/ui-state', { credentials: 'same-origin', cache: 'no-store' });
       if (!r.ok) return false;
       const st = await r.json();
-      if (st.updated) mergeState(st);
+      if (st.updated) await mergeFull(st);
       SYNC.base = st.updated || 0;
       return true;
     } catch { return false; }
@@ -1260,20 +1387,40 @@
     if (!SYNC.ready || SYNC.busy || !currentScopeUid) return;
     SYNC.busy = true;
     try {
-      const messages = {};
-      for (const s of sessions) messages[s.id] = loadMsgs(s.id);
+      const localRev = await store().currentRev();
+      const first = SYNC.base === 0;
+      const body = { base: SYNC.base, rev: localRev };
+      if (first) {
+        // первое сохранение аккаунта: полный снимок (старые клиенты сервера его тоже примут)
+        body.sessions = sessions;
+        body.messages = {};
+        for (const s of sessions) body.messages[s.id] = loadMsgs(s.id).slice(-MAX_STORED);
+      } else {
+        const d = await store().since(SYNC.base);
+        body.delta = { messages: d.messages, deleted_chats: d.deletedChats };
+        if (d.sessionsChanged) body.delta.sessions = sessions;
+        if (Object.keys(d.messages).length === 0 && d.deletedChats.length === 0 && !d.sessionsChanged) {
+          SYNC.base = d.rev;               // расходимостей нет — просто поднимаем версию
+          return;
+        }
+      }
       const r = await fetch('/ai/ui-state', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
-        body: JSON.stringify({ base: SYNC.base, sessions, messages }),
+        body: JSON.stringify(body),
       });
       if (r.status === 409) {
         // Другое устройство уже сохранило свою версию: берём её и не перезаписываем
         await pullState();
         scheduleSync();
       } else if (r.ok) {
-        SYNC.base = (await r.json()).updated;
+        const j = await r.json();
+        if (j.conflicts) await applyServerDelta(j.conflicts);
+        SYNC.base = j.updated || SYNC.base;
+        await store().markSessionsSaved(SYNC.base);
+      } else if (r.status === 413) {
+        toast('Сервер отклонил синхронизацию: слишком много данных');
       } else if (r.status === 401) {
         location.href = '/login';
       }
@@ -1282,13 +1429,16 @@
   }
 
   async function bootstrap() {
+    await store().init(currentScopeUid);
+    await store().migrateLegacy(currentScopeUid);
+    try { sessions = await store().getSessions(); } catch { sessions = []; }
     SYNC.ready = await pullState();
     init();
     if (SYNC.ready && (SYNC.base === 0 || sessions.length)) scheduleSync();
   }
 
   function init() {
-    sessions = readJSON(KEY.sessions, []);
+    if (!Array.isArray(sessions) || !sessions.length) sessions = readJSON(KEY.sessions, []);
     bindSettings();
     applySettings();
     syncChips();
