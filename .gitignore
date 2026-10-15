@@ -10,3 +10,4 @@ __pycache__/
 *.zip
 /ui_state
 assistant.log
+*.log
