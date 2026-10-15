@@ -151,6 +151,7 @@
     attachThumb: $('#attachThumb'),
     attachName: $('#attachName'),
     fileInput: $('#fileInput'),
+    scrollBottom: $('#scrollBottomBtn'),
     dialog: $('#settingsDialog'),
     openSettings: $('#openSettings'),
     exportAll: $('#exportAll'),
@@ -450,9 +451,33 @@
     return w;
   }
 
+  // ------------------------------------------------------------------ прокрутка
+
+  // Пользователь «у дна», если от низа осталось меньше 80px. Пока он у дна,
+  // новые токены генерации автоматически подскролливают вниз; если он ушёл
+  // вверх читать — не мешаем и показываем кнопку «вниз». Настройка
+  // «Автопрокрутка» (settings.autoScroll) разрешает вести вниз во время генерации;
+  // при этом пользователя, ушедшего вверх читать, никогда не тянет за новый текст.
+  const NEAR_BOTTOM = 80;
+  const isNearBottom = () =>
+    els.messages.scrollHeight - els.messages.scrollTop - els.messages.clientHeight < NEAR_BOTTOM;
+
+  function updateScrollButton() {
+    els.scrollBottom.hidden = isNearBottom();
+  }
+
   function scrollEnd(force) {
-    if (!force && !settings.autoScroll) return;
+    if (!force && !settings.autoScroll) return;   // настройка: никогда не прокручать само
+    if (!force && !isNearBottom()) return;        // пользователь читает выше — не тянем вниз
     els.messages.scrollTop = els.messages.scrollHeight;
+    updateScrollButton();
+  }
+
+  function scrollToBottom(smooth) {
+    const behavior = smooth && !window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      ? 'smooth' : 'auto';
+    els.messages.scrollTo({ top: els.messages.scrollHeight, behavior });
+    updateScrollButton();
   }
 
   function renderMessages(opts = {}) {
@@ -464,6 +489,7 @@
     }
     msgs.forEach((m, i) => els.inner.appendChild(buildMessage(m, i)));
     if (opts.scroll !== false) scrollEnd(true);
+    else updateScrollButton();
   }
 
   // Обновляет один пузырь во время генерации, не перерисовывая весь чат
@@ -1037,6 +1063,10 @@
   els.menuBtn.addEventListener('click', () => els.app.classList.toggle('nav-open'));
   els.scrim.addEventListener('click', closeNav);
   els.search.addEventListener('input', renderList);
+
+  // Прокрутка: кнопка «вниз» видна, только когда пользователь ушёл от конца
+  els.messages.addEventListener('scroll', updateScrollButton, { passive: true });
+  els.scrollBottom.addEventListener('click', () => scrollToBottom(true));
   els.hintBtn.addEventListener('click', () => { if (gen) selectSession(gen.sessionId); });
 
   els.send.addEventListener('click', onSendButton);
@@ -1121,8 +1151,16 @@
   els.wipeAll.addEventListener('click', wipeAllChats);
 
   document.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); newChat(); }
-    if (e.key === 'Escape') closeNav();
+    // Esc закрывает открытое модальное окно настроек (браузер это делает сам
+    // только при фокусе внутри <dialog>; клик по фону-оверлею тоже закрывает)
+    if (e.key === 'Escape') {
+      if (els.dialog.open) { els.dialog.close(); return; }
+      closeNav();
+    }
+    // Ctrl/Cmd+K — новый чат, но не пока открыт диалог настроек
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && !els.dialog.open) {
+      e.preventDefault(); newChat();
+    }
   });
   document.addEventListener('visibilitychange', () => { if (!document.hidden) resumePending(); });
   window.addEventListener('focus', () => resumePending());
