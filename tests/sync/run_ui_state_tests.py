@@ -23,7 +23,7 @@ def check(n, ok, extra=''):
     res.append(bool(ok)); print('PASS' if ok else 'FAIL', n, extra)
 
 r = c.get('/ai/ui-state')
-check('1 empty state on first read', r.json() == {'updated': 0, 'sessions': [], 'messages': {}})
+check('1 empty state on first read', r.json() == {'updated': 0, 'sessions': [], 'messages': {}, 'deleted_chats': []})
 
 body = {'base': 0, 'sessions': [{'id': 's1', 'name': 'Чат'}], 'messages': {'s1': [{'role': 'user', 'text': 'привет'}]}}
 r = c.put('/ai/ui-state', json=body)
@@ -63,6 +63,31 @@ check('7b deleted chat history removed', 's3' not in st['messages'])
 
 r = c.put('/ai/ui-state', json={'base': v3, 'delta': {'messages': {}, 'deleted_chats': []}})
 check('7c stale delta refused (409)', r.status_code == 409)
+
+# --- tombstone-реестр: удалённый чат не должен «воскресать» ни при каком merge
+v4 = c.get('/ai/ui-state').json()['updated']
+st = c.get('/ai/ui-state').json()
+check('9a deletion registered in tombstones', any(d['sid'] == 's3' for d in st.get('deleted_chats', [])))
+# устройство B (устаревший снимок списка, где s3 ещё есть) — tombstone побеждает
+r = c.put('/ai/ui-state', json={'base': v4, 'rev': 5, 'delta': {
+    'messages': {}, 'deleted_chats': [], '_allDeleted': ['s3'],
+    'sessions': [{'id': 's1', 'name': 'Чат'}, {'id': 's3', 'name': 'Третий', 'updated': v4 + 1}]}})
+check('9b resurrection via stale sessions list refused', r.status_code == 200)
+st = c.get('/ai/ui-state').json()
+check('9c deleted chat absent from merged sessions', all(s['id'] != 's3' for s in st['sessions']))
+# полный снимок с историей s3 (старый клиент/первый sync) — историю не оживляем
+r = c.put('/ai/ui-state', json={'base': st['updated'], 'sessions': [{'id': 's1', 'name': 'Чат'}],
+                                'messages': {'s3': [{'role': 'user', 'text': 'призрак'}]}})
+st = c.get('/ai/ui-state').json()
+check('9d full snapshot cannot resurrect deleted chat history', 's3' not in st['messages'])
+# tombstone из дельты без sessions-списка тоже вырезает запись из sessions
+r = c.put('/ai/ui-state', json={'base': st['updated'], 'rev': 6, 'delta': {
+    'messages': {}, 'deleted_chats': ['s2']}})
+st = c.get('/ai/ui-state').json()
+check('9e tombstone without sessions list removes session entry',
+      all(s['id'] != 's2' for s in st['sessions']) and 's2' not in st['messages'])
+# GET отдаёт реестр — mergeFull клиента обязан вырезать эти чаты локально
+check('9f gen-status/get exposes deleted_chats to clients', isinstance(st.get('deleted_chats'), list))
 
 big = {'base': c.get('/ai/ui-state').json()['updated'], 'sessions': [], 'messages': {'x': ['a' * 9_000_000]}}
 r = c.put('/ai/ui-state', json=big)

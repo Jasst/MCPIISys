@@ -38,6 +38,8 @@ MEDIA_DIR = BASE_DIR / 'ui_media'   # изображения чатов: вне 
 MAX_BYTES = 8 * 1024 * 1024
 MAX_MSGS_PER_CHAT = 500          # защита от бесконечного роста снапшота
 MAX_IMAGE_BYTES = 10 * 1024 * 1024   # одно изображение в медиатеке (с запасом от клиентских 8 МБ)
+_TOMB_TTL_MS = 30 * 86400 * 1000     # сервер помнит удаления чатов 30 дней: дольше любого
+                                     # «засыпания» устройства без синхронизации
 IMAGE_EXT = {'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp',
              'image/gif': '.gif'}
 _SAFE_HASH = re.compile(r'^[a-f0-9]{64}$')
@@ -134,13 +136,18 @@ def _path(user_id: str):
 def _read(user_id: str) -> dict:
     path = _path(user_id)
     if not path.exists():
-        return {'updated': 0, 'sessions': [], 'messages': {}}
+        return {'updated': 0, 'sessions': [], 'messages': {}, 'deleted_chats': []}
     try:
         with open(path, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            st = json.load(f)
+        # снапшоты до tombstone-реестра: добавляем пустой — merge-логика сама
+        # создаёт ключ при первом удалении
+        if not isinstance(st.get('deleted_chats'), list):
+            st['deleted_chats'] = []
+        return st
     except (OSError, ValueError):
         logger.error(f'Повреждён файл состояния: {path}')
-        return {'updated': 0, 'sessions': [], 'messages': {}}
+        return {'updated': 0, 'sessions': [], 'messages': {}, 'deleted_chats': []}
 
 
 def _msg_key(m) -> str | None:
@@ -252,9 +259,17 @@ def _apply_delta(current: dict, delta: dict) -> tuple[dict, list]:
     """
     messages = current.get('messages') or {}
     conflicts: list = []
+    # tombstone-ы из дельты вырезаем ДО применения сообщений: пришедшая следом
+    # история того же чата не должна воскресить удалённую сессию (история без
+    # записи в sessions клиенту не видна — «воскресить» её merge уже не сможет)
+    deleted = [sid for sid in (delta.get('deleted_chats') or []) if isinstance(sid, str)]
+    for sid in set(deleted) | {d for d in (delta.get('_allDeleted') or []) if isinstance(d, str)}:
+        messages.pop(sid, None)
     for sid, items in (delta.get('messages') or {}).items():
         if not isinstance(sid, str) or not isinstance(items, list):
             continue
+        if sid in deleted:                                  # удалённый в этой же дельте
+            continue                                        # чат не пересоздаём
         hist = [x for x in (messages.get(sid) or []) if x is not None]
         changed = False
         for it in items:
@@ -303,21 +318,40 @@ def _apply_delta(current: dict, delta: dict) -> tuple[dict, list]:
             messages.pop(sid, None)
 
     deleted = [sid for sid in (delta.get('deleted_chats') or []) if isinstance(sid, str)]
-    if deleted:
-        sess_cur = {s.get('id'): s for s in (current.get('sessions') or []) if isinstance(s, dict)}
-        incoming = {s.get('id'): s for s in (delta.get('sessions') or []) if isinstance(s, dict)}
-        for sid in deleted:
-            c_up = (sess_cur.get(sid) or {}).get('updated', 0)
-            d_up = (incoming.get(sid) or {}).get('updated', 0)
-            if d_up > c_up:                                 # чат воскрес на другом устройстве —
-                continue                                    # поздний tombstone не применяем
-            messages.pop(sid, None)
-
+    # реестр удалений аккаунта: живёт в снапшоте и пополняется каждым PUT.
+    # Нужен потому, что у каждого устройства свой 7-дневный окно tombstone'ов;
+    # сервер помнит все удаления и вырезает чат из ЛЮБОГО merge — иначе
+    # устаревший снимок третьего устройства воскрешает удалённый чат.
+    reg = current.get('deleted_chats') or []
+    if not isinstance(reg, list):
+        reg = []
+    now_ms = int(time.time() * 1000)
+    reg = [r for r in reg if isinstance(r, dict) and isinstance(r.get('sid'), str)
+           and now_ms - int(r.get('at') or 0) < _TOMB_TTL_MS]
+    known = {r['sid'] for r in reg}
+    for sid in set(deleted) | {d for d in (delta.get('_allDeleted') or []) if isinstance(d, str)}:
+        messages.pop(sid, None)                             # историю удаляем всегда:
+        if sid not in known:                                # без записи в sessions она
+            reg.append({'sid': sid, 'at': now_ms})          # не видима никому и merge
+            known.add(sid)                                  # уже не «воскресит»
     out = {'updated': current.get('updated', 0),
            'messages': messages,
-           'sessions': current.get('sessions') or []}
+           'sessions': current.get('sessions') or [],
+           'deleted_chats': reg}
+    gone = known                                            # tombstone побеждает stale-снимок:
     if isinstance(delta.get('sessions'), list):             # список чатов менялся
-        out['sessions'] = _merge_sessions(current.get('sessions') or [], delta['sessions'])
+        incoming_ids = {s.get('id') for s in delta['sessions']
+                        if isinstance(s, dict) and s.get('id')}
+        merged = _merge_sessions(current.get('sessions') or [], delta['sessions'])
+        # удаление — факт: исключаем tombstone-ы, отсутствующие в пришедшем
+        # списке явно. Раньше приоритет updated из дельты над удалением
+        # позволял любому устройству со чуть более свеzym updated воскресить
+        # чат (погрешность часов между ПК/телефоном это гарантирует).
+        # Повторное создание чата даёт новый id — старые tombstone его не касаются.
+        merged = [s for s in merged if s.get('id') not in gone or s.get('id') in incoming_ids]
+        out['sessions'] = merged
+    else:                                                   # списка в дельте нет —
+        out['sessions'] = [s for s in out['sessions'] if s.get('id') not in gone]
     return out, conflicts
 
 
@@ -443,16 +477,34 @@ async def put_state(body: StateBody, request: Request, user_id: str = Depends(re
         # чат повторно), результат идентичен исходному — без дублей.
         merged_msgs = {}
         server_msgs = current.get('messages') or {}
+        # tombstone-реестр клиента: чаты, удалённые на любом из его устройств.
+        # Полный снимок без них перезаписывал историю «удалённого» чата и он
+        # возвращался в список при первом же mergeFull/409-разрешении.
+        dels_raw = (body.delta or {}).get('deleted_chats') if isinstance(body.delta, dict) else None
+        dels = {d for d in (dels_raw or []) if isinstance(d, str)}
         for sid, hist in (body.messages or {}).items():
+            if sid in dels:                                 # удалённый чат — не оживляем
+                continue
             if isinstance(hist, list):
                 merged_msgs[sid] = _merge_msgs(server_msgs.get(sid) or [], hist)
         for sid, hist in server_msgs.items():
-            if sid not in merged_msgs:
+            if sid not in merged_msgs and sid not in dels:
                 merged_msgs[sid] = hist
+        sess_merged = _merge_sessions(current.get('sessions') or [], body.sessions)
+        dels |= {r['sid'] for r in (current.get('deleted_chats') or [])
+                 if isinstance(r, dict) and isinstance(r.get('sid'), str)}
+        reg = [r for r in (current.get('deleted_chats') or [])
+               if isinstance(r, dict) and isinstance(r.get('sid'), str)]
+        known = {r['sid'] for r in reg}
+        now_ms = int(time.time() * 1000)
+        for d in sorted(dels):                              # новые tombstone-ы в реестр:
+            if d not in known:                              # сервер помнит удаления и для
+                reg.append({'sid': d, 'at': now_ms})        # mergeFull других устройств
         payload = {
             'updated': current.get('updated', 0),
-            'sessions': _merge_sessions(current.get('sessions') or [], body.sessions),
+            'sessions': [s for s in sess_merged if s.get('id') not in dels],
             'messages': merged_msgs,
+            'deleted_chats': reg,
         }
     payload['updated'] = max(int(time.time() * 1000), current.get('updated', 0) + 1)
 

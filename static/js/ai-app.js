@@ -1676,10 +1676,20 @@
   // для тех же id, локальные чаты, которых на сервере нет, сохраняются и уйдут
   // на сервер следующей дельтой.
   async function mergeFull(st) {
+    // tombstone-реестр сервера: чаты, удалённые на другом устройстве, не
+    // должны пережить merge — иначе они «воскресали» при первом же pullState/409
+    const dels = new Set(Array.isArray(st.deleted_chats) ? st.deleted_chats : []);
     const byId = new Map();
-    for (const s of st.sessions || []) byId.set(s.id, s);
-    for (const s of sessions) if (!byId.has(s.id)) byId.set(s.id, s);
+    for (const s of st.sessions || []) if (!dels.has(s.id)) byId.set(s.id, s);
+    for (const s of sessions) if (!byId.has(s.id) && !dels.has(s.id)) byId.set(s.id, s);
     sessions = [...byId.values()];
+    for (const id of dels) {
+      delete cache[id]; delete lastSeen[id];
+      // удаление чата, удалённого на другом устройстве: tombstone НЕ пишется
+      // (иначе этот id удалил бы чат при возврате к прежнему аккаунту —
+      // scope-реестр глобален в рамках одной вкладки хранилища)
+      try { await store().deleteChatSilent(id); } catch { /* ignore */ }
+    }
     // Единый механизм слияния на всех устройствах: серверная история не
     // затирает локальную молча, а мержится по устойчивым ключам сообщений.
     // Если оба устройства успели записать одно и то же сообщение (или чат
@@ -1816,9 +1826,16 @@
         body.sessions = sessions;
         body.messages = {};
         for (const s of sessions) body.messages[s.id] = loadMsgs(s.id).slice(-MAX_STORED);
+        // tombstone-реестр и здесь: удалённый чат не должен вернуться из
+        // серверного снапшота при merge полного снимка
+        body.delta = { deleted_chats: [], _allDeleted: await store().deletedRegistry() };
       } else {
         const d = await store().since(SYNC.base);
-        body.delta = { messages: d.messages, deleted_chats: d.deletedChats };
+        // tombstone-реестр (все удаления за 7 дней): сервер обязан вырезать
+        // удалённый чат из СЛИТОГО списка сессий — иначе устаревший снимок
+        // другого устройства вернул бы его обратно при merge. Реестр маленький
+        // (<200 id), слать его каждый раз дешевле, чем гадать по дельте.
+        body.delta = { messages: d.messages, deleted_chats: d.deletedChats, _allDeleted: await store().deletedRegistry() };
         if (d.sessionsChanged) body.delta.sessions = sessions;
         if (Object.keys(d.messages).length === 0 && d.deletedChats.length === 0 && !d.sessionsChanged) {
           SYNC.base = d.rev;               // расходимостей нет — просто поднимаем версию
