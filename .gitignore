@@ -1,2 +1,11 @@
 __pycache__/
 *.pyc
+.env
+*.xml
+/ai_memory_v3
+/.idea
+*.pid
+*.log
+*.db
+*.zip
+/ui_state

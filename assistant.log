@@ -1278,3 +1278,30 @@ CancelTaskRequest.params.taskId
 2026-10-15 20:33:20 INFO [routes.ai_assistant:2546] [research] из ответа сохранено 2 фактов (scopes: ['private'])
 2026-10-15 20:35:51 INFO [routes.ai_assistant:880] Idle consolidation triggered
 2026-10-15 20:55:15 WARNING [routes.ai_assistant:1300] Reflection: bad JSON from LLM, skipping this cycle: ''
+2026-10-15 21:36:55 WARNING [setup:43] === AI assistant started, log: C:\Users\PC\Documents\GitHub\MCPIISys\assistant.log ===
+2026-10-15 21:36:55 INFO [routes.ai_assistant:3527] Global merge task started
+2026-10-15 21:36:56 WARNING [huggingface_hub.utils._http:993] Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-10-15 21:37:08 INFO [routes.ai_assistant:122] Global MCP config path: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-15 21:37:08 INFO [GCN.mcp_client_manager:151] Загрузка MCP конфига из: C:\Users\PC\Documents\GitHub\MCPIISys\mcp_servers.json
+2026-10-15 21:37:08 INFO [routes.ai_assistant:126] ✅ Global MCP manager initialized successfully
+2026-10-15 21:38:48 INFO [routes.ai_assistant:441] [CognitiveController] SelfModel инициализирован для u2
+2026-10-15 21:38:48 INFO [routes.ai_assistant:491] CognitiveController (GCN) initialized for u2
+2026-10-15 21:38:48 INFO [routes.ai_assistant:3228] Создан когнитивный ассистент для u2
+2026-10-15 21:42:55 INFO [routes.ai_assistant:3262] Запрос от u2, web=False, reasoning=True
+2026-10-15 21:43:24 INFO [routes.ai_assistant:2812] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-15 21:43:24 INFO [routes.ai_assistant:2838] ToolRouter decisions for 'напиши пару предложений цель увидеть как ты расужд': used_native=False, trace_len=0
+2026-10-15 21:43:24 INFO [routes.ai_assistant:2840] Tool trace: []
+2026-10-15 21:45:00 WARNING [GCN.llm_client:291] Рассуждения превысили 4000 символов без ответа — повтор без рассуждений
+2026-10-15 21:46:49 INFO [routes.ai_assistant:3088] [timing] gen=u2:17920 prepare=5.03s route+tools=24.39s ttft=199.27s stream=5.63s finalize=0.01s total=234.33s
+2026-10-15 21:48:00 INFO [routes.ai_assistant:3262] Запрос от u2, web=True, reasoning=True
+2026-10-15 21:48:40 INFO [routes.ai_assistant:542] [ForcedSearch] поиск выполнен с 1-й попытки: 'напиши пару предложений цель увидеть как ты расуждаешь'
+2026-10-15 21:49:05 INFO [routes.ai_assistant:2812] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-15 21:49:05 INFO [routes.ai_assistant:2838] ToolRouter decisions for 'напиши пару предложений цель увидеть как ты расужд': used_native=False, trace_len=0
+2026-10-15 21:49:05 INFO [routes.ai_assistant:2840] Tool trace: []
+2026-10-15 21:51:51 WARNING [GCN.llm_client:291] Рассуждения превысили 4000 символов без ответа — повтор без рассуждений
+2026-10-15 21:53:59 INFO [routes.ai_assistant:3088] [timing] gen=u2:17920 prepare=40.29s route+tools=24.75s ttft=271.28s stream=22.76s finalize=0.01s total=359.09s
+2026-10-15 21:54:19 INFO [routes.ai_assistant:3262] Запрос от u2, web=False, reasoning=True
+2026-10-15 21:54:50 INFO [routes.ai_assistant:2812] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-15 21:54:50 INFO [routes.ai_assistant:2838] ToolRouter decisions for 'напиши пару предложений на свободную темуу': used_native=False, trace_len=0
+2026-10-15 21:54:50 INFO [routes.ai_assistant:2840] Tool trace: []
+2026-10-15 21:56:48 INFO [routes.ai_assistant:3088] [timing] gen=u2:17920 prepare=6.22s route+tools=24.03s ttft=94.73s stream=23.31s finalize=0.01s total=148.29s
