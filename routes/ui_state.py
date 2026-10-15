@@ -432,13 +432,19 @@ def _snapshot_is_noop(current: dict, payload: dict) -> bool:
     после 409), тоже не должен двигать updated — иначе клиент видит «изменение»,
     перерисовывает интерфейс и дергает другие устройства через SSE."""
     def sig(st: dict) -> str:
-        # ВАЖНО: tombstone-реестр исключён из сигнатуры. Сервер при каждом
-        # полном PUT дописывает в deleted_chatsKnown-реестр все _allDeleted
-        # клиента (за 7 дней). Если учитывать реестр здесь, повторный снимок
-        # с уже зарегистрированными удалениями считался бы «изменением» —
-        # updated двигался без реальных данных, соседи получали ложный
-        # state-changed и гоняли полные pullState («дёрганье», каскад PUT).
-        return json.dumps([st.get('sessions') or [], st.get('messages') or {}],
+        # Сравниваем deleted_chats по sid, БЕЗ timestamp. Ранее реестр был
+        # полностью исключён из сигнатуры — и новый tombstone, пришедший без
+        # других изменений (sessions/messages те же), не двигал updated,
+        # запись на диск не выполнялась, и удалённый чат «воскресал» при
+        # следующем полном снимке с другого устройства.
+        # Timestamp намеренно не учитывается: повторная доставка того же
+        # _allDeleted не должна считаться изменением (at не переписывается
+        # для уже известных sid, но лучше не завязываться на это).
+        dels = sorted(
+            d['sid'] for d in (st.get('deleted_chats') or [])
+            if isinstance(d, dict) and isinstance(d.get('sid'), str)
+        )
+        return json.dumps([st.get('sessions') or [], st.get('messages') or {}, dels],
                           ensure_ascii=False, sort_keys=True)
     try:
         return sig(current) == sig(payload)
