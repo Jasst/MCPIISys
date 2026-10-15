@@ -390,6 +390,57 @@ def _merge_sessions(base: list, incoming: list, partial: bool = False) -> list:
     return out + legacy
 
 
+def _delta_is_noop(delta: dict) -> bool:
+    """Дельта без реальных изменений: пустые messages/deleted_chats/sessions.
+
+    Такое приходит на каждом фоновом тике синхронизации клиента, когда локально
+    ничего не менялось (pushState обычно отсекает это сам, но гонка между
+    устройствами и старые клиенты присылают пустую дельту на сервер). Если на
+    такую дельту поднимать updated, каждое устройство при опросе получало
+    «новую версию», тянула полный снимок и перерисовывало весь чат («дёрганье»),
+    а параллельные записи запускали каскад конфликтов 409: PUT соседа считался
+    устаревшим без всякой причины. Пустую дельту сервер принимает как успех,
+    НО состояние не трогает и не будит SSE-подписчиков."""
+    if not isinstance(delta, dict):
+        return True
+    msgs = delta.get('messages')
+    if isinstance(msgs, dict):
+        for items in msgs.values():
+            if isinstance(items, list) and len(items) > 0:
+                return False
+    elif msgs:
+        return False
+    for key in ('deleted_chats', '_allDeleted'):
+        v = delta.get(key)
+        if isinstance(v, list) and len(v) > 0:
+            return False
+        elif v and not isinstance(v, list):
+            return False
+    sess = delta.get('sessions')
+    if isinstance(sess, list) and len(sess) > 0:
+        return False
+    elif sess and not isinstance(sess, list):
+        return False
+    return True
+
+
+def _snapshot_is_noop(current: dict, payload: dict) -> bool:
+    """Сравнивает значимую часть смерженного снимка с текущей версией.
+
+    Полный PUT (первый sync / legacy-клиент), который принёс ровно то же
+    содержимое, что уже лежит на сервере (открыл и закрыл чат, повторный sync
+    после 409), тоже не должен двигать updated — иначе клиент видит «изменение»,
+    перерисовывает интерфейс и дергает другие устройства через SSE."""
+    def sig(st: dict) -> str:
+        return json.dumps([st.get('sessions') or [], st.get('messages') or {},
+                           st.get('deleted_chats') or []],
+                          ensure_ascii=False, sort_keys=True)
+    try:
+        return sig(current) == sig(payload)
+    except (TypeError, ValueError):
+        return False
+
+
 def _apply_delta(current: dict, delta: dict) -> tuple[dict, list]:
     """Точечно применяет изменения поверх снапшота: только присланные сообщения.
 
@@ -674,10 +725,70 @@ async def put_state(body: StateBody, request: Request, user_id: str = Depends(re
             raise HTTPException(429, detail='На другом устройстве идёт генерация — синхронизация приостановлена')
 
     current = _cached_read(user_id)
+    rebased = False
     if body.base != current.get('updated', 0):
-        raise HTTPException(409, detail='Состояние изменено на другом устройстве')
+        # legacy-клиент: delta содержит только реестр удалений, данные — в снимке.
+        # Определяем ДО проверки базы, чтобы настоящий дельта-PUT с устаревшей
+        # базой мог перебазироваться, а полный снимок — нет (он перезаписал бы
+        # чужие изменения).
+        if isinstance(body.delta, dict) and body.delta.get('messages') is None \
+                and (body.sessions or body.messages):
+            body.delta = None
+
+        # Авто-перебазирование для точечных дельт: база клиента устарела, но
+        # присланные изменения сопоставимы по устойчивым id сообщений, поэтому
+        # их можно безопасно применить поверх СВЕЖЕЙ серверной версии. Раньше
+        # любой stale-base давал 409: клиент тянул полный снимок, ставил свою
+        # базу и повторял PUT — а за эти секунды другое устройство снова успевало
+        # что-то сохранить, и цикл 409 повторялся бесконечно («сообщение не
+        # отправляется», «устройства не видят чаты друг друга»).
+        # Теперь конфликт разрешается на месте одним запросом; полные снимки
+        # по-прежнему получают честный 409 — они не должны затирать соседей.
+        if isinstance(body.delta, dict) and not _delta_is_noop(body.delta):
+            fresh = _read(user_id)
+            try:
+                fresh_stamp = os.stat(_path(user_id)).st_mtime_ns
+            except OSError:
+                fresh_stamp = 0
+            if body.base == fresh.get('updated', 0):
+                # кэш прочтений устарел (запись мимо кэша) — берём свежий снимок
+                current = fresh
+                rebased = True
+            else:
+                payload_try, _ = _apply_delta(fresh, body.delta)
+                payload_try['updated'] = fresh.get('updated', 0)
+                if _snapshot_is_noop(fresh, payload_try):
+                    # Дельта уже полностью отражена в свежей версии (повторная
+                    # доставка после оборванного ответа): это успех, а не
+                    # конфликт — отвечаем текущей версией, состояние не трогаем.
+                    return {'updated': fresh.get('updated', 0)}
+                current = fresh
+                rebased = True
+        else:
+            raise HTTPException(409, detail='Состояние изменено на другом устройстве')
 
     conflicts: list = []
+    # Ранний отказ по размеру ВХОДЯЩИХ данных: раньше 413 бросался ПОСЛЕ merge
+    # и вычисления версии. Для «оглушительного» запроса (несколько мегабайт в
+    # одном сообщении) это означало секунды на слияние/сериализацию ради
+    # гарантированного отказа; при повторных попытках клиента сервер тратил
+    # время ответа, а интерфейс выглядел «подвешенным».
+    incoming_bytes = len(json.dumps(
+        {'sessions': body.sessions, 'messages': body.messages, 'delta': body.delta},
+        ensure_ascii=False).encode('utf-8'))
+    if incoming_bytes > MAX_BYTES:
+        raise HTTPException(413, detail='Слишком много данных. Удалите старые чаты.')
+
+    if body.delta is not None and _delta_is_noop(body.delta):
+        # No-op дельта (пустые messages/deleted_chats/sessions): состояние НЕ
+        # трогаем, версию НЕ двигаем, SSE не будим. Это главный источник
+        # «каскада 409»: каждое фоновое сохранение каждого устройства поднимало
+        # updated без реальных изменений, соседи получали «новую версию», их
+        # собственные PUT-основания устаревали, и синхронизация превращалась в
+        # бесконечное перетягивание версий вместо доставки реальных сообщений.
+        # Ответ отдаём БЕЗ conflicts: пустая дельта ничего не могла сконфликтовать.
+        return {'updated': current.get('updated', 0)}
+
     if body.delta is not None:
         payload, conflicts = _apply_delta(current, body.delta)
     else:
@@ -724,23 +835,37 @@ async def put_state(body: StateBody, request: Request, user_id: str = Depends(re
             'messages': merged_msgs,
             'deleted_chats': reg,
         }
+    # No-op полный снимок: если после merge побайтово ничего не изменилось
+    # (повторный sync того же состояния, «открыл и закрыл чат»), версию НЕ
+    # двигаем и запись на диск не делаем — иначе каждое такое сохранение
+    # выглядело для других устройств как новое событие и гнало их за полным
+    # снимком («каскад 409» и лишняя перерисовка интерфейса).
+    if _snapshot_is_noop(current, payload):
+        out = {'updated': current.get('updated', 0)}
+        if conflicts:
+            out['conflicts'] = conflicts
+        return out
+
     payload['updated'] = max(int(time.time() * 1000), current.get('updated', 0) + 1)
 
-    # Проверка размера ДО merge и записи: раньше 413 бросался уже после слияния,
-    # когда payload мог разрастись за счёт серверной истории (или урезаться
-    # лимитом сообщений) — валидный снимок клиента ошибочно отклонялся, а
-    # пересланный повторно удваивал историю. Теперь сравниваем ровно то, что
-    # будет записано на диск; если отказ случился из-за чужих данных на сервере,
-    # клиент при следующем pull получит свежий снапшот и почистит локальный архив.
-    incoming_bytes = len(json.dumps(
-        {'sessions': body.sessions, 'messages': body.messages, 'delta': body.delta},
-        ensure_ascii=False).encode('utf-8'))
-    if incoming_bytes > MAX_BYTES:
-        raise HTTPException(413, detail='Слишком много данных. Удалите старые чаты.')
+    # Проверка размера ДО записи: сравниваем ровно то, что будет сохранено на
+    # диск; если отказ случился из-за чужих данных на сервере, клиент при
+    # следующем pull получит свежий снапшот и почистит локальный архив.
     data = json.dumps(payload, ensure_ascii=False)
     if len(data.encode('utf-8')) > MAX_BYTES:
         raise HTTPException(413, detail='Слишком много данных. Удалите старые чаты.')
 
+    if rebased:
+        # Перебазированная запись идёт через compare-and-swap по mtime файла:
+        # если между чтением свежей версии и записью успел вклиниться другой
+        # PUT, условие не выполнен — честный 409 вместо тихой перезатирки чужих данных.
+        path = _path(user_id)
+        try:
+            stamp_now = os.stat(path).st_mtime_ns
+        except OSError:
+            stamp_now = 0
+        if stamp_now != fresh_stamp:
+            raise HTTPException(409, detail='Состояние изменено на другом устройстве')
     _write_state(user_id, payload)                   # атомарная замена + сброс кэша
     _notify_state(user_id)                           # мгновенно будим SSE-подписчиков других устройств
     out = {'updated': payload['updated']}
