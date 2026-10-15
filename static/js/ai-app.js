@@ -1197,16 +1197,32 @@
         }
       } catch { /* сеть — перегенерируем без фото */ }
     }
-    msgs.splice(u + 1);
-    msgs.push(newBotMessage());
-    const nidx = msgs.length - 1;
-    commit(id);
-    scheduleSync(true);   // форс-пул начального состояния ДО genFlag в startGeneration
-    renderMessages({ scroll: false });
-    refreshUI();
-    const body = { message: prompt, stream: true, web_search: chips.web, reasoning: chips.reason };
-    if (regenImg && regenImg.base64) { body.image_base64 = regenImg.base64; body.image_mime = regenImg.mime; }
-    startGeneration(id, nidx, 'send', body);
+    const goRegen = () => {
+      msgs.splice(u + 1);
+      msgs.push(newBotMessage());
+      const nidx = msgs.length - 1;
+      commit(id);
+      scheduleSync(true);   // форс-пул начального состояния ДО genFlag в startGeneration
+      renderMessages({ scroll: false });
+      refreshUI();
+      const body = { message: prompt, stream: true, web_search: chips.web, reasoning: chips.reason };
+      if (regenImg && regenImg.base64) { body.image_base64 = regenImg.base64; body.image_mime = regenImg.mime; }
+      startGeneration(id, nidx, 'send', body);
+    };
+    // Как и send(), regenerate обязан занять серверный генерационный лок:
+    // /gen-status читает _active_generations (ui_state.py), а не _active_stream
+    // (ai_assistant.py). Без POST /gen-lock устройство B, увидев pending через
+    // дельту, получит active:false / may_watch:false и не сможет подключиться
+    // к живому стриму — печатать ответ оно не будет, дождётся лишь финального
+    // коммита. Страховка по таймауту — как в send(): проверка лока не должна
+    // задерживать старт дольше 1.2 с (настоящий конфликт остановит server-side
+    // лок на POST /ai/chat кодом 409/429).
+    if (!currentScopeUid) { goRegen(); return; }
+    acquireGenLock().then((ok) => {
+      if (!ok) { toast('Дождитесь окончания ответа на другом устройстве'); updateHint(); return; }
+      goRegen();
+    });
+    setTimeout(goRegen, 1200);
   }
 
   function onSendButton() {
@@ -2078,6 +2094,15 @@
         for (const s of sessions) body.messages[s.id] = loadMsgs(s.id).slice(-MAX_STORED);
       } else {
         const d = await store().since(SYNC.base);
+        // Явная защита от «чужого pending»: наблюдатель (у него нет genFlag)
+        // не должен отправлять на сервер черновик pending-сообщения, которое
+        // пишет другое устройство, — серверный merge по id схлопнул бы его с
+        // эталонной записью владельца, и незавершённый фрагмент перезатёр бы
+        // финальный ответ. Раньше stripForeignPending была объявлена, но не
+        // вызывалась; теперь она подключена здесь. ВАЖНО: очистка выполняется
+        // ПОСЛЕ проверки «пустая дельта» ниже — иначе удалённые записи сделали
+        // бы messages пустым, PUT молча пропустился бы как no-op, а реальные
+        // удаления никогда бы не ушли на сервер («чат удалился только тут»).
         // tombstone-реестр (все удаления за 7 дней): сервер обязан вырезать
         // удалённый чат из СЛИТОГО списка сессий — иначе устаревший снимок
         // другого устройства вернул бы его обратно при merge. Реестр маленький
@@ -2095,6 +2120,17 @@
           // ниже не дойдёт — выходим раньше, делаем это сами).
           try { await store().markSessionsSaved(SYNC.base); } catch { /* ignore */ }
           return;
+        }
+        // Чужие pending-черновики на сервер не отправляем (см. комментарий
+        // выше); очистка — после проверки no-op, чтобы tombstone-удаления
+        // не потерялись. Если после очистки дельта стала пустой, PUT всё
+        // равно уходит: он фиксирует server-side применения предыдущих версий
+        // и содержит полный tombstone-реестр (_allDeleted) — сервер отвечает
+        // своей текущей версией, и SYNC.base синхронизируется корректно.
+        for (const sid of Object.keys(d.messages)) {
+          const cleaned = await stripForeignPending(sid, d.messages[sid]);
+          if (cleaned === null) delete d.messages[sid];
+          else d.messages[sid] = cleaned;
         }
       }
       const headers = { 'Content-Type': 'application/json' };
