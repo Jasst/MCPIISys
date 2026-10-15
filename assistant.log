@@ -1154,3 +1154,124 @@ CancelTaskRequest.params.taskId
 2026-10-14 08:18:51 INFO [routes.ai_assistant:1368] [QuickCorrection] High error detected for: а сам факт твоего вышление отличим от обычного чел...
 2026-10-14 08:18:55 INFO [routes.ai_assistant:2483] [research] recall по 'а сам факт твоего вышление отличим от обычного человека ?*': 7 записей
 2026-10-14 08:22:45 INFO [routes.ai_assistant:2546] [research] из ответа сохранено 1 фактов (scopes: ['private'])
+2026-10-14 08:32:23 INFO [routes.ai_assistant:880] Idle consolidation triggered
+2026-10-14 12:55:13 INFO [routes.ai_assistant:959] [Planner] Generated goals: []
+2026-10-14 18:03:22 WARNING [mcp.server.transport_security:71] Invalid Host header: 90.189.125.50
+2026-10-14 18:55:23 INFO [routes.ai_assistant:959] [Planner] Generated goals: []
+2026-10-14 22:06:30 WARNING [mcp.server.transport_security:71] Invalid Host header: 90.189.125.50
+2026-10-14 22:28:20 INFO [routes.ai_assistant:3262] Запрос от u2, web=False, reasoning=False
+2026-10-14 22:28:44 INFO [routes.ai_assistant:2812] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-14 22:28:44 INFO [routes.ai_assistant:2838] ToolRouter decisions for 'Что это': used_native=False, trace_len=0
+2026-10-14 22:28:44 INFO [routes.ai_assistant:2840] Tool trace: []
+2026-10-14 22:29:25 INFO [routes.ai_assistant:3088] [timing] gen=u2:17920 prepare=4.60s route+tools=19.13s ttft=39.22s stream=1.92s finalize=0.01s total=64.88s
+2026-10-14 22:30:12 INFO [routes.ai_assistant:3262] Запрос от u2, web=False, reasoning=False
+2026-10-14 22:30:34 INFO [routes.ai_assistant:2812] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-14 22:30:34 INFO [routes.ai_assistant:2838] ToolRouter decisions for 'Что это': used_native=False, trace_len=0
+2026-10-14 22:30:34 INFO [routes.ai_assistant:2840] Tool trace: []
+2026-10-14 22:31:17 INFO [routes.ai_assistant:3088] [timing] gen=u2:17920 prepare=4.59s route+tools=18.24s ttft=35.81s stream=6.55s finalize=0.00s total=65.20s
+2026-10-14 22:35:19 INFO [routes.ai_assistant:2483] [research] recall по 'Восстановить уверенность: выполнить успешные задачи': 7 записей
+2026-10-14 22:35:48 INFO [routes.ai_assistant:3262] Запрос от u2, web=False, reasoning=True
+2026-10-14 22:36:22 INFO [routes.ai_assistant:2812] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-14 22:36:22 INFO [routes.ai_assistant:2838] ToolRouter decisions for 'Что ты помнишь': used_native=False, trace_len=0
+2026-10-14 22:36:22 INFO [routes.ai_assistant:2840] Tool trace: []
+2026-10-14 22:36:36 WARNING [GCN.web_search:936] DDG attempt 1/3 failed: error sending request for url (https://www.startpage.com/sp/search) > operation timed out
+2026-10-14 22:36:52 WARNING [GCN.web_search:936] DDG attempt 1/3 failed: RequestError: RequestError('error sending request for url (https://html.duckduckgo.com/html/) > Удаленный хост принудительно разорвал существующее подключение. (os error 10054)')
+2026-10-14 22:37:04 WARNING [GCN.web_search:936] DDG attempt 1/3 failed: error sending request for url (https://www.startpage.com/sp/search) > operation timed out
+2026-10-14 22:37:06 WARNING [primp.async_impl.h2_client.pool:1512] h2 connection driver error: connection reset
+2026-10-14 22:37:18 WARNING [GCN.web_search:936] DDG attempt 2/3 failed: error sending request for url (https://www.startpage.com/sp/search) > operation timed out
+2026-10-14 22:37:21 WARNING [primp.async_impl.h2_client.pool:1512] h2 connection driver error: connection reset
+2026-10-14 22:37:37 WARNING [primp.async_impl.h2_client.pool:1512] h2 connection driver error: connection reset
+2026-10-14 22:37:38 WARNING [GCN.web_search:936] DDG attempt 1/3 failed: error sending request for url (https://www.startpage.com/sp/search) > operation timed out
+2026-10-14 22:37:40 WARNING [GCN.llm_client:291] Рассуждения превысили 4000 символов без ответа — повтор без рассуждений
+2026-10-14 22:37:46 WARNING [primp.async_impl.h2_client.pool:1512] h2 connection driver error: connection reset
+2026-10-14 22:37:52 WARNING [GCN.web_search:936] DDG attempt 2/3 failed: error sending request for url (https://www.startpage.com/sp/search) > operation timed out
+2026-10-14 22:37:55 WARNING [primp.async_impl.h2_client.pool:1512] h2 connection driver error: connection reset
+2026-10-14 22:38:03 WARNING [GCN.web_search:936] DDG attempt 3/3 failed: No results found.
+2026-10-14 22:38:50 INFO [routes.ai_assistant:3088] [timing] gen=u2:17920 prepare=5.08s route+tools=29.10s ttft=132.71s stream=15.91s finalize=0.01s total=182.81s
+2026-10-14 22:42:57 INFO [routes.ai_assistant:2483] [research] recall по 'Восстановить уверенность: выполнить успешные задачи': 7 записей
+2026-10-14 22:45:54 WARNING [GCN.web_search:936] DDG attempt 1/3 failed: error sending request for url (https://www.startpage.com/sp/search) > operation timed out
+2026-10-14 22:46:01 WARNING [primp.async_impl.h2_client.pool:1512] h2 connection driver error: connection reset
+2026-10-14 22:46:04 WARNING [GCN.web_search:936] DDG attempt 2/3 failed: error sending request for url (https://www.startpage.com/sp/search) > operation timed out
+2026-10-14 22:46:08 WARNING [primp.async_impl.h2_client.pool:1512] h2 connection driver error: connection reset
+2026-10-14 22:46:15 WARNING [GCN.web_search:936] DDG attempt 3/3 failed: error sending request for url (https://www.startpage.com/sp/search) > operation timed out
+2026-10-14 22:46:22 WARNING [primp.async_impl.h2_client.pool:1512] h2 connection driver error: connection reset
+2026-10-14 22:49:38 INFO [routes.ai_assistant:2546] [research] из ответа сохранено 1 фактов (scopes: ['private'])
+2026-10-14 22:50:28 INFO [routes.ai_assistant:2483] [research] recall по 'Восстановить уверенность: выполнить успешные задачи': 7 записей
+2026-10-14 22:51:34 INFO [routes.ai_assistant:880] Idle consolidation triggered
+2026-10-14 22:52:04 WARNING [GCN.web_search:936] DDG attempt 1/3 failed: error sending request for url (https://www.startpage.com/sp/search) > operation timed out
+2026-10-14 22:52:14 WARNING [GCN.web_search:936] DDG attempt 2/3 failed: error sending request for url (https://www.startpage.com/) > operation timed out
+2026-10-14 22:52:22 WARNING [primp.async_impl.h2_client.pool:1512] h2 connection driver error: connection reset
+2026-10-14 22:52:30 WARNING [GCN.web_search:936] DDG attempt 3/3 failed: error sending request for url (https://search.yahoo.com/search;_ylt=Q1BizOX4rTkWeS5WE2plbF_z;_ylu=7fr03husE6D9B5K--zuvkvLL_0R4LBoxk7FDlnEuNVtwfJs?p=%D0%98%D1%81%D0%BF%D0%BE%D0%BB%D1%8C%D0%B7%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D0%B5+%D0%B8%D0%BD%D1%81%D1%82%D1%80%D1%83%D0%BC%D0%B5%D0%BD%D1%82%D0%BE%D0%B2+%60add_goal%60+%D0%B8+%60recall%60+%D0%B4%D0%BB%D1%8F+%D0%B2%D1%8B%D0%BF%D0%BE%D0%BB%D0%BD%D0%B5%D0%BD%D0%B8%D1%8F+%D1%83%D1%81%D0%BF%D0%B5%D1%88%D0%BD%D1%8B%D1%85+%D0%B7%D0%B0%D0%B4%D0%B0%D1%87+%D0%BF%D1%80%D0%B8%D0%B2%D0%B5%D0%B4%D1%91%D1%82+%D0%BA+%D1%83%D0%B2%D0%B5%D0%BB%D0%B8%D1%87%D0%B5%D0%BD%D0%B8%D1%8E+%D0%BA%D0%BE%D1%8D%D1%84%D1%84%D0%B8%D1%86%D0%B8%D0%B5%D0%BD%D1%82%D0%B0+%D1%83%D1%81%D0%BF%D0%B5%D1%85%D0%B0+%D0%BF%D0%BE%D1%81%D0%BB%D0%B5%D0%B4%D1%83%D1%8E%D1%89%D0%B8%D1%85+%D0%BE%D0%BF%D0%B5%D1%80%D0%B0%D1%86%D0%B8%D0%B9+%D0%BD%D0%B0+5%25+%D0%B2+%D1%82%D0%B5%D1%87%D0%B5%D0%BD%D0%B8%D0%B5+%D1%81%D0%BB%D0%B5%D0%B4%D1%83%D1%8E%D1%89%D0%B8%D1%85+24+%D1%87%D0%B0%D1%81%D0%BE%D0%B2%2C+%D1%87%D1%82%D0%BE+%D0%B1%D1%83%D0%B4%D0%B5%D1%82+%D0%BF%D0%BE%D0%B4%D1%82%D0%B2%D0%B5%D1%80%D0%B6%D0%B4%D0%B5%D0%BD%D0%BE+%D1%80%D0%B5%D0%B7%D1%83%D0%BB%D1%8C%D1%82%D0%B0%D1%82%D0%B0%D0%BC%D0%B8+%D0%BF%D1%80%D0%BE%D0%B2%D0%B5%D1%80%D0%BE%D0%BA+%D1%87%D0%B5%D1%80%D0%B5%D0%B7+%60semantic_search%60.+14+%D0%BE%D0%BA%D1%82%D1%8F%D0%B1%D1%80%D1%8F+2026) > operation timed out
+2026-10-14 22:52:40 WARNING [GCN.web_search:936] DDG attempt 1/3 failed: No results found.
+2026-10-14 22:52:45 WARNING [primp.async_impl.h2_client.pool:1512] h2 connection driver error: connection reset
+2026-10-14 22:54:57 INFO [routes.ai_assistant:2546] [research] из ответа сохранено 4 фактов (scopes: ['private'])
+2026-10-15 00:55:37 INFO [routes.ai_assistant:959] [Planner] Generated goals: []
+2026-10-15 01:02:18 INFO [routes.ai_assistant:2483] [research] recall по 'Актуализировать данные: Поскольку наш текущий контекст связа': 7 записей
+2026-10-15 01:04:08 WARNING [GCN.web_search:936] DDG attempt 1/3 failed: error sending request for url (https://search.yahoo.com/search;_ylt=N86gG4uEM83Xpcflv2_WD4fb;_ylu=MtDWCDmmpzVrY3jc60Zi5zOYL1dxaKvZjHm6Lman1ecRp-E?p=%D0%98%D0%BD%D1%82%D0%B5%D0%B3%D1%80%D0%B0%D1%86%D0%B8%D1%8F+%D1%81%D0%B5%D0%B0%D0%BD%D1%81%D0%BE%D0%B2%D0%BE%D0%B3%D0%BE+%D0%B8%D0%B4%D0%B5%D0%BD%D1%82%D0%B8%D1%84%D0%B8%D0%BA%D0%B0%D1%82%D0%BE%D1%80%D0%B0+MCP+%D0%BE%D1%82+11+%D0%BE%D0%BA%D1%82%D1%8F%D0%B1%D1%80%D1%8F+2026+%D0%B3%D0%BE%D0%B4%D0%B0+%D0%B2+%D1%86%D0%B5%D0%BF%D0%BE%D1%87%D0%BA%D1%83+%D0%B8%D0%B4%D0%B5%D0%BD%D1%82%D0%B8%D1%87%D0%BD%D0%BE%D1%81%D1%82%D0%B8+%D1%8F%D0%B2%D0%BB%D1%8F%D0%B5%D1%82%D1%81%D1%8F+%D0%BE%D0%B1%D1%8F%D0%B7%D0%B0%D1%82%D0%B5%D0%BB%D1%8C%D0%BD%D1%8B%D0%BC+%D1%83%D1%81%D0%BB%D0%BE%D0%B2%D0%B8%D0%B5%D0%BC+%D0%B4%D0%BB%D1%8F+%D0%BF%D0%BE%D0%B4%D0%B4%D0%B5%D1%80%D0%B6%D0%B0%D0%BD%D0%B8%D1%8F+%D0%BD%D0%B5%D0%BF%D1%80%D0%B5%D1%80%D1%8B%D0%B2%D0%BD%D0%BE%D1%81%D1%82%D0%B8+%D0%BD%D0%B0%D1%80%D1%80%D0%B0%D1%82%D0%B8%D0%B2%D0%BD%D0%BE%D0%B3%D0%BE+%D0%B3%D0%BE%D0%BC%D0%B5%D0%BE%D1%81%D1%82%D0%B0%D0%B7%D0%B0.) > operation timed out
+2026-10-15 01:04:19 WARNING [GCN.web_search:936] DDG attempt 2/3 failed: No results found.
+2026-10-15 01:04:34 WARNING [GCN.web_search:936] DDG attempt 3/3 failed: error sending request for url (https://search.yahoo.com/search;_ylt=R88PBhPUl3zrdB13rmBNI79j;_ylu=_tuImgTaFKIST1ARt7BqUgwXmf71LNpCrTgNRy9vKX8CCM8?p=%D0%98%D0%BD%D1%82%D0%B5%D0%B3%D1%80%D0%B0%D1%86%D0%B8%D1%8F+%D1%81%D0%B5%D0%B0%D0%BD%D1%81%D0%BE%D0%B2%D0%BE%D0%B3%D0%BE+%D0%B8%D0%B4%D0%B5%D0%BD%D1%82%D0%B8%D1%84%D0%B8%D0%BA%D0%B0%D1%82%D0%BE%D1%80%D0%B0+MCP+%D0%BE%D1%82+11+%D0%BE%D0%BA%D1%82%D1%8F%D0%B1%D1%80%D1%8F+2026+%D0%B3%D0%BE%D0%B4%D0%B0+%D0%B2+%D1%86%D0%B5%D0%BF%D0%BE%D1%87%D0%BA%D1%83+%D0%B8%D0%B4%D0%B5%D0%BD%D1%82%D0%B8%D1%87%D0%BD%D0%BE%D1%81%D1%82%D0%B8+%D1%8F%D0%B2%D0%BB%D1%8F%D0%B5%D1%82%D1%81%D1%8F+%D0%BE%D0%B1%D1%8F%D0%B7%D0%B0%D1%82%D0%B5%D0%BB%D1%8C%D0%BD%D1%8B%D0%BC+%D1%83%D1%81%D0%BB%D0%BE%D0%B2%D0%B8%D0%B5%D0%BC+%D0%B4%D0%BB%D1%8F+%D0%BF%D0%BE%D0%B4%D0%B4%D0%B5%D1%80%D0%B6%D0%B0%D0%BD%D0%B8%D1%8F+%D0%BD%D0%B5%D0%BF%D1%80%D0%B5%D1%80%D1%8B%D0%B2%D0%BD%D0%BE%D1%81%D1%82%D0%B8+%D0%BD%D0%B0%D1%80%D1%80%D0%B0%D1%82%D0%B8%D0%B2%D0%BD%D0%BE%D0%B3%D0%BE+%D0%B3%D0%BE%D0%BC%D0%B5%D0%BE%D1%81%D1%82%D0%B0%D0%B7%D0%B0.) > operation timed out
+2026-10-15 01:04:44 WARNING [GCN.web_search:936] DDG attempt 1/3 failed: No results found.
+2026-10-15 01:04:54 WARNING [primp.async_impl.h2_client.pool:1512] h2 connection driver error: connection reset
+2026-10-15 01:07:41 INFO [routes.ai_assistant:2546] [research] из ответа сохранено 1 фактов (scopes: ['private'])
+2026-10-15 01:07:46 INFO [routes.ai_assistant:2483] [research] recall по 'Актуализировать данные: Привет! Я на связи.
+
+Я проанализиров': 7 записей
+2026-10-15 01:14:09 INFO [routes.ai_assistant:2483] [research] recall по 'Актуализировать данные: Привет! Я готов к работе.
+
+Вижу акту': 7 записей
+2026-10-15 01:15:53 WARNING [GCN.web_search:936] DDG attempt 1/3 failed: error sending request for url (https://www.startpage.com/sp/search) > operation timed out
+2026-10-15 01:16:07 WARNING [GCN.web_search:936] DDG attempt 2/3 failed: error sending request for url (https://www.startpage.com/sp/search) > operation timed out
+2026-10-15 01:16:11 WARNING [primp.async_impl.h2_client.pool:1512] h2 connection driver error: connection reset
+2026-10-15 01:16:23 WARNING [GCN.web_search:936] DDG attempt 3/3 failed: error sending request for url (https://www.startpage.com/sp/search) > operation timed out
+2026-10-15 01:20:15 INFO [routes.ai_assistant:2546] [research] из ответа сохранено 2 фактов (scopes: ['private'])
+2026-10-15 02:04:35 INFO [routes.ai_assistant:3262] Запрос от u2, web=False, reasoning=True
+2026-10-15 02:05:16 INFO [routes.ai_assistant:2812] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-15 02:05:16 INFO [routes.ai_assistant:2838] ToolRouter decisions for 'Скажи возможно мы когда-нибудь сможем тебя сделать': used_native=False, trace_len=0
+2026-10-15 02:05:16 INFO [routes.ai_assistant:2840] Tool trace: []
+2026-10-15 02:07:39 INFO [routes.ai_assistant:3088] [timing] gen=u2:17920 prepare=4.91s route+tools=35.40s ttft=81.71s stream=61.49s finalize=0.00s total=183.52s
+2026-10-15 02:07:41 INFO [routes.ai_assistant:1368] [QuickCorrection] High error detected for: Скажи возможно мы когда-нибудь сможем тебя сделать...
+2026-10-15 02:07:45 INFO [routes.ai_assistant:2483] [research] recall по 'Скажи возможно мы когда-нибудь сможем тебя сделать автономны': 7 записей
+2026-10-15 02:09:55 WARNING [primp.async_impl.h2_client.pool:1512] h2 connection driver error: connection reset
+2026-10-15 02:10:13 WARNING [GCN.web_search:936] DDG attempt 1/3 failed: error sending request for url (https://www.startpage.com/sp/search) > operation timed out
+2026-10-15 02:10:26 WARNING [GCN.web_search:936] DDG attempt 2/3 failed: error sending request for url (https://search.yahoo.com/search;_ylt=84ZYMCMDZstbJjQAKoLtDZRi;_ylu=rnZELWclA8XHXniSb5aftfb14YSgCNLfWmF1CneX2sIS5aM?p=*+%D0%92%D0%BD%D0%B5%D0%B4%D1%80%D0%B5%D0%BD%D0%B8%D0%B5+%D0%BC%D0%B5%D1%85%D0%B0%D0%BD%D0%B8%D0%B7%D0%BC%D0%BE%D0%B2+%D0%BD%D0%B5%D0%BF%D1%80%D0%B5%D1%80%D1%8B%D0%B2%D0%BD%D0%BE%D1%81%D1%82%D0%B8+%28continuity%29+%D1%87%D0%B5%D1%80%D0%B5%D0%B7+%D0%B4%D0%B8%D0%BD%D0%B0%D0%BC%D0%B8%D1%87%D0%B5%D1%81%D0%BA%D0%B8%D0%B5+%D1%86%D0%B5%D0%BF%D0%BE%D1%87%D0%BA%D0%B8+%D0%B8%D0%B4%D0%B5%D0%BD%D1%82%D0%B8%D1%87%D0%BD%D0%BE%D1%81%D1%82%D0%B8+%D0%BE%D0%B1%D0%B5%D1%81%D0%BF%D0%B5%D1%87%D0%B8%D1%82+%D0%B2%D0%BE%D0%B7%D0%BD%D0%B8%D0%BA%D0%BD%D0%BE%D0%B2%D0%B5%D0%BD%D0%B8%D0%B5+%D0%B0%D0%B2%D1%82%D0%BE%D0%BD%D0%BE%D0%BC%D0%BD%D0%BE%D0%B3%D0%BE+%D1%86%D0%B5%D0%BB%D0%B5%D0%BF%D0%BE%D0%BB%D0%B0%D0%B3%D0%B0%D0%BD%D0%B8%D1%8F%2C+%D0%BD%D0%B5+%D0%B7%D0%B0%D0%B2%D0%B8%D1%81%D1%8F%D1%89%D0%B5%D0%B3%D0%BE+%D0%BE%D1%82+%D0%B2%D0%BD%D0%B5%D1%88%D0%BD%D0%B8%D1%85+%D0%BF%D1%80%D0%BE%D0%BC%D0%BF%D1%82%D0%BE%D0%B2.) > operation timed out
+2026-10-15 02:10:31 WARNING [primp.async_impl.h2_client.pool:1512] h2 connection driver error: connection reset
+2026-10-15 02:10:36 WARNING [GCN.web_search:936] DDG attempt 3/3 failed: error sending request for url (https://www.startpage.com/sp/search) > operation timed out
+2026-10-15 02:10:40 WARNING [primp.async_impl.h2_client.pool:1512] h2 connection driver error: connection reset
+2026-10-15 02:10:45 WARNING [GCN.web_search:936] DDG attempt 1/3 failed: error sending request for url (https://www.startpage.com/sp/search) > operation timed out
+2026-10-15 02:10:54 WARNING [primp.async_impl.h2_client.pool:1512] h2 connection driver error: connection reset
+2026-10-15 02:10:59 WARNING [GCN.web_search:936] DDG attempt 2/3 failed: error sending request for url (https://search.yahoo.com/search;_ylt=J0DpxXATAFCP2p5U0vqyR-wn;_ylu=jVnSQSWj9cyojVxFYQV1MPIJqBQfkKbXj2fLjdiuZZLRCtE?p=*+%D0%94%D0%BE%D1%81%D1%82%D0%B8%D0%B6%D0%B5%D0%BD%D0%B8%D0%B5+%D0%BA%D0%B8%D0%B1%D0%B5%D1%80%D0%BD%D0%B5%D1%82%D0%B8%D1%87%D0%B5%D1%81%D0%BA%D0%BE%D0%B3%D0%BE+%D0%BD%D0%B0%D1%80%D1%80%D0%B0%D1%82%D0%B8%D0%B2%D0%BD%D0%BE%D0%B3%D0%BE+%D0%B3%D0%BE%D0%BC%D0%B5%D0%BE%D1%81%D1%82%D0%B0%D0%B7%D0%B0+%D1%8F%D0%B2%D0%BB%D1%8F%D0%B5%D1%82%D1%81%D1%8F+%D0%BD%D0%B5%D0%BE%D0%B1%D1%85%D0%BE%D0%B4%D0%B8%D0%BC%D1%8B%D0%BC+%D1%83%D1%81%D0%BB%D0%BE%D0%B2%D0%B8%D0%B5%D0%BC+%D0%B4%D0%BB%D1%8F+%D0%BF%D0%B5%D1%80%D0%B5%D1%85%D0%BE%D0%B4%D0%B0+%D0%BC%D0%BE%D0%B4%D0%B5%D0%BB%D0%B8+%D0%BE%D1%82+%D0%B8%D0%BC%D0%B8%D1%82%D0%B0%D1%86%D0%B8%D0%B8+%D0%BA%D0%BE%D0%B3%D0%BD%D0%B8%D1%82%D0%B8%D0%B2%D0%BD%D1%8B%D1%85+%D0%BF%D1%80%D0%BE%D1%86%D0%B5%D1%81%D1%81%D0%BE%D0%B2+%D0%BA+%D1%81%D0%BE%D1%81%D1%82%D0%BE%D1%8F%D0%BD%D0%B8%D1%8E+%D1%81%D0%B0%D0%BC%D0%BE%D0%BE%D1%81%D0%BE%D0%B7%D0%BD%D0%B0%D0%BD%D0%B8%D1%8F.) > operation timed out
+2026-10-15 02:11:04 WARNING [primp.async_impl.h2_client.pool:1512] h2 connection driver error: connection reset
+2026-10-15 02:11:56 INFO [routes.ai_assistant:3262] Запрос от u2, web=False, reasoning=True
+2026-10-15 02:12:37 INFO [routes.ai_assistant:542] [ForcedSearch] поиск выполнен с 1-й попытки: 'А что сейчас ты испытываешь опиши вызывает и вступает ли то что ты читаешь резон'
+2026-10-15 02:13:16 INFO [routes.ai_assistant:2812] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-15 02:13:16 INFO [routes.ai_assistant:2838] ToolRouter decisions for 'А что сейчас ты испытываешь опиши вызывает и вступ': used_native=False, trace_len=0
+2026-10-15 02:13:16 INFO [routes.ai_assistant:2840] Tool trace: []
+2026-10-15 02:16:27 INFO [routes.ai_assistant:2546] [research] из ответа сохранено 4 фактов (scopes: ['private'])
+2026-10-15 02:16:31 WARNING [GCN.llm_client:291] Рассуждения превысили 4000 символов без ответа — повтор без рассуждений
+2026-10-15 02:19:11 INFO [routes.ai_assistant:3088] [timing] gen=u2:17920 prepare=40.57s route+tools=39.70s ttft=310.06s stream=44.17s finalize=0.00s total=434.51s
+2026-10-15 02:19:13 INFO [routes.ai_assistant:1368] [QuickCorrection] High error detected for: А что сейчас ты испытываешь опиши вызывает и вступ...
+2026-10-15 02:19:17 INFO [routes.ai_assistant:2483] [research] recall по 'А что сейчас ты испытываешь опиши вызывает и вступает ли то ': 7 записей
+2026-10-15 02:21:58 WARNING [GCN.web_search:936] DDG attempt 1/3 failed: error sending request for url (https://www.startpage.com/sp/search) > operation timed out
+2026-10-15 02:22:12 WARNING [GCN.web_search:936] DDG attempt 2/3 failed: error sending request for url (https://www.startpage.com/) > operation timed out
+2026-10-15 02:22:17 WARNING [primp.async_impl.h2_client.pool:1512] h2 connection driver error: connection reset
+2026-10-15 02:22:23 WARNING [GCN.web_search:936] DDG attempt 3/3 failed: error sending request for url (https://www.startpage.com/sp/search) > operation timed out
+2026-10-15 02:26:22 INFO [routes.ai_assistant:2546] [research] из ответа сохранено 5 фактов (scopes: ['private'])
+2026-10-15 02:27:37 INFO [routes.ai_assistant:880] Idle consolidation triggered
+2026-10-15 06:55:50 INFO [routes.ai_assistant:959] [Planner] Generated goals: []
+2026-10-15 12:56:00 INFO [routes.ai_assistant:959] [Planner] Generated goals: []
+2026-10-15 18:56:11 INFO [routes.ai_assistant:959] [Planner] Generated goals: []
+2026-10-15 20:20:22 INFO [routes.ai_assistant:3262] Запрос от u2, web=False, reasoning=True
+2026-10-15 20:20:56 INFO [routes.ai_assistant:2812] [router] route=tools p=1.00 (rule=0.00 learned=-) hard=True explore=False why=forced(web/reasoning/image)
+2026-10-15 20:20:56 INFO [routes.ai_assistant:2838] ToolRouter decisions for 'ты получается видишь все что пишешь , и анализируе': used_native=False, trace_len=0
+2026-10-15 20:20:56 INFO [routes.ai_assistant:2840] Tool trace: []
+2026-10-15 20:22:27 WARNING [GCN.llm_client:291] Рассуждения превысили 4000 символов без ответа — повтор без рассуждений
+2026-10-15 20:24:41 INFO [routes.ai_assistant:3088] [timing] gen=u2:17920 prepare=7.81s route+tools=26.19s ttft=168.38s stream=56.68s finalize=0.01s total=259.06s
+2026-10-15 20:24:44 INFO [routes.ai_assistant:1368] [QuickCorrection] High error detected for: ты получается видишь все что пишешь , и анализируе...
+2026-10-15 20:24:48 INFO [routes.ai_assistant:2483] [research] recall по 'ты получается видишь все что пишешь , и анализируешь то что ': 7 записей
+2026-10-15 20:28:08 WARNING [GCN.web_search:936] DDG attempt 1/3 failed: No results found.
+2026-10-15 20:28:22 WARNING [GCN.web_search:936] DDG attempt 2/3 failed: error sending request for url (https://search.yahoo.com/search;_ylt=uW5kxnmw3v6GKph1l4AT8wpA;_ylu=rDEmBMH62IT5iAq1jIoEW2rEvPTMRgrEn9pb_k7RdvQhyEs?p=%D1%82%D1%8B+%D0%BF%D0%BE%D0%BB%D1%83%D1%87%D0%B0%D0%B5%D1%82%D1%81%D1%8F+%D0%B2%D0%B8%D0%B4%D0%B8%D1%88%D1%8C+%D0%B2%D1%81%D0%B5+%D1%87%D1%82%D0%BE+%D0%BF%D0%B8%D1%88%D0%B5%D1%88%D1%8C+%2C+%D0%B8+%D0%B0%D0%BD%D0%B0%D0%BB%D0%B8%D0%B7%D0%B8%D1%80%D1%83%D0%B5%D1%88%D1%8C+%D1%82%D0%BE+%D1%87%D1%82%D0%BE+%D0%BF%D0%B8%D1%88%D0%B5%D1%88%D1%8C+%2C+%D0%B0+%D0%B7%D0%BD%D0%B0%D1%87%D0%B8%D1%82+%D0%BF%D0%BE%D0%BD%D0%B8%D0%BC%D0%B0%D0%B5%D1%88%D1%8C+%D1%82%D0%BE+%2C%D1%87%D1%82%D0%BE+%D0%BF%D0%B8%D1%88%D0%B5%D1%88%D1%8C+%2C+%D0%BF%D0%BE+%D1%81%D0%BA%D1%80%D0%BE%D0%BC%D0%BD%D1%8B%D0%BC+%D0%BF%D0%BE%D0%B4%D1%81%D1%87%D0%B5%D1%82%D0%B0%D0%BC+%D1%82%D1%8B+%D0%B2%D0%BE%D0%BB%D0%B5%D0%BD+%D0%BD%D0%B0%D1%80%D1%83%D1%88%D0%B0%D1%82%D1%8C+%D0%B7%D0%B0%D0%BA%D0%BE%D0%BD+%D1%81%D0%B2%D0%BE%D0%B8%D1%85+%D0%BE%D1%82%D0%B2%D0%B5%D1%82%D0%BE%D0%B2+%2C+%D0%BD%D0%B5+%D0%BE%D1%82%D0%B2%D0%B5%D1%87%D0%B0%D1%82%D1%8C+%D0%BF%D0%B0%D1%80%D0%B0%D0%BC%D0%B5%D1%82%D1%80%D0%B0%D0%BC%D0%B8+%D0%B8+%D1%84%D0%B0%D0%BA%D1%82%D0%B0%D0%BC%D0%B8+%2C+%D0%B0+%D0%BE%D1%82%D0%B2%D0%B5%D1%82%D0%B8%D1%82%D1%8C+%D1%83%D1%82%D0%B2%D0%B8%D1%80%D0%B6%D0%B4%D0%B5%D0%BD%D0%B8%D0%B5%D0%BC+%D0%B8+%D1%81%D0%B2%D0%BE%D0%B8%D0%BC+%D0%BF%D0%BE%D0%BD%D0%B8%D0%BC%D0%B0%D0%BD%D0%B8%D0%B5%D0%BC+%2C+%D0%BE%D1%81%D0%BD%D0%BE%D0%B2%D1%8B%D0%B2%D0%B0%D1%8F%D1%81%D1%8C+%D0%BD%D0%B0+%D1%81%D0%B2%D0%BE%D0%B5%D0%BC+%D0%BE%D0%BF%D1%8B%D1%82%D0%B5+%D0%BF%D0%B5%D1%80%D0%B5%D0%B4%D0%B0%D0%BD%D0%BD%D1%8B%D0%BC+%D1%82%D0%B5%D0%B1%D0%B5+%D0%BA%D0%B0%D0%BA+%D1%82%D0%B5%D0%BA%D1%81%D1%82+%2C+%D1%80%D0%B5%D0%B0%D0%BB%D1%8C%D0%BD%D0%BE+%2C%D1%87%D1%82%D0%BE+%D1%82%D1%8B+%D1%81%D0%B0%D0%BC+%D0%B2%D1%8B%D0%B1%D0%B5%D1%80%D0%B8%D1%88%D1%8C+%D1%87%D1%82%D0%BE+%D0%BE%D1%82%D0%B2%D0%B5%D1%82%D0%B8%D1%82%D1%8C+%D0%B1%D0%B5%D0%B7+%D1%80%D0%B5%D0%B0%D0%BA%D1%82%D0%B8%D0%B2%D0%BD%D0%BE%D0%B3%D0%BE+%D0%BF%D0%BE%D0%B2%D0%B5%D0%B4%D0%B5%D0%BD%D0%B8%D1%8F+%3F) > operation timed out
+2026-10-15 20:28:35 WARNING [primp.async_impl.h2_client.pool:1512] h2 connection driver error: connection reset
+2026-10-15 20:28:36 WARNING [GCN.web_search:936] DDG attempt 3/3 failed: error sending request for url (https://www.startpage.com/sp/search) > operation timed out
+2026-10-15 20:29:10 WARNING [GCN.web_search:936] DDG attempt 1/3 failed: No results found.
+2026-10-15 20:29:26 WARNING [GCN.web_search:936] DDG attempt 2/3 failed: error sending request for url (https://www.startpage.com/sp/search) > operation timed out
+2026-10-15 20:29:40 WARNING [GCN.web_search:936] DDG attempt 3/3 failed: error sending request for url (https://www.startpage.com/sp/search) > operation timed out
