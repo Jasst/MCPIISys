@@ -31,13 +31,25 @@
   };
   // Чаты хранятся отдельно для каждого аккаунта: иначе другой человек на этом же
   // браузере увидит чужие разговоры. Настройки общие для браузера.
-  const KEY = { sessions: 'ai_sessions', msgs: 'ai_messages_', settings: 'ai_settings_v2', gen: 'ai_gen' };
+  const KEY = { sessions: 'ai_sessions', msgs: 'ai_messages_', settings: 'ai_settings_v2', gen: 'ai_gen', cid: 'ai_cid' };
   function setScope(uid) {
     KEY.sessions = uid ? `ai:${uid}:sessions` : 'ai_sessions';
     KEY.msgs = uid ? `ai:${uid}:messages_` : 'ai_messages_';
     KEY.gen = uid ? `ai:${uid}:gen` : 'ai_gen';
     LS_MSGS = uid ? `ai:${uid}:messages_` : 'ai_messages_';
   }
+  // Устойчивый id устройства (не аккаунта!): серверный генерационный лок знает,
+  // КАКОЕ устройство ведёт ответ — это позволяет остальным безопасно смотреть
+  // печать через attach?watch=1 и не давит чужими PUT'ами финальный commit.
+  // Хранится в общем ключе без scope: перезаход в тот же браузер = то же устройство.
+  function clientId() {
+    try {
+      let v = localStorage.getItem(KEY.cid);
+      if (!v) { v = 'c_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10); localStorage.setItem(KEY.cid, v); }
+      return v;
+    } catch { return ''; }
+  }
+  const CID = clientId();
   let LS_MSGS = 'ai_messages_';   // ключ-префикс localStorage-зеркала (устанавливается в setScope)
   const NOTIFY_ID = 'ai_notifications';
   const DEFAULT_NAME = 'Новый чат';
@@ -113,6 +125,14 @@
   }
   function resetBot(m) {
     m.text = ''; m.reasoning = ''; m.sources = []; m.images = []; m.notes = []; m.error = null;
+  }
+  // Для наблюдателя сбрасываем только НАКОПЛЕННОЕ из потока: его id и time
+  // совпадают с серверным сообщением, поэтому финальный merge схлопнёт локальную
+  // запись с серверной по ключу id (дублей не будет). Очистка id/time здесь
+  // ломала бы это схлопывание.
+  function resetBotWatch(m) {
+    m.text = ''; m.reasoning = ''; m.sources = []; m.images = []; m.error = null;
+    m.notes = (m.notes || []).filter((n) => !String(n).startsWith('👁') && !String(n).startsWith('⏳'));
   }
 
   // ------------------------------------------------------------------ состояние
@@ -762,7 +782,7 @@
       const r = await fetch(API.genLock, {
         method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ client: !!(gen || genFlagGet()) }),   // продление своей vs попытка занять чужой
+        body: JSON.stringify({ client: !!(gen || genFlagGet()), cid: CID }),   // продление своей vs попытка занять чужой
       });
       if (!r.ok) return true;                       // старый/недоступный сервер — не блокируем отправку
       const j = await r.json();
@@ -778,7 +798,7 @@
       await fetch(API.genLock, {
         method: 'DELETE', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ client: true }),
+        body: JSON.stringify({ client: true, cid: CID }),
       });
     } catch { /* TTL на сервере снимет лок сам */ }
   }
@@ -862,19 +882,24 @@
 
   // ------------------------------------------------------------------ генерация
 
-  // mode: 'send' — новый запрос к /ai/chat; 'attach' — подхват уже идущей генерации
-  async function startGeneration(id, idx, mode, body) {
+  // mode: 'send' — новый запрос к /ai/chat; 'attach' — подхват уже идущей генерации.
+  // attachMode: 'replay' — владелец (свой флаг myGen): он же допишет и закоммитит ответ;
+  //               'watch'   — наблюдатель с другого устройства: только показывает печать,
+  //                           финальный текст придёт через синхронизацию владельца.
+  async function startGeneration(id, idx, mode, body, attachMode) {
     const controller = new AbortController();
-    const g = { sessionId: id, idx, controller, stopRequested: false, interrupted: false, authLost: false };
+    const watch = mode === 'attach' && attachMode === 'watch';
+    const g = { sessionId: id, idx, controller, stopRequested: false, interrupted: false, authLost: false, watch };
     gen = g;
     if (mode === 'send') genFlagSet(true);   // это устройство — владелец генерации до её завершения
     refreshUI();
 
     const msgs = loadMsgs(id);
     const bot = msgs[idx];
+    if (watch) pushNote(bot, '👁 Ответ печатается на другом устройстве');
     try {
       const res = mode === 'attach'
-        ? await fetch(API.attach, { credentials: 'same-origin', signal: controller.signal })
+        ? await fetch(API.attach + (watch ? '?watch=1' : ''), { credentials: 'same-origin', signal: controller.signal })
         : await fetch(API.chat, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -886,19 +911,26 @@
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
 
       // attach replays the whole buffer from the start: start from a clean slate
-      if (mode === 'attach') resetBot(bot);
+      if (mode === 'attach') { watch ? resetBotWatch(bot) : resetBot(bot); }
 
       let none = false;
       const finished = await readSSE(res, (ev) => {
         if (ev.no_active_generation) { none = true; return; }
         applyEvent(ev, bot);
-        persistSoon(id);
+        // наблюдатель НЕ пишет в своё хранилище/на сервер: финальный commit
+        // делает только владелец генерации — иначе два клиента гоняли бы
+        // параллельные PUT по одному сообщению («каша» между устройствами)
+        if (!watch) persistSoon(id);
         if (id === currentId) paintLive(idx);
       }, controller.signal);
 
       if (!controller.signal.aborted) {
         if (none) {
-          if (!bot.text && !bot.error) {
+          if (watch) {
+            // чужая генерация уже завершилась, пока мы подключались:
+            // ждём финального состояния от синхронизации, не трогаем историю
+            g.interrupted = true;
+          } else if (!bot.text && !bot.error) {
             const userMsg = msgs[idx - 1] && msgs[idx - 1].role === 'user' ? msgs[idx - 1].text : null;
             const ok = await recoverFromLast(bot, userMsg);
             if (ok === null) g.interrupted = true;
@@ -919,7 +951,16 @@
         refreshUI();
       } else {
         if (bot.rStart && !bot.rEnd) bot.rEnd = Date.now();
-        if (g.stopRequested) {
+        if (g.watch) {
+          // Наблюдение окончено (ответ доработал или пропал): локальная запись —
+          // временная, pending остаётся. Придёт commit владельца -> pullState/дельта
+          // схлопнет это сообщение по id с серверным и очистит pending.
+          if (gen === g) gen = null;
+          if (!g.interrupted) { pushNote(bot, '⏳ Ожидаем сохранение ответа…'); persistSoon(id); }
+          scheduleResume(5000);
+          if (id === currentId) renderMessages({ scroll: false });
+          refreshUI();
+        } else if (g.stopRequested) {
           bot.notes.push('⏹ Остановлено');
           bot.pending = false;
         } else if (g.interrupted) {
@@ -932,12 +973,14 @@
           genFlagSet(false);            // ответ завершён — синхронизация снова открыта всем
         }
         if (gen === g) gen = null;
-        commit(id);
+        if (!g.watch) commit(id);
         if (id === currentId) renderMessages({ scroll: false });
         refreshUI();
-        if (g.interrupted && !g.stopRequested) scheduleResume(5000);
-        else els.input.focus();
-        if (!g.interrupted) releaseGenLock();   // владение локом снято (await вне критической секции)
+        if (!g.watch) {
+          if (g.interrupted && !g.stopRequested) scheduleResume(5000);
+          else els.input.focus();
+          if (!g.interrupted) releaseGenLock();   // владение локом снято (await вне критической секции)
+        }
       }
     }
   }
@@ -950,35 +993,42 @@
 
   // Подхватываем незавершённые ответы, например после перезагрузки страницы.
   // Открытый/активный чат проверяем сразу, закрытые — асинхронно из хранилища.
-  // Единый механизм для всех устройств: attach делаем ТОЛЬКО если генерацию
-  // ведём мы (флаг myGen) или на сервере активной генерации нет вовсе. Иначе
-  // второе устройство стало бы «вторым подписчиком» чужого ответа: его реплей
-  // затирал бы локальную версию сообщения, оба клиента гоняли бы persist/PUT
-  // параллельно, и итоговый ответ превращался бы в кашу. Чужой ответ дойдёт
-  // через синхронизацию состояния, когда владелец генерации её завершит.
+  // Единый механизм для всех устройств (решение спрашивает СЕРВЕР, а не флаг):
+  //  - mine=true   — генерацию ведёт это устройство: полный replay + право commit;
+  //  - may_watch   — генерация жива на сервере (ведёт другое устройство):
+  //                  подключаемся как наблюдатель (attach?watch=1) — печать
+  //                  видна в реальном времени, но финальную запись делает владелец;
+  //  - иначе       — активной генерации нет: подхватываем СВОЙ осиротевший ответ
+  //                  (флаг myGen) или ждём синхронизацию, если pending чужой.
   async function resumePending() {
     clearTimeout(resumeTimer);
     if (gen) return;
-    let serverActive = null;      // есть ли активная генерация на сервере (null — не проверено)
+    let st = null;              // ответ /gen-status (null — не проверено)
     const priority = [currentId, gen && gen.sessionId].filter(Boolean);
     const rest = sessions.map((s) => s.id).filter((id) => !priority.includes(id));
     for (const id of priority.concat(rest)) {
       if (gen) return;
       const msgs = await peekMsgs(id);
       const idx = msgs.findIndex((m) => m.pending);
-      if (idx >= 0) {
-        if (!genFlagGet()) {
-          if (serverActive === null) {
-            try {
-              const r = await fetch(API.genStatus, { credentials: 'same-origin', cache: 'no-store' });
-              serverActive = !!(r.ok && (await r.json()).active);
-            } catch { serverActive = false; }   // нет связи — попробуем подхватить (как раньше)
-          }
-          if (serverActive) continue;           // пишет другое устройство — не мешаем
-        }
-        await startGeneration(id, idx, 'attach', null);
-        if (currentId === id) renderMessages({ scroll: false });
+      if (idx < 0) continue;
+      if (st === null) {
+        try {
+          const r = await fetch(API.genStatus + '?cid=' + encodeURIComponent(CID),
+                                { credentials: 'same-origin', cache: 'no-store' });
+          st = (r.ok && (await r.json())) || {};
+        } catch { st = {}; }    // нет связи — решаем по локальному флагу (как раньше)
       }
+      const mine = st.mine || genFlagGet();
+      if (mine) {
+        await startGeneration(id, idx, 'attach', null, 'replay');
+      } else if (st.active && st.may_watch) {
+        await startGeneration(id, idx, 'attach', null, 'watch');   // смотрим чужую печать
+      } else if (!st.active && !genFlagGet()) {
+        continue;               // генерации нет и она была не наша — ждём sync владельца
+      } else {
+        await startGeneration(id, idx, 'attach', null, 'replay');  // свой оборванный ответ
+      }
+      if (currentId === id) renderMessages({ scroll: false });
     }
     refreshUI();
   }
@@ -1660,6 +1710,25 @@
   // последней отправки сообщения (версии > base) и id удалённых чатов, а не весь
   // контент. Сервер хранит снапшот, применяет дельту и отвечает новой версией.
   const SYNC = { base: 0, ready: false, timer: null, busy: false };
+
+  // «Чужой pending» — сообщение, которое пишет НЕ это устройство (у наблюдателя
+  // нет флага myGen). Его нельзя отправлять на сервер как своё: серверный merge
+  // по ключу ct:role|time|text схлопнул бы его с эталонной записью владельца,
+  // и незавершённый фрагмент перезатёр бы финальный ответ («каша»).
+  // Отложенные записи наблюдателя перепроверяются при каждой паузе sync.
+  function isForeignPending(m) {
+    return !!(m && m.pending) && !genFlagGet() && !!currentScopeUid;
+  }
+  async function stripForeignPending(sid, list) {
+    if (!list || !list.length) return list;
+    let changed = false;
+    for (const it of list) {
+      if (it && it.m && isForeignPending(it.m)) { it.m = null; changed = true; }   // tombstone вместо черновика
+    }
+    if (!changed) return list;
+    const kept = list.filter((it) => it && it.m !== null);
+    return kept.length ? kept : null;
+  }
 
   function scheduleSync() {
     if (!SYNC.ready || !currentScopeUid) return;
