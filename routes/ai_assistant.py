@@ -2744,6 +2744,12 @@ class CognitiveController:
 
             await self._ensure_external_tools_registered()
 
+            # Если пользователь приложил фото, а модель его не «видит» — честно
+            # предупреждаем в потоке: иначе молчаливый текстовый ответ на вопрос
+            # про картинку выглядит как галлюцинация.
+            if image_base64 and not LM_STUDIO_VISION_SUPPORTED:
+                await push(f"data: {json.dumps({'warning': 'Текущая модель не поддерживает анализ изображений — фото не будет учтено в ответе'})}\n\n")
+
             # Классификация (без LLM) ДО подготовки сообщений: на быстром маршруте
             # пропускаем LLM-реранк памяти. force_slow считаем так же, как это делает
             # _prepare_messages для search_requested.
@@ -2885,6 +2891,29 @@ class CognitiveController:
                                         f"generate_image: не удалось распарсить результат инструмента как JSON: {result[:200]!r}"
                                     )
                             logger.info(f"generate_image result: {result}")
+                            # image_utils может вернуть data URL вместо ссылки на файл —
+                            # сохраняем в медиатеку и отдаём фронтенду короткий URL,
+                            # иначе гигантский base64 уходит в SSE и оседает в истории.
+                            if isinstance(result, dict) and isinstance(result.get("image_url"), str) \
+                                    and result["image_url"].startswith("data:image/"):
+                                try:
+                                    import hashlib as _hl
+                                    _head, _, _b64 = result["image_url"].partition(",")
+                                    _mime = _head.split(":")[1].split(";")[0]
+                                    _raw = base64.b64decode(_b64)
+                                    _ext = {"image/png": ".png", "image/jpeg": ".jpg",
+                                            "image/webp": ".webp"}.get(_mime, ".png")
+                                    _h = _hl.sha256(_raw).hexdigest()
+                                    _mdir = Path(__file__).resolve().parent.parent / "ui_media"
+                                    _mdir.mkdir(parents=True, exist_ok=True)
+                                    _mpath = _mdir / (_h + _ext)
+                                    if not _mpath.exists():
+                                        _mpath.write_bytes(_raw)
+                                    result["image_url"] = f"/ai/ui-media/{_h}{_ext}"
+                                    logger.info(f"generate_image: data URL сохранён в медиатеку ({len(_raw)} байт)")
+                                except Exception as e:
+                                    logger.warning(f"generate_image: не удалось сохранить data URL: {e}")
+                                    result.pop("image_url", None)
                             if isinstance(result, dict) and result.get("image_url"):
                                 image_url = result["image_url"]
                                 logger.info(f"Sending image_url event: {image_url}")

@@ -13,13 +13,16 @@ routes/ui_state.py — список чатов и сообщения интер�
     контент. Дельта применяется к снапшоту точечно, поэтому сетевой трафик и
     время обработки не зависят от размера архива чатов.
 """
+import base64
+import binascii
 import json
 import logging
 import os
 import re
 import time
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from config import BASE_DIR
@@ -29,8 +32,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix='/ai', tags=['ui-state'])
 
 STATE_DIR = BASE_DIR / 'ui_state'
+MEDIA_DIR = BASE_DIR / 'ui_media'   # изображения чатов: вне снапшота, по content hash
 MAX_BYTES = 8 * 1024 * 1024
 MAX_MSGS_PER_CHAT = 500          # защита от бесконечного роста снапшота
+MAX_IMAGE_BYTES = 10 * 1024 * 1024   # одно изображение в медиатеке (с запасом от клиентских 8 МБ)
+IMAGE_EXT = {'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp',
+             'image/gif': '.gif'}
+_SAFE_HASH = re.compile(r'^[a-f0-9]{64}$')
 _SAFE_ID = re.compile(r'^[A-Za-z0-9_]{1,40}$')
 
 
@@ -108,6 +116,94 @@ def _apply_delta(current: dict, delta: dict) -> dict:
     if isinstance(delta.get('sessions'), list):             # список чатов менялся
         out['sessions'] = delta['sessions']
     return out
+
+
+# ---------------------------------------------------------------- медиатека изображений
+# base64-картинки внутри сообщений раздували снапшот ui_state (и лимит 8 МБ,
+# и квоты браузеров). Тяжёлые изображения хранятся отдельными файлами по
+# content hash; в сообщении остаётся короткая ссылка /ai/ui-media/<hash>.png.
+
+@router.post('/ui-media')
+async def put_media(request: Request, user_id: str = Depends(require_auth)):
+    """Сохраняет изображение чата, возвращает {url, reused}. Повторная загрузка
+    того же файла (тот же sha256) ничего не пишет — дедупликация по контенту.
+    Принимает JSON {data(base64 или data URL), mime} либо multipart с полем file."""
+    import hashlib
+
+    # вариант «сырой файл»: multipart POST с полем file (фронт читает File как ArrayBuffer)
+    ctype = request.headers.get('content-type', '')
+    if 'multipart/form-data' in ctype:
+        form = await request.form()
+        up = form.get('file')
+        if up is None or not hasattr(up, 'read'):
+            raise HTTPException(400, detail='Нет файла')
+        raw = await up.read()
+        mime = up.content_type or None
+        if mime and mime.lower().startswith('image/jpg'):
+            mime = 'image/jpeg'          # нестандартный, но частый MIME от камер
+    else:
+        try:
+            body = json.loads((await request.body()).decode('utf-8'))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise HTTPException(400, detail='Некорректный JSON')
+        if not isinstance(body, dict):
+            raise HTTPException(400, detail='Нет данных изображения')
+        data_b64 = body.get('data')
+        mime = body.get('mime')
+        if not isinstance(data_b64, str) or not data_b64:
+            raise HTTPException(400, detail='Нет данных изображения')
+        if data_b64.startswith('data:'):
+            # принимаем и data URL целиком: data:[<mime>];base64,<payload>
+            head, _, data_b64 = data_b64.partition(',')
+            if mime is None and ';' in head:
+                mime = head.split(':', 1)[1].split(';')[0] or None
+        try:
+            raw = base64.b64decode(data_b64, validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(400, detail='Некорректный base64')
+
+    if mime not in IMAGE_EXT:
+        raise HTTPException(415, detail='Можно загружать только PNG/JPEG/WebP/GIF')
+    if not raw or len(raw) > MAX_IMAGE_BYTES:
+        raise HTTPException(413, detail='Изображение слишком большое (макс. 10 МБ)')
+    # магические байты: не довераем заявленному mime
+    if not (raw[:8] == b'\x89PNG\r\n\x1a\n' or raw[:3] == b'\xff\xd8\xff'
+            or raw[:4] == b'RIFF' or raw[:6] in (b'GIF87a', b'GIF89a')):
+        raise HTTPException(400, detail='Файл не является изображением')
+
+    h = hashlib.sha256(raw).hexdigest()
+    ext = IMAGE_EXT[mime]
+    MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    path = MEDIA_DIR / (h + ext)
+    reused = path.exists()
+    if not reused:
+        tmp = path.with_suffix(path.suffix + '.tmp')
+        with open(tmp, 'wb') as f:
+            f.write(raw)
+        os.replace(tmp, path)   # атомарно: полуталых файлов нет
+    return {'url': f'/ai/ui-media/{h}{ext}', 'reused': reused}
+
+
+@router.get('/ui-media/{name}')
+async def get_media(name: str, user_id: str = Depends(require_auth)):
+    from fastapi.responses import Response
+
+    stem, dot, suffix = name.partition('.')
+    # имя вида <sha256>.png; расширение сверяется с IMAGE_EXT, путь собирается
+    # только из проверенных символов — directory traversal исключён structurally
+    if not dot or not _SAFE_HASH.match(stem):
+        raise HTTPException(400, detail='Некорректный идентификатор изображения')
+    allowed = {v[1:] for v in IMAGE_EXT.values()}
+    if suffix not in allowed:
+        raise HTTPException(400, detail='Некорректный идентификатор изображения')
+    path = MEDIA_DIR / (stem + '.' + suffix)
+    if not path.is_file():
+        raise HTTPException(404, detail='Изображение не найдено')
+    mime = next((k for k, v in IMAGE_EXT.items() if v == '.' + suffix), 'application/octet-stream')
+    data = path.read_bytes()
+    # immutable: имя = sha256 контента, содержимое по этому имени не меняется
+    return Response(content=data, media_type=mime,
+                    headers={'Cache-Control': 'public, max-age=31536000, immutable'})
 
 
 @router.get('/ui-state')
