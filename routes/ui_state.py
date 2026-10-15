@@ -969,7 +969,15 @@ async def get_state_delta(request: Request, since: int = 0,
     # всегда возвращался пустой changed:false, и новое устройство никогда не
     # получало чаты других устройств («у каждого своя копия чата»).
     q = _changelog.get(str(user_id))
-    covered = q and q[0][0] > since
+    # Покрытие журнала: earliest-запись должна быть СТАРШЕ или равна since
+    # (то есть все PUT после since в журнале присутствуют). Раньше стояло
+    # `q[0][0] > since` — инверсия, из-за которой дельта отдавалась только
+    # «доисторическому» since=0, а синхронизированное устройство на каждый
+    # state-changed получало need_full и тянуло полный снимок.
+    # Если deque упёрся в maxlen, самые старые версии могли быть выброшены:
+    # тогда покрытие гарантируем только при since >= earliest (между старым
+    # since и первой сохранившейся записью PUT'ы уже утрачены — need_full).
+    covered = bool(q) and q[0][0] <= since and (len(q) < _CHANGELOG_MAX or since >= q[0][0])
     if not covered:
         return {'changed': False, 'need_full': True, 'updated': updated}
     changed_msgs: dict = {}
