@@ -261,8 +261,23 @@
 
   // ------------------------------------------------------------------ рендер: сообщения
 
+  // Markdown-библиотеки грузятся с CDN и могут быть недоступны (офлайн, блокировка).
+  // Fallback: выводим текст как есть — сначала HTML экранируется, поэтому вставкой
+  // через innerHTML нельзя внедрить разметку; перенос строк даёт white-space: pre-wrap.
+  function escapeHtml(s) {
+    return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  }
   function renderMd(text) {
-    return DOMPurify.sanitize(marked.parse(text || '', { breaks: true, gfm: true }));
+    const src = text || '';
+    if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') {
+      return escapeHtml(src);
+    }
+    try {
+      return DOMPurify.sanitize(marked.parse(src, { breaks: true, gfm: true }));
+    } catch (e) {
+      console.warn('renderMd:', e);
+      return escapeHtml(src);
+    }
   }
 
   function highlight(root) {
@@ -344,6 +359,7 @@
     } else if (m.text) {
       const md = document.createElement('div');
       md.className = 'markdown-body';
+      if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') md.classList.add('plain');
       md.innerHTML = renderMd(m.text);
       bubble.appendChild(md);
       highlight(md);
@@ -533,7 +549,7 @@
         `Ответ ещё пишется в «${g ? g.name : 'другом чате'}». Новое сообщение можно отправить после него.`;
       els.hintBtn.hidden = false;
     } else {
-      els.hintText.textContent = 'Enter — отправить · Shift+Enter — новая строка';
+      els.hintText.textContent = 'Enter — отправить · Shift+Enter — новая строка · / — поиск по чатам';
       els.hintBtn.hidden = true;
     }
   }
@@ -1064,6 +1080,18 @@
   els.scrim.addEventListener('click', closeNav);
   els.search.addEventListener('input', renderList);
 
+  // Поиск по чатам: '/' из поля ввода — перейти к первому результату, Esc — очистить/закрыть
+  els.search.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const first = $('.sess', els.list);
+      if (first) { first.click(); els.search.blur(); }
+    } else if (e.key === 'Escape') {
+      if (els.search.value) { e.stopPropagation(); els.search.value = ''; renderList(); }
+      else { closeNav(); els.search.blur(); }
+    }
+  });
+
   // Прокрутка: кнопка «вниз» видна, только когда пользователь ушёл от конца
   els.messages.addEventListener('scroll', updateScrollButton, { passive: true });
   els.scrollBottom.addEventListener('click', () => scrollToBottom(true));
@@ -1079,6 +1107,19 @@
 
   els.toggleWeb.addEventListener('click', () => { chips.web = !chips.web; syncChips(); });
   els.toggleReason.addEventListener('click', () => { chips.reason = !chips.reason; syncChips(); });
+
+  // '/' вне поля ввода — фокус в поиск чатов (как в Notion/Slack)
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey) return;
+    const t = e.target;
+    const tag = t && t.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (t && t.isContentEditable)) return;
+    if (els.dialog.open) return;
+    e.preventDefault();
+    openNav();                       // на мобильных панель скрыта — сначала открываем
+    els.search.focus();
+    els.search.select();             // предыдущий запрос выделяется, набираем поверх
+  });
 
   els.attachBtn.addEventListener('click', () => els.fileInput.click());
   els.attachRemove.addEventListener('click', () => { attachment = null; renderAttachment(); });
