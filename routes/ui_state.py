@@ -432,8 +432,13 @@ def _snapshot_is_noop(current: dict, payload: dict) -> bool:
     после 409), тоже не должен двигать updated — иначе клиент видит «изменение»,
     перерисовывает интерфейс и дергает другие устройства через SSE."""
     def sig(st: dict) -> str:
-        return json.dumps([st.get('sessions') or [], st.get('messages') or {},
-                           st.get('deleted_chats') or []],
+        # ВАЖНО: tombstone-реестр исключён из сигнатуры. Сервер при каждом
+        # полном PUT дописывает в deleted_chatsKnown-реестр все _allDeleted
+        # клиента (за 7 дней). Если учитывать реестр здесь, повторный снимок
+        # с уже зарегистрированными удалениями считался бы «изменением» —
+        # updated двигался без реальных данных, соседи получали ложный
+        # state-changed и гоняли полные pullState («дёрганье», каскад PUT).
+        return json.dumps([st.get('sessions') or [], st.get('messages') or {}],
                           ensure_ascii=False, sort_keys=True)
     try:
         return sig(current) == sig(payload)
@@ -973,11 +978,14 @@ async def get_state_delta(request: Request, since: int = 0,
     # (то есть все PUT после since в журнале присутствуют). Раньше стояло
     # `q[0][0] > since` — инверсия, из-за которой дельта отдавалась только
     # «доисторическому» since=0, а синхронизированное устройство на каждый
-    # state-changed получало need_full и тянуло полный снимок.
-    # Если deque упёрся в maxlen, самые старые версии могли быть выброшены:
-    # тогда покрытие гарантируем только при since >= earliest (между старым
-    # since и первой сохранившейся записью PUT'ы уже утрачены — need_full).
-    covered = bool(q) and q[0][0] <= since and (len(q) < _CHANGELOG_MAX or since >= q[0][0])
+    # state-changed получал need_full и тянуло полный снимок.
+    # КРИТИЧНО для корректности: если deque упёрся в maxlen=64 и самые
+    # старые записи выброшены, собрать дельту от since физически нельзя —
+    # пропущенные PUT'ы не применятся и клиент получит ИСКАЖЕННУЮ историю
+    # вместо честного need_full (симптом «чат появился, но внутри пусто»).
+    # Поэтому при переполнении журнала покрытие НЕ гарантируем никогда:
+    # вернём need_full, а полный снимок содержит всю историю целиком.
+    covered = bool(q) and len(q) < _CHANGELOG_MAX and q[0][0] <= since
     if not covered:
         return {'changed': False, 'need_full': True, 'updated': updated}
     changed_msgs: dict = {}
