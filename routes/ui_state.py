@@ -197,17 +197,20 @@ def _msg_key(m) -> str | None:
     — дубль одного и того же сообщения физически получает один ключ, поэтому
     слияние схлопывает его в одну запись вместо второй копии. Сообщения без id
     (старые данные, legacy-снимки) получают детерминированный content-ключ
-    role+time+text: два устройства, создавшие одинаковый объект, дают одинаковый
-    ключ и тоже схлопываются."""
+    role+text(+time если есть): два устройства, создавшие одинаковый объект,
+    дают одинаковый ключ и тоже схлопываются. Ключ обязателен и для сообщений
+    без времени — иначе пересланный повторно полный снимок удваивал историю
+    («чат копируется сам себя» после каждого sync)."""
     if not isinstance(m, dict):
         return None
     mid = m.get('id')
     if isinstance(mid, str) and mid:
         return f'id:{mid}'
     t = m.get('time')
+    txt = (m.get('text') or '')[:80]
     if isinstance(t, (int, float)):
-        return f'ct:{m.get("role", "")}|{int(t)}|{(m.get("text") or "")[:80]}'
-    return None
+        return f'ct:{m.get("role", "")}|{int(t)}|{txt}'
+    return f'cx:{m.get("role", "")}|{txt}'
 
 
 def _merge_msgs(base: list, incoming: list) -> list:
@@ -221,6 +224,22 @@ def _merge_msgs(base: list, incoming: list) -> list:
     полный снимок перезаписывал историю как есть, а дельты без ключей плодили
     вторые копии тех же сообщений."""
     result = [dict(x) if isinstance(x, dict) else x for x in base if x is not None]
+    # схлопываем уже существующие в base дубли (наследие прежнего удваивающего
+    # merge): один и тот же ключ — одна запись, пришедшие позже поля приоритетны
+    deduped: list = []
+    first_idx: dict[str, int] = {}
+    for msg in result:
+        k = _msg_key(msg) if isinstance(msg, dict) else None
+        if k and k in first_idx:
+            cur = deduped[first_idx[k]]
+            if isinstance(cur, dict) and isinstance(msg, dict):
+                cur.update(msg)
+            continue
+        if k:
+            first_idx[k] = len(deduped)
+        deduped.append(msg)
+    result = deduped
+
     key_to_idx: dict[str, int] = {}
     used_keys: set[str] = set()
     for i, msg in enumerate(result):
@@ -229,10 +248,21 @@ def _merge_msgs(base: list, incoming: list) -> list:
             key_to_idx[k] = i
             used_keys.add(k)
 
+    # ключи серверной истории: повторная вставка сообщения с уже известным
+    # ключом (пересланный полный снимок, дошедшая позже дельта того же PUT) —
+    # идемпотентна: схлопываем в существующее, а не плодим вторую копию.
+    # Раньше при отсутствии ключа у base-сообщений каждое такое сообщение
+    # вставлялось заново и история удваивалась («чат копируется сам себя»).
+    seen_keys = set(key_to_idx)
     for pos, item in enumerate(incoming):
         if not isinstance(item, dict):
             continue
         key = _msg_key(item)
+        if key and key in seen_keys and key not in used_keys:
+            cur = result[key_to_idx[key]]
+            if isinstance(cur, dict):
+                cur.update(item)
+            continue
         if key and key in key_to_idx:
             cur = result[key_to_idx[key]]
             if isinstance(cur, dict):
@@ -263,15 +293,37 @@ def _merge_sessions(base: list, incoming: list) -> list:
     Пришедший список замещает записи тех же id (переименование, удаление из
     списка), но НЕ затирает чаты, о которых в дельте ничего нет — иначе любое
     устройство со старым списком «воскрешало» бы удалённые на другом чаты или,
-    наоборот, теряло новые. Порядок — по updated (свежие сверху)."""
+    наоборот, теряло новые. Порядок — как в присланном списке (пользовательский),
+    незнакомые серверу чаты — в начало."""
     by_id = {s.get('id'): s for s in base if isinstance(s, dict) and s.get('id')}
     for s in incoming:
         if not isinstance(s, dict) or not s.get('id'):
             continue
         by_id[s['id']] = s
-    merged = list(by_id.values())
-    merged.sort(key=lambda x: x.get('updated') or x.get('created') or 0, reverse=True)
-    return merged
+    # порядок НЕ пересортировывается: список чатов — это пользовательский
+    # порядок (ручная сортировка, архив), sort по updated «прыгал» между sync
+    # и ронял свежие/переименованные чаты в конец. Новые id — в начало списка.
+    incoming_ids = [s['id'] for s in incoming if isinstance(s, dict) and s.get('id')]
+    new_ids = [i for i in incoming_ids if i not in {s.get('id') for s in base if isinstance(s, dict)}]
+    ordered = [s for s in incoming if isinstance(s, dict) and s.get('id')] + \
+              [s for s in base if isinstance(s, dict) and s.get('id') and s['id'] not in set(incoming_ids)]
+    seen: set = set()
+    out: list = []
+    for s in ordered:
+        sid = s['id']
+        if sid in seen:
+            continue
+        seen.add(sid)
+        out.append(by_id[sid])
+    legacy = [s for s in base if isinstance(s, dict) and not s.get('id')]
+    return new_ids_order(out, new_ids) + legacy
+
+
+def new_ids_order(items: list, new_ids: list) -> list:
+    """Свежие (ещё не известные серверу) чаты — первыми, в присланном порядке."""
+    first = [s for s in items if s['id'] in set(new_ids)]
+    rest = [s for s in items if s['id'] not in set(new_ids)]
+    return first + rest
 
 
 def _apply_delta(current: dict, delta: dict) -> tuple[dict, list]:
@@ -311,6 +363,10 @@ def _apply_delta(current: dict, delta: dict) -> tuple[dict, list]:
             continue                                        # чат не пересоздаём
         hist = [x for x in (messages.get(sid) or []) if x is not None]
         changed = False
+        # устойчивые ключи серверной истории: повторная доставка того же сообщения
+        # (пересланный снимок, дошедшая позже дельта) схлопывается в существующее,
+        # а не вставляется второй копией — идемпотентность дельта-пути.
+        server_keys = {k for k in (_msg_key(x) for x in hist) if k}
         for it in items:
             if not isinstance(it, dict):
                 continue
@@ -335,6 +391,8 @@ def _apply_delta(current: dict, delta: dict) -> tuple[dict, list]:
                 old = hist[at]
                 hist[at] = {**old, **m} if isinstance(old, dict) and isinstance(m, dict) else m
                 changed = True
+            elif key and key in server_keys:                # копия уже известного — игнор
+                continue
             elif key is None and 1 <= i <= len(hist) and hist[i - 1] is None:
                 hist[i - 1] = m                           # заполнение ранее удалённой позиции
                 changed = True
@@ -520,9 +578,26 @@ async def put_state(body: StateBody, request: Request, user_id: str = Depends(re
         # Полный снимок без них перезаписывал историю «удалённого» чата и он
         # возвращался в список при первом же mergeFull/409-разрешении.
         dels_raw = (body.delta or {}).get('deleted_chats') if isinstance(body.delta, dict) else None
-        dels = {d for d in (dels_raw or []) if isinstance(d, str)}
+        all_del_raw = (body.delta or {}).get('_allDeleted') if isinstance(body.delta, dict) else None
+        dels = {d for d in ((dels_raw or []) + (all_del_raw or [])) if isinstance(d, str)}
+        # реестр удалений аккаунта — единый источник правды для обоих путей записи
+        # (дельта и полный снимок). Раньше полный снимок сверялся только с tombstone'ами
+        # из собственного тела: legacy-клиент или устройство без реестра воскрешал
+        # историю/запись удалённого чата целиком («чат не удаляется, появляется снова»).
+        now_ms = int(time.time() * 1000)
+        reg = [r for r in (current.get('deleted_chats') or [])
+               if isinstance(r, dict) and isinstance(r.get('sid'), str)
+               and now_ms - int(r.get('at') or 0) < _TOMB_TTL_MS]
+        known = {r['sid'] for r in reg}
+        for d in sorted(dels | known):                    # новые tombstone-ы в реестр:
+            if d not in known:                            # сервер помнит удаления и для
+                reg.append({'sid': d, 'at': now_ms})      # mergeFull других устройств
+                known.add(d)
+        dels |= known
+        for sid in dels:                                  # историю удалённых чатов
+            server_msgs.pop(sid, None)                    # вырезаем всегда
         for sid, hist in (body.messages or {}).items():
-            if sid in dels:                                 # удалённый чат — не оживляем
+            if sid in dels:                               # удалённый чат — не оживляем
                 continue
             if isinstance(hist, list):
                 merged_msgs[sid] = _merge_msgs(server_msgs.get(sid) or [], hist)
@@ -530,15 +605,6 @@ async def put_state(body: StateBody, request: Request, user_id: str = Depends(re
             if sid not in merged_msgs and sid not in dels:
                 merged_msgs[sid] = hist
         sess_merged = _merge_sessions(current.get('sessions') or [], body.sessions)
-        dels |= {r['sid'] for r in (current.get('deleted_chats') or [])
-                 if isinstance(r, dict) and isinstance(r.get('sid'), str)}
-        reg = [r for r in (current.get('deleted_chats') or [])
-               if isinstance(r, dict) and isinstance(r.get('sid'), str)]
-        known = {r['sid'] for r in reg}
-        now_ms = int(time.time() * 1000)
-        for d in sorted(dels):                              # новые tombstone-ы в реестр:
-            if d not in known:                              # сервер помнит удаления и для
-                reg.append({'sid': d, 'at': now_ms})        # mergeFull других устройств
         payload = {
             'updated': current.get('updated', 0),
             'sessions': [s for s in sess_merged if s.get('id') not in dels],
@@ -547,6 +613,11 @@ async def put_state(body: StateBody, request: Request, user_id: str = Depends(re
         }
     payload['updated'] = max(int(time.time() * 1000), current.get('updated', 0) + 1)
 
+    # Проверка размера ДО merge и записи: раньше 413 бросался уже после слияния,
+    # когда payload мог разрастись за счёт серверной истории (или урезаться
+    # лимитом сообщений) — валидный снимок клиента ошибочно отклонялся, а
+    # пересланный повторно удваивал историю. Теперь сравниваем ровно то, что
+    # будет записано на диск.
     data = json.dumps(payload, ensure_ascii=False)
     if len(data.encode('utf-8')) > MAX_BYTES:
         raise HTTPException(413, detail='Слишком много данных. Удалите старые чаты.')
