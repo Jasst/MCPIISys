@@ -151,8 +151,10 @@ async def gen_lock(body: dict, user_id: str = Depends(require_auth)):
                     'ttl_ms': int(g['deadline'] - time.time() * 1000)}
         if mine:
             g = _active_touch(user_id, cid)
+        # g здесь может быть None: свободный лок без захвата (client:false) —
+        # раньше это давало TypeError ('NoneType' object is not subscriptable)
         return {'ok': True, 'held_by_me': mine,
-                'ttl_ms': int(g['deadline'] - time.time() * 1000)}
+                'ttl_ms': int(g['deadline'] - time.time() * 1000) if g else 0}
 
 
 @router.delete('/gen-lock')
