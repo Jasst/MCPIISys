@@ -1798,8 +1798,15 @@
     if (opts.quiet && !stateChanged(st)) return false;
     lastStateJson = JSON.stringify(st);
     // tombstone-реестр сервера: чаты, удалённые на другом устройстве, не
-    // должны пережить merge — иначе они «воскресали» при первом же pullState/409
-    const dels = new Set(Array.isArray(st.deleted_chats) ? st.deleted_chats : []);
+    // должны пережить merge — иначе они «воскресали» при первом же pullState/409.
+    // Сервер отдаёт deleted_chats как [{sid, at}, ...]. Раньше Set собирался из
+    // объектов, а проверялось dels.has(s.id) — строки в множестве объектов. Всегда
+    // false: чаты, удалённые на другом устройстве, не фильтровались и «воскресали».
+    const dels = new Set(
+        (Array.isArray(st.deleted_chats) ? st.deleted_chats : [])
+            .map(d => (typeof d === 'string' ? d : d && d.sid))
+            .filter(Boolean)
+    );
     const byId = new Map();
     for (const s of st.sessions || []) if (!dels.has(s.id)) byId.set(s.id, s);
     for (const s of sessions) if (!byId.has(s.id) && !dels.has(s.id)) byId.set(s.id, s);
@@ -2013,13 +2020,16 @@
       const first = SYNC.base === 0;
       const body = { base: SYNC.base, rev: localRev };
       if (first) {
-        // первое сохранение аккаунта: полный снимок (старые клиенты сервера его тоже примут)
+        // первое сохранение аккаунта: ТОЛЬКО полный снимок, без delta.
+        // С пустой delta-заглушкой {deleted_chats: [], _allDeleted: []} сервер
+        // (routes/ui_state.py -> put_state) классифицировал PUT как no-op-дельту
+        // и молча отбрасывал весь снапшот: sessions/messages на диск не писались,
+        // SYNC.base оставался нулевым, и чаты этого устройства никогда не
+        // появлялись на других. Пустая delta здесь не нужна: на пустом сервере
+        // воскрешать нечего, tombstone-ы не с чем сверять.
         body.sessions = sessions;
         body.messages = {};
         for (const s of sessions) body.messages[s.id] = loadMsgs(s.id).slice(-MAX_STORED);
-        // tombstone-реестр и здесь: удалённый чат не должен вернуться из
-        // серверного снапшота при merge полного снимка
-        body.delta = { deleted_chats: [], _allDeleted: await store().deletedRegistry() };
       } else {
         const d = await store().since(SYNC.base);
         // tombstone-реестр (все удаления за 7 дней): сервер обязан вырезать

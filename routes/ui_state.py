@@ -726,15 +726,20 @@ async def put_state(body: StateBody, request: Request, user_id: str = Depends(re
 
     current = _cached_read(user_id)
     rebased = False
-    if body.base != current.get('updated', 0):
-        # legacy-клиент: delta содержит только реестр удалений, данные — в снимке.
-        # Определяем ДО проверки базы, чтобы настоящий дельта-PUT с устаревшей
-        # базой мог перебазироваться, а полный снимок — нет (он перезаписал бы
-        # чужие изменения).
-        if isinstance(body.delta, dict) and body.delta.get('messages') is None \
-                and (body.sessions or body.messages):
-            body.delta = None
 
+    # Распознаём «полный снимок с delta-заглушкой» ДО проверки base и ДО
+    # no-op-проверки. Иначе на самом первом sync (base == updated == 0) блок
+    # `if body.base != current.updated` пропускается целиком, и пустая delta
+    # ниже уходит в ветку `_delta_is_noop` -> сервер отвечает 200, не читая
+    # body.sessions/body.messages. Снапшот молча теряется.
+    if isinstance(body.delta, dict) and body.delta.get('messages') is None \
+            and (body.sessions or body.messages):
+        client_dels = [d for d in ((body.delta.get('deleted_chats') or [])
+                                   + (body.delta.get('_allDeleted') or []))
+                       if isinstance(d, str)]
+        body.delta = {'deleted_chats': client_dels} if client_dels else None
+
+    if body.base != current.get('updated', 0):
         # Авто-перебазирование для точечных дельт: база клиента устарела, но
         # присланные изменения сопоставимы по устойчивым id сообщений, поэтому
         # их можно безопасно применить поверх СВЕЖЕЙ серверной версии. Раньше

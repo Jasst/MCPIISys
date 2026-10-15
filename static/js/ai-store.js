@@ -374,12 +374,14 @@
     const rev = await currentRev();
     if (idbBroken) {
       // режим localStorage: версии сообщений не ведём — считаем дельтой всё,
-      // если после base была хоть одна запись (rev > base)
+      // если после base была хоть одна запись (rev > base). i — позиция с 1,
+      // как ожидает серверный _apply_delta (раньше уходил x.v — версия
+      // сообщения: патчи и удаления прилетали на сервер с неверной позицией).
       const msgs = {};
       if (rev > base) {
         for (const s of await getSessions()) {
           const arr = await loadMessages(s.id);
-          if (arr.length) msgs[s.id] = arr.map((x) => ({ i: x.v, m: x.m }));
+          if (arr.length) msgs[s.id] = arr.map((x, k) => ({ i: k + 1, m: x.m }));
         }
       }
       let deletedChats = [];
@@ -391,7 +393,12 @@
     const rows = await tx('messages', 'readonly', (s) => s.index('byRev').getAll(IDBKeyRange.lowerBound(base, true)));
     const messages = {};
     for (const r of rows) {
-      (messages[r.sid] = messages[r.sid] || []).push({ i: r.ver, m: r.m });
+      // i — ПОЗИЦИЯ сообщения в истории (idx с 1), как ожидает серверный
+      // _apply_delta. Раньше сюда попадало r.ver — версия отдельного сообщения:
+      // первое же редактирование/патч поднимал ver выше длины истории и сервер
+      // либо отбрасывал запись (i < 1 / не int), либо возвращал conflict;
+      // message:null без корректной позиции вообще не удалял сообщение.
+      (messages[r.sid] = messages[r.sid] || []).push({ i: r.idx + 1, m: r.m });
     }
     const sessionsRev = await tx('meta', 'readonly', (s) => s.get('sessions_rev'));
     const deletedChats = await tx('meta', 'readonly', (s) => s.get('deleted_chats')) || [];
