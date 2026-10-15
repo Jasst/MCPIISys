@@ -85,11 +85,29 @@
       idbBroken = false;
       const last = await readMetaRev();
       memRev = Math.max(last, Date.now());
+      // одна запись флага вместо двух транзакций на каждое сообщение
+      await tx('meta', 'readwrite', (s) => s.put(scopeUid, 'scope'));
     } catch (e) {
       console.warn('IndexedDB недоступен, хранилище на localStorage:', e);
       db = null; idbBroken = true;
       memRev = Number(lsGet('ai_rev') || 0) || Date.now();
     }
+  }
+
+  // IndexedDB один и глобальный, а аккаунты разные. Если в этой БД уже лежит
+  // чужой scope, текущий пользователь увидел бы не свои чаты — полностью
+  // пересоздаём базу под новый аккаунт (старые данные остаются в зеркале
+  // localStorage и вернутся при возврате к прежнему scope).
+  async function guardScope() {
+    if (idbBroken || !db) return;
+    let stored = null;
+    try { stored = await tx('meta', 'readonly', (s) => s.get('scope')); } catch { return; }
+    if (stored == null || stored === scopeUid) return;
+    try { db.close(); } catch { /* ignore */ }
+    try { indexedDB.deleteDatabase(DB); } catch { /* ignore */ }
+    db = await openIndexedDb();
+    await tx('meta', 'readwrite', (s) => s.put(scopeUid, 'scope'));
+    memRev = Math.max((await readMetaRev()) || 0, Date.now());
   }
 
   async function readMetaRev() {
@@ -118,7 +136,16 @@
 
   async function saveSessions(list) {
     const json = JSON.stringify(list);
-    if (!idbBroken) { try { await tx('meta', 'readwrite', (s) => s.put(list, 'sessions')); } catch { /* mirror still written */ } }
+    // rev списка сессий = версия последней записи: дельта-протокол сравнивает
+    // его с base и отправляет список на сервер только если он менялся позже
+    const rev = await currentRev();
+    if (!idbBroken) {
+      try {
+        await tx('meta', 'readwrite', (s) => { s.put(list, 'sessions'); s.put(rev, 'sessions_rev'); });
+      } catch { /* mirror still written */ }
+    } else {
+      lsSet('sessions_rev', String(rev));
+    }
     lsSet('sessions', json);   // зеркало: мгновенный холодный старт, старые вкладки
   }
 
@@ -175,60 +202,98 @@
     return n;
   }
 
+  // Одна readwrite-транзакция на запись версии + подрезку старых: раньше это
+  // были три последовательные транзакции (put, getAll, delete) на каждое
+  // сообщение — при генерации с частыми persist это тормозило запись.
   async function putVersion(sid, idx, ver, m, rev) {
     if (idbBroken) return;
-    await tx('messages', 'readwrite', (s) => s.put({ sid, idx, ver, m, rev }));
-    await trimVersions(sid, idx, ver);
-  }
-
-  // Храним только KEEP_VERSIONS последних версий сообщения: старые версии уже не
-  // нужны ни для чтения, ни для дельты (серверу отправляются версии > base)
-  async function trimVersions(sid, idx, newestVer) {
-    if (idbBroken) return;
     try {
-      const lo = IDBKeyRange.bound(keyOf(sid, idx, 0), keyOf(sid, idx, newestVer));
-      const rows = await tx('messages', 'readonly', (s) => s.getAll(lo));
-      const del = rows.slice(0, Math.max(0, rows.length - KEEP_VERSIONS));
-      if (!del.length) return;
-      await tx('messages', 'readwrite', (s) => { for (const r of del) s.delete(['sid', 'idx', 'ver'].map((k) => r[k])); });
-    } catch { /* cleanup is optional */ }
+      await new Promise((res, rej) => {
+        const t = db.transaction('messages', 'readwrite');
+        const s = t.objectStore('messages');
+        s.put({ sid, idx, ver, m, rev });
+        const lo = IDBKeyRange.bound(keyOf(sid, idx, 0), keyOf(sid, idx, ver));
+        const req = s.getAll(lo);
+        req.onsuccess = () => {
+          const del = req.result.slice(0, Math.max(0, req.result.length - KEEP_VERSIONS));
+          for (const r of del) s.delete([r.sid, r.idx, r.ver]);
+        };
+        t.oncomplete = res;
+        t.onerror = t.onabort = () => rej(t.error || new Error('transaction aborted'));
+      });
+    } catch (e) { console.warn('putVersion:', e); }
   }
 
   async function deleteChat(sid, uptoVer, rev) {
     if (!idbBroken) {
       try {
-        const rows = await tx('messages', 'readonly', (s) => s.index('bySid').getAll(sid));
-        const keep = rows.filter((r) => r.ver <= uptoVer); // versions needed by delta window
-        const del = rows.filter((r) => !keep.includes(r));
-        if (del.length) await tx('messages', 'readwrite', (s) => { for (const r of del) s.delete([r.sid, r.idx, r.ver]); });
+        await new Promise((res, rej) => {
+          const t = db.transaction('messages', 'readwrite');
+          const s = t.objectStore('messages');
+          // удаляем версии новее uptoVer сразу курсором — без загрузки всего
+          // чата в память (getAll давал O(N) на удаление большого чата)
+          const req = s.index('bySid').openCursor(IDBKeyRange.bound([sid, 0, uptoVer + 1], [sid, Infinity, Infinity]));
+          req.onsuccess = () => {
+            const cur = req.result;
+            if (cur) { cur.delete(); cur.continue(); } else res();
+          };
+          req.onerror = () => rej(req.error);
+          t.onerror = t.onabort = () => rej(t.error || new Error('transaction aborted'));
+        });
       } catch { /* ignore */ }
+      recordDeletedChat(sid, rev);   // tombstone: дельта сообщит серверу об удалении
     }
     lsDel('messages_' + sid);
     emit({ type: 'chatDeleted', sid, rev });
   }
 
-  // Полная перезапись истории: diff предыдущей и новой, удалённые индексы помечаются tombstone
+  // Индексы, которые при полной перезаписи надо пометить удалёнными (tombstone):
+  // хвост после removedFrom и всё, что осталось за новой длиной списка
+  function removedIndexes(prevLen, msgsLen, removedFrom) {
+    const out = [];
+    const from = (removedFrom != null && removedFrom < prevLen) ? removedFrom : msgsLen;
+    for (let i = from; i < prevLen; i++) out.push(i);
+    return out;
+  }
+
+  // Полная перезапись истории: diff предыдущей и новой, удалённые индексы помечаются tombstone.
+  // Все версии пишутся в одной readwrite-транзакции — раньше каждый put был
+  // отдельной транзакцией, и большой чат записывался сотнями коммитов.
   async function commitMessages(sid, msgs, removedFrom) {
     const prev = await loadMessages(sid);
     const rev = bumpMem();
     const changed = [];
-    const maxOld = prev.length;
     for (let i = 0; i < msgs.length; i++) {
       const old = prev[i] && prev[i].m;
       const nv = prev[i] ? prev[i].v + 1 : 1;
       if (!old || JSON.stringify(old) !== JSON.stringify(msgs[i])) {
-        await putVersion(sid, i, nv, msgs[i], rev);
         changed.push({ idx: i, ver: nv, m: msgs[i], rev });
       }
     }
-    const uptoVer = 0;   // удалённый чат: серверу достаточно tombstone-дельты
-    if (removedFrom != null && removedFrom < maxOld) {
-      for (let i = removedFrom; i < maxOld; i++) {
-        const nv = prev[i].v + 1;
-        await putVersion(sid, i, nv, null, rev);
-        changed.push({ idx: i, ver: nv, m: null, rev });
-      }
+    for (const i of removedIndexes(prev.length, msgs.length, removedFrom)) {
+      changed.push({ idx: i, ver: (prev[i] ? prev[i].v : 0) + 1, m: null, rev });
     }
+    if (!idbBroken && db) {
+      try {
+        await new Promise((res, rej) => {
+          const t = db.transaction(['messages', 'meta'], 'readwrite');
+          const s = t.objectStore('messages');
+          for (const c of changed) {
+            s.put({ sid, idx: c.idx, ver: c.ver, m: c.m, rev: c.rev });
+            const lo = IDBKeyRange.bound(keyOf(sid, c.idx, 0), keyOf(sid, c.idx, c.ver));
+            const req = s.getAll(lo);
+            req.onsuccess = () => {
+              const del = req.result.slice(0, Math.max(0, req.result.length - KEEP_VERSIONS));
+              for (const r of del) s.delete([r.sid, r.idx, r.ver]);
+            };
+          }
+          t.objectStore('meta').put(rev, 'rev');
+          t.oncomplete = res;
+          t.onerror = t.onabort = () => rej(t.error || new Error('transaction aborted'));
+        });
+      } catch (e) { console.warn('commitMessages:', e); }
+    }
+    // в режиме localStorage зеркало (mirrorLs ниже) — единственный источник данных
     mirrorLs(sid, msgs);
     await writeRev(rev);
     emit({ type: 'commit', sid, rev, changed, deletedFrom: removedFrom });
@@ -285,12 +350,20 @@
   async function since(base) {
     const rev = await currentRev();
     if (idbBroken) {
+      // режим localStorage: версии сообщений не ведём — считаем дельтой всё,
+      // если после base была хоть одна запись (rev > base)
       const msgs = {};
-      for (const s of await getSessions()) {
-        const arr = await loadMessages(s.id);
-        if (arr.some((x) => x.v > base)) msgs[s.id] = arr.map((x) => ({ i: x.v, m: x.m }));
+      if (rev > base) {
+        for (const s of await getSessions()) {
+          const arr = await loadMessages(s.id);
+          if (arr.length) msgs[s.id] = arr.map((x) => ({ i: x.v, m: x.m }));
+        }
       }
-      return { rev, messages: msgs, deletedChats: [], sessionsChanged: false };
+      let deletedChats = [];
+      try { deletedChats = JSON.parse(lsGet('deleted_chats') || '[]').filter((d) => d.rev > base).map((d) => d.sid); } catch { /* ignore */ }
+      let sessionsRev = 0;
+      try { sessionsRev = Number(lsGet('sessions_rev') || 0); } catch { /* ignore */ }
+      return { rev, messages: msgs, deletedChats, sessionsChanged: sessionsRev > base };
     }
     const rows = await tx('messages', 'readonly', (s) => s.index('byRev').getAll(IDBKeyRange.lowerBound(base, true)));
     const messages = {};
@@ -304,11 +377,18 @@
   }
 
   async function markSessionsSaved(rev) {
-    if (idbBroken) return;
+    if (idbBroken) { lsSet('sessions_rev', String(rev)); return; }
     try { await tx('meta', 'readwrite', (s) => s.put(rev, 'sessions_rev')); } catch { /* ignore */ }
   }
   async function recordDeletedChat(sid, rev) {
-    if (idbBroken) return;
+    if (idbBroken) {
+      let list = [];
+      try { list = JSON.parse(lsGet('deleted_chats') || '[]'); } catch { /* ignore */ }
+      list.push({ sid, rev });
+      const cut = Date.now() - 7 * 86400000;
+      try { lsSet('deleted_chats', JSON.stringify(list.filter((d) => d.rev >= cut).slice(-200))); } catch { /* ignore */ }
+      return;
+    }
     try {
       const list = (await tx('meta', 'readonly', (s) => s.get('deleted_chats'))) || [];
       list.push({ sid, rev });
@@ -368,7 +448,7 @@
   }
 
   global.AiStore = {
-    init, getSessions, saveSessions, loadMessages, commitMessages, patchMessage,
+    init, guardScope, getSessions, saveSessions, loadMessages, commitMessages, patchMessage,
     appendMessage, removeSession, since, currentRev, applyDelta, migrateLegacy,
     markSessionsSaved, recordDeletedChat, onEvent: (fn) => listeners.push(fn),
     get broken() { return idbBroken; },

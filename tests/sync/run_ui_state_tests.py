@@ -36,12 +36,37 @@ check('3 state readable with same content', r['sessions'][0]['name'] == 'Чат'
 r = c.put('/ai/ui-state', json={'base': 0, 'sessions': [], 'messages': {}})
 check('4 stale base refused (409): another device wrote first', r.status_code == 409)
 
-r = c.put('/ai/ui-state', json={'base': v1, 'sessions': [{'id': 's2', 'name': 'Второй'}], 'messages': {}})
+r = c.put('/ai/ui-state', json={'base': v1, 'sessions': [{'id': 's2', 'name': 'Второй'}], 'messages': {'s1': [{'role': 'user', 'text': 'привет'}]}})
 check('5 write with current base accepted', r.status_code == 200)
+
+v2 = c.get('/ai/ui-state').json()['updated']
+
+# --- дельта-протокол: передаются только изменённые сообщения, не весь контент
+# формат i — позиция в истории с 1 (как версии сообщений на клиенте)
+r = c.put('/ai/ui-state', json={'base': v2, 'rev': 1, 'delta': {
+    'messages': {'s1': [{'i': 2, 'm': {'role': 'assistant', 'text': 'ответ'}}]},
+    'deleted_chats': [], 'sessions': [{'id': 's1', 'name': 'Чат'}, {'id': 's3', 'name': 'Третий'}]}})
+check('6 delta append accepted', r.status_code == 200, r.text)
+st = c.get('/ai/ui-state').json()
+check('6a delta message present, old content kept',
+      len(st['messages']['s1']) == 2 and st['messages']['s1'][1]['text'] == 'ответ')
+check('6b delta sessions list applied', [s['id'] for s in st['sessions']] == ['s1', 's3'])
+
+v3 = st['updated']
+r = c.put('/ai/ui-state', json={'base': v3, 'rev': 2, 'delta': {
+    'messages': {'s1': [{'i': 1, 'm': {'role': 'user', 'text': 'правк'}}]},
+    'deleted_chats': ['s3']}})
+check('7 delta patch + chat deletion', r.status_code == 200)
+st = c.get('/ai/ui-state').json()
+check('7a patched in place (merge fields)', st['messages']['s1'][0]['text'] == 'правк' and st['messages']['s1'][0]['role'] == 'user')
+check('7b deleted chat history removed', 's3' not in st['messages'])
+
+r = c.put('/ai/ui-state', json={'base': v3, 'delta': {'messages': {}, 'deleted_chats': []}})
+check('7c stale delta refused (409)', r.status_code == 409)
 
 big = {'base': c.get('/ai/ui-state').json()['updated'], 'sessions': [], 'messages': {'x': ['a' * 9_000_000]}}
 r = c.put('/ai/ui-state', json=big)
-check('6 oversized state refused (413)', r.status_code == 413)
+check('8 oversized state refused (413)', r.status_code == 413)
 
 ui._read  # noqa
 bad = TestClient(FastAPI())
