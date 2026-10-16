@@ -502,26 +502,73 @@
     return box;
   }
 
+  // ------------------------------------------------------------------ изображения в чате
+  // Скачивание: data-URL — напрямую; ссылки медиатеки — через blob, потому что
+  // атрибут download у обычной ссылки браузеры игнорируют для внешних адресов.
+  function imageExt(mime) {
+    return ({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' })[mime] || 'png';
+  }
+  async function downloadImage(url, baseName) {
+    let objUrl = null;
+    try {
+      let href = url, mime = '';
+      if (/^data:/i.test(url)) {
+        mime = url.slice(5, url.indexOf(';') > 0 ? url.indexOf(';') : url.indexOf(','));
+      } else {
+        const r = await fetch(url, { credentials: 'same-origin', cache: 'force-cache' });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const blob = await r.blob();
+        mime = blob.type || '';
+        objUrl = URL.createObjectURL(blob);
+        href = objUrl;
+      }
+      const a = document.createElement('a');
+      a.href = href;
+      a.download = `${baseName || 'image'}.${imageExt(mime)}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch (e) {
+      toast('Не удалось сохранить изображение');
+    } finally {
+      if (objUrl) setTimeout(() => URL.revokeObjectURL(objUrl), 2000);
+    }
+  }
+  // Блок «изображение + кнопка сохранить под ним» (фото пользователя и картинки модели)
+  function imageBlock(url, alt, baseName) {
+    const wrap = document.createElement('div');
+    wrap.className = 'img-block';
+    const img = new Image();
+    img.className = 'gen zoomable';
+    img.src = url;
+    img.alt = alt;
+    img.loading = 'lazy';
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'img-save';
+    save.textContent = '⬇ Сохранить';
+    save.addEventListener('click', (e) => { e.stopPropagation(); downloadImage(url, baseName); });
+    img.addEventListener('error', () => { save.hidden = true; });
+    wrap.append(img, save);
+    return { wrap, img, save };
+  }
+
   function paintBubble(bubble, m) {
     bubble.innerHTML = '';
 
     if (m.role === 'user') {
       if (m.image) {
-        const img = new Image();
-        img.className = 'gen zoomable';
-        img.src = m.image;
-        img.alt = 'Прикреплённое изображение';
-        img.loading = 'lazy';
+        const fig = imageBlock(m.image, 'Прикреплённое изображение', 'photo');
         // тяжёлые data URL раньше молча не дорисовывались после перезагрузки
         // (квота хранилища резала запись); теперь это явный, кликабельный статус
-        img.addEventListener('error', () => {
-          img.style.display = 'none';
+        fig.img.addEventListener('error', () => {
+          fig.img.style.display = 'none';
           const s = document.createElement('div');
           s.className = 'meta-line';
           s.textContent = '🖼 Фото недоступно локально — загрузите его заново';
           bubble.appendChild(s);
         });
-        bubble.appendChild(img);
+        bubble.appendChild(fig.wrap);
       }
       if (m.text) {
         const p = document.createElement('div');
@@ -568,12 +615,7 @@
     }
 
     for (const url of m.images || []) {
-      const img = new Image();
-      img.className = 'gen zoomable';
-      img.src = url;
-      img.alt = 'Изображение';
-      img.loading = 'lazy';
-      bubble.appendChild(img);
+      bubble.appendChild(imageBlock(url, 'Изображение', 'image').wrap);
     }
     if (m.sources && m.sources.length) bubble.appendChild(sourcesNode(m.sources));
     for (const note of m.notes || []) {
@@ -1695,8 +1737,9 @@
   // колесо/пинч — масштаб, перетаскивание — панорама (особенно полезно для
   // скриншотов с мелким текстом), ←/→ — переход между фото этого же ответа,
   // Esc или клик по тёмному фону — закрыть.
-  const lb = { root: null, img: null, cap: null, counter: null, prev: null, next: null,
-               urls: [], idx: -1, scale: 1, tx: 0, ty: 0, drag: null };
+  const lb = { root: null, img: null, cap: null, counter: null, prev: null, next: null, save: null,
+               urls: [], idx: -1, scale: 1, tx: 0, ty: 0, drag: null,
+               pointers: new Map(), pinch: null, lastTap: 0, lastPointer: 'mouse' };
 
   function buildLightbox() {
     if (lb.root) return;
@@ -1740,7 +1783,13 @@
 
     lb.prev = prev;
     lb.next = next;
-    lb.root.append(close, prev, next, lb.img, lb.cap, lb.counter);
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'lb-btn lb-save';
+    save.textContent = '⬇ Сохранить';
+    save.addEventListener('click', () => downloadImage(lb.urls[lb.idx], 'image'));
+    lb.save = save;
+    lb.root.append(close, prev, next, lb.img, lb.cap, lb.counter, save);
     document.body.appendChild(lb.root);
 
     // клик по тёмному фону (не по картинке/кнопкам) закрывает
@@ -1751,27 +1800,65 @@
       e.preventDefault();
       zoomBy(Math.exp(-e.deltaY * 0.0015));
     }, { passive: false });
+    // Жесты: мышь — перетаскивание и колесо; касание — панорама одним пальцем,
+    // щипок двумя пальцами для масштаба, двойной тап — приблизить / сбросить.
     lb.root.addEventListener('pointerdown', (e) => {
       if (e.target !== lb.img) return;
-      lb.drag = { x: e.clientX, y: e.clientY, tx: lb.tx, ty: lb.ty };
-      lb.root.classList.add('grabbing');
-      lb.img.setPointerCapture(e.pointerId);
+      lb.lastPointer = e.pointerType;
+      lb.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      try { lb.img.setPointerCapture(e.pointerId); } catch { /* нет поддержки — не критично */ }
+      if (lb.pointers.size === 2) {
+        const [a, b] = [...lb.pointers.values()];
+        lb.pinch = { dist: Math.hypot(a.x - b.x, a.y - b.y), scale: lb.scale };
+        lb.drag = null;
+      } else if (lb.pointers.size === 1) {
+        lb.drag = { x: e.clientX, y: e.clientY, tx: lb.tx, ty: lb.ty };
+        lb.root.classList.add('grabbing');
+      }
+      if (e.pointerType === 'touch' && lb.pointers.size === 1) {
+        const now = Date.now();
+        if (now - lb.lastTap < 300) { lb.lastTap = 0; toggleLbZoom(); }
+        else lb.lastTap = now;
+      }
     });
     lb.root.addEventListener('pointermove', (e) => {
-      if (!lb.drag) return;
+      if (!lb.pointers.has(e.pointerId)) return;
+      lb.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (lb.pinch && lb.pointers.size >= 2) {
+        const [a, b] = [...lb.pointers.values()];
+        const d = Math.hypot(a.x - b.x, a.y - b.y);
+        lb.scale = Math.min(8, Math.max(1, lb.pinch.scale * d / (lb.pinch.dist || 1)));
+        if (lb.scale <= 1.01) { lb.scale = 1; lb.tx = 0; lb.ty = 0; }
+        applyLbTransform();
+        return;
+      }
+      if (!lb.drag || lb.scale <= 1.01) return;     // панорама — только при увеличении
       lb.tx = lb.drag.tx + (e.clientX - lb.drag.x);
       lb.ty = lb.drag.ty + (e.clientY - lb.drag.y);
       applyLbTransform();
     });
-    const endDrag = () => { lb.drag = null; lb.root.classList.remove('grabbing'); };
-    lb.root.addEventListener('pointerup', endDrag);
-    lb.root.addEventListener('pointercancel', endDrag);
-    // двойной клик — сброс масштаба / быстрый зум 2x
-    lb.img.addEventListener('dblclick', () => {
-      if (lb.scale > 1.01) { lb.scale = 1; lb.tx = 0; lb.ty = 0; }
-      else lb.scale = 2;
-      applyLbTransform();
-    });
+    const endPointer = (e) => {
+      lb.pointers.delete(e.pointerId);
+      if (lb.pointers.size < 2) lb.pinch = null;
+      if (lb.pointers.size === 0) {
+        lb.drag = null;
+        lb.root.classList.remove('grabbing');
+      } else if (lb.pointers.size === 1) {
+        const p = [...lb.pointers.values()][0];       // второй палец убрали — продолжаем панораму
+        lb.drag = { x: p.x, y: p.y, tx: lb.tx, ty: lb.ty };
+      }
+    };
+    lb.root.addEventListener('pointerup', endPointer);
+    lb.root.addEventListener('pointercancel', endPointer);
+    // мышь: двойной клик. На касаниях двойной тап уже обработан в pointerdown,
+    // а браузер присылает и dblclick — второе переключение отменяло бы первое.
+    lb.img.addEventListener('dblclick', () => { if (lb.lastPointer !== 'touch') toggleLbZoom(); });
+  }
+
+  function toggleLbZoom() {
+    if (lb.scale > 1.01) { lb.scale = 1; lb.tx = 0; lb.ty = 0; }
+    else lb.scale = 2;
+    applyLbTransform();
   }
 
   function applyLbTransform() {

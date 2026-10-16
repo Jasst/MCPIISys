@@ -371,3 +371,69 @@ body.compact .bubble { padding: 8px 12px; }
    боковой панели и списком, сам индикатор — поверх верхней части списка. */
 .sb-pull-anchor { position: relative; height: 0; }
 .sb-pull-anchor .pull-indicator { top: 6px; }
+/* ------------------------------------------------------------------
+   Изображения в чате: блок «картинка + Сохранить» под ней
+   ------------------------------------------------------------------ */
+.img-block {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
+  margin-top: 8px; max-width: 100%;
+}
+.img-block img.gen { margin-top: 0; cursor: zoom-in; }
+.img-save {
+  appearance: none; cursor: pointer; font: inherit; font-size: 13px; line-height: 1;
+  padding: 7px 12px; border-radius: 999px;
+  background: var(--bg-tertiary); color: var(--text-main);
+  border: 1px solid var(--border-color);
+}
+.img-save:hover { filter: brightness(1.08); }
+.img-save:focus-visible { outline: 2px solid var(--accent, #6b8cff); outline-offset: 2px; }
+.img-save[hidden] { display: none; }
+
+/* ------------------------------------------------------------------
+   Полноэкранный просмотр изображения (лайтбокс)
+   ------------------------------------------------------------------ */
+.lightbox {
+  position: fixed; inset: 0; z-index: 1000;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.97);
+  overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none;
+  overscroll-behavior: contain;
+}
+.lightbox[hidden], .lightbox [hidden] { display: none !important; }
+.lightbox img {
+  max-width: 100vw; max-height: 100vh; object-fit: contain;
+  cursor: grab; touch-action: none; -webkit-user-drag: none;
+  transform-origin: center center; will-change: transform;
+}
+.lightbox.grabbing img { cursor: grabbing; }
+
+.lb-btn {
+  position: absolute; z-index: 2;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; cursor: pointer; color: #fff; font: inherit;
+  background: rgba(255, 255, 255, 0.16); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  width: 44px; height: 44px; border-radius: 50%; font-size: 22px; line-height: 1;
+}
+.lb-btn:hover { background: rgba(255, 255, 255, 0.26); }
+.lb-btn:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.lb-close { top: calc(env(safe-area-inset-top, 0px) + 12px); right: 12px; }
+.lb-nav { top: 50%; transform: translateY(-50%); }
+.lb-prev { left: 12px; }
+.lb-next { right: 12px; }
+.lb-save {
+  left: 50%; transform: translateX(-50%); width: auto; padding: 0 20px;
+  border-radius: 999px; font-size: 15px; height: 44px; white-space: nowrap;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 16px);
+}
+.lb-cap {
+  position: absolute; z-index: 2; left: 16px; right: 72px;
+  top: calc(env(safe-area-inset-top, 0px) + 20px);
+  color: #fff; font-size: 14px; opacity: 0.85;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lb-counter {
+  position: absolute; z-index: 2; left: 50%; transform: translateX(-50%);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 72px);
+  color: #fff; font-size: 13px; opacity: 0.8;
+}
+html.lb-open, html.lb-open body { overflow: hidden; }
