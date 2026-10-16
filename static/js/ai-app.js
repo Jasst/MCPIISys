@@ -69,12 +69,83 @@
     notifyInterval: '30',
   };
 
-  const SUGGESTIONS = [
+  // Пул подсказок: много вариантов, на экране каждый раз показывается
+  // случайная выборка (см. pickSuggestions).
+  const SUGGESTION_POOL = [
+    // Объясни простыми словами
     ['Объясни простыми словами', 'Как работает память ассистента и что он запоминает?'],
+    ['Объясни простыми словами', 'Что такое нейросеть и как её обучают?'],
+    ['Объясни простыми словами', 'Чем облако отличается от локального компьютера?'],
+    ['Объясни простыми словами', 'Как устроен интернет — от ввода адреса до загрузки страницы?'],
+    ['Объясни простыми словами', 'Что такое API и зачем оно разработчику?'],
+    ['Объясни простыми словами', 'Как работают пароли и почему их нельзя хранить в открытом виде?'],
+    ['Объясни простыми словами', 'Что такое промпт и как его составлять эффективно?'],
+    ['Объясни простыми словами', 'Чем Git помогает при работе над проектом?'],
+    // Составь план
     ['Составь план', 'Помоги составить план на неделю с фокусом на один большой проект.'],
+    ['Составь план', 'Распиши план запуска продукта на месяц: от идеи до первых пользователей.'],
+    ['Составь план', 'Составь план изучения новой профессии с нуля за 3 месяца.'],
+    ['Составь план', 'Спланируй переезд в другой город, чтобы ничего не забыть.'],
+    ['Составь план', 'Составь план подготовки к важной презентации за одну неделю.'],
+    ['Составь план', 'Разработай план семейного бюджета на полгода с накоплениями.'],
+    ['Составь план', 'Составь план ремонта квартиры поэтапно, с чего начать?'],
+    // Поищи в интернете
     ['Поищи в интернете', 'Какие сейчас главные новости в мире искусственного интеллекта?'],
+    ['Поищи в интернете', 'Найди последние обзоры новых смартфонов этого года.'],
+    ['Поищи в интернете', 'Узнай, какие конференции по разработке пройдут в этом сезоне.'],
+    ['Поищи в интернете', 'Найди актуальные курсы по аналитике данных для новичков.'],
+    ['Поищи в интернете', 'Собери информацию о лучших коворкингах в моём городе.'],
+    ['Поищи в интернете', 'Найди свежие исследования о влиянии сна на продуктивность.'],
+    ['Поищи в интернете', 'Узнай прогноз трендов на рынке фриланса в этом году.'],
+    // Напиши текст
     ['Напиши текст', 'Напиши короткий пост для канала о запуске нового проекта.'],
+    ['Напиши текст', 'Напиши дружелюбное письмо клиенту о переносе сроков.'],
+    ['Напиши текст', 'Составь продающее описание для товара на маркетплейсе.'],
+    ['Напиши текст', 'Напиши текст приглашения на встречу команды в неформальном стиле.'],
+    ['Напиши текст', 'Подготовь короткое резюме проекта для руководства.'],
+    ['Напиши текст', 'Напиши поздравление с днём рождения коллеге, без пафоса.'],
+    ['Напиши текст', 'Сочини три варианта слогана для кофейни у дома.'],
+    // Идея и brainstorm
+    ['Подкинь идею', 'Придумай пять идей для побочного проекта на выходные.'],
+    ['Подкинь идею', 'Что приготовить на ужин из курицы, риса и овощей?'],
+    ['Подкинь идею', 'Придумай оригинальные подарки для коллеги на Новый год.'],
+    ['Подкинь идею', 'Назови способы разгрузить голову после тяжёлой недели.'],
+    ['Подкинь идею', 'Придумай тему для блога, которая точно заинтересует друзей.'],
+    ['Подкинь идею', 'Как интересно провести выходной в своём городе без больших трат?'],
+    // Код и техника
+    ['Помоги с кодом', 'Объясни, как ускорить медленный SQL-запрос?'],
+    ['Помоги с кодом', 'Напиши функцию на Python для проверки надёжности пароля.'],
+    ['Помоги с кодом', 'Как организовать структуру файлов в небольшом веб-проекте?'],
+    ['Помоги с кодом', 'Найди типичные ошибки в коде на JavaScript и подскажи, как их исправить.'],
+    ['Помоги с кодом', 'Как настроить автоматический бэкап базы данных?'],
+    ['Помоги с кодом', 'Объясни разницу между потоками и процессами в программировании.'],
+    // Переведи и исправь
+    ['Переведи и исправь', 'Переведи деловое письмо на английский, сохранив вежливый тон.'],
+    ['Переведи и исправь', 'Проверь текст на ошибки и сделай его читабельнее.'],
+    ['Переведи и исправь', 'Сократи этот абзац вдвое, не потеряв смысл.'],
+    ['Переведи и исправь', 'Перепиши сложный технический пункт простым языком для клиента.'],
+    ['Переведи и исправь', 'Переведи меню ресторана на английский язык.'],
+    ['Переведи и исправь', 'Сделай из заметок структурированный конспект встречи.'],
+    // Сравни и выбери
+    ['Сравни и выбери', 'Что выбрать для учёбы: ноутбук на Windows или MacBook?'],
+    ['Сравни и выбери', 'Сравни подписку и покупку программы навсегда — что выгоднее?'],
+    ['Сравни и выбери', 'Какой мессенджер безопаснее для рабочих переписок?'],
+    ['Сравни и выбери', 'Аренда или покупка квартиры: взвесь плюсы и минусы.'],
+    ['Сравни и выбери', 'Сравні два подхода к обучению: курсы против самообразования.'],
+    ['Сравни и выбери', 'Какое кресло для работы за компьютером удобнее и долговечнее?'],
   ];
+
+  const SUGGESTIONS_COUNT = 4;
+
+  // Случайная выборка N разных подсказок из пула (Fisher–Yates partial shuffle)
+  function pickSuggestions(n = SUGGESTIONS_COUNT) {
+    const pool = SUGGESTION_POOL.slice();
+    for (let i = 0; i < n && i < pool.length; i++) {
+      const j = i + Math.floor(Math.random() * (pool.length - i));
+      const t = pool[i]; pool[i] = pool[j]; pool[j] = t;
+    }
+    return pool.slice(0, Math.min(n, pool.length));
+  }
 
   const ICON_REFRESH =
     '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
@@ -208,11 +279,38 @@
   // при расхождении версий берём более свежий снимок.
   const lastSeen = {};        // id -> массив
   const lastSeenAt = {};      // id -> время чтения снимка
+  // Источник сообщений чата — IndexedDB. localStorage-зеркало больше не читается
+  // (оно неполное и устаревает). Чат считается загруженным (hydrated) только после
+  // чтения из хранилища; пока не загружен, в хранилище ничего не пишем — иначе
+  // пустой кеш стёр бы историю.
+  const hydrated = new Set();
+  const hydrating = new Map();
+  function hydrateChat(id) {
+    if (hydrated.has(id)) return Promise.resolve();
+    if (!hydrating.has(id)) {
+      hydrating.set(id, (async () => {
+        try {
+          const arr = await store().loadMessages(id);
+          const disk = dedupeByKeys(arr.map((x) => x.m).filter(Boolean));
+          const mem = cache[id] || [];          // то, что успели записать до загрузки
+          cache[id] = disk.length ? mergeMsgLists(disk, mem).slice(-MAX_STORED) : mem;
+          lastSeen[id] = cache[id];
+          hydrated.add(id);
+          if (currentId === id) renderMessages({ scroll: false });
+        } catch (e) {
+          console.warn('hydrateChat:', e);      // не помечаем загруженным: запись в этот чат пропустим
+        } finally {
+          hydrating.delete(id);
+        }
+      })());
+    }
+    return hydrating.get(id);
+  }
   function loadMsgs(id) {
     if (!(id in cache)) {
-      const v = readJSON(LS_MSGS + id, []);
-      cache[id] = Array.isArray(v) ? v : [];
+      cache[id] = [];
       lastSeenAt[id] = 0;
+      hydrateChat(id);
     }
     // dedupeByKeys — единый механизм против дублей при повторном открытии чата.
     // История может прийти из двух источников (IndexedDB и localStorage-зеркало),
@@ -291,10 +389,13 @@
       const arr = await store().loadMessages(id);
       const msgs = dedupeByKeys(arr.map((x) => x.m).filter(Boolean));
       if (msgs.length >= (cache[id] || []).length) { cache[id] = msgs.slice(-MAX_STORED); lastSeen[id] = cache[id]; }
+      hydrated.add(id);
     } catch { /* оставляем прежний кеш */ }
   }
 
   async function persist(id) {
+    if (!hydrated.has(id)) await hydrateChat(id);
+    if (!hydrated.has(id)) return;          // история не прочитана — не перезаписываем её
     const msgs = loadMsgs(id);
     let ok = true;
     try { await store().commitMessages(id, msgs.slice(-MAX_STORED), null); }
@@ -328,6 +429,7 @@
     sessions.unshift({ id, name, created: now, updated: now });
     cache[id] = [];
     lastSeen[id] = cache[id];
+    hydrated.add(id);                       // новый чат: на диске ничего нет
     saveSessions();
     persist(id);
     return id;
@@ -471,26 +573,73 @@
     return box;
   }
 
+  // ------------------------------------------------------------------ изображения в чате
+  // Скачивание: data-URL — напрямую; ссылки медиатеки — через blob, потому что
+  // атрибут download у обычной ссылки браузеры игнорируют для внешних адресов.
+  function imageExt(mime) {
+    return ({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' })[mime] || 'png';
+  }
+  async function downloadImage(url, baseName) {
+    let objUrl = null;
+    try {
+      let href = url, mime = '';
+      if (/^data:/i.test(url)) {
+        mime = url.slice(5, url.indexOf(';') > 0 ? url.indexOf(';') : url.indexOf(','));
+      } else {
+        const r = await fetch(url, { credentials: 'same-origin', cache: 'force-cache' });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const blob = await r.blob();
+        mime = blob.type || '';
+        objUrl = URL.createObjectURL(blob);
+        href = objUrl;
+      }
+      const a = document.createElement('a');
+      a.href = href;
+      a.download = `${baseName || 'image'}.${imageExt(mime)}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch (e) {
+      toast('Не удалось сохранить изображение');
+    } finally {
+      if (objUrl) setTimeout(() => URL.revokeObjectURL(objUrl), 2000);
+    }
+  }
+  // Блок «изображение + кнопка сохранить под ним» (фото пользователя и картинки модели)
+  function imageBlock(url, alt, baseName) {
+    const wrap = document.createElement('div');
+    wrap.className = 'img-block';
+    const img = new Image();
+    img.className = 'gen zoomable';
+    img.src = url;
+    img.alt = alt;
+    img.loading = 'lazy';
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'img-save';
+    save.textContent = '⬇ Сохранить';
+    save.addEventListener('click', (e) => { e.stopPropagation(); downloadImage(url, baseName); });
+    img.addEventListener('error', () => { save.hidden = true; });
+    wrap.append(img, save);
+    return { wrap, img, save };
+  }
+
   function paintBubble(bubble, m) {
     bubble.innerHTML = '';
 
     if (m.role === 'user') {
       if (m.image) {
-        const img = new Image();
-        img.className = 'gen zoomable';
-        img.src = m.image;
-        img.alt = 'Прикреплённое изображение';
-        img.loading = 'lazy';
+        const fig = imageBlock(m.image, 'Прикреплённое изображение', 'photo');
         // тяжёлые data URL раньше молча не дорисовывались после перезагрузки
         // (квота хранилища резала запись); теперь это явный, кликабельный статус
-        img.addEventListener('error', () => {
-          img.style.display = 'none';
+        fig.img.addEventListener('error', () => {
+          fig.img.style.display = 'none';
           const s = document.createElement('div');
           s.className = 'meta-line';
           s.textContent = '🖼 Фото недоступно локально — загрузите его заново';
           bubble.appendChild(s);
         });
-        bubble.appendChild(img);
+        bubble.appendChild(fig.wrap);
       }
       if (m.text) {
         const p = document.createElement('div');
@@ -537,12 +686,7 @@
     }
 
     for (const url of m.images || []) {
-      const img = new Image();
-      img.className = 'gen zoomable';
-      img.src = url;
-      img.alt = 'Изображение';
-      img.loading = 'lazy';
-      bubble.appendChild(img);
+      bubble.appendChild(imageBlock(url, 'Изображение', 'image').wrap);
     }
     if (m.sources && m.sources.length) bubble.appendChild(sourcesNode(m.sources));
     for (const note of m.notes || []) {
@@ -622,7 +766,7 @@
     p.textContent = 'Спросите что угодно. Ассистент помнит контекст и может искать в интернете.';
     const grid = document.createElement('div');
     grid.className = 'suggest-grid';
-    for (const [title, prompt] of SUGGESTIONS) {
+    for (const [title, prompt] of pickSuggestions()) {
       const b = document.createElement('button');
       b.type = 'button';
       b.className = 'suggest';
@@ -961,6 +1105,24 @@
     if (!bot) { if (gen === g) gen = null; refreshUI(); return; }
     g.bot = bot;
     if (watch) pushNote(bot, '👁 Ответ печатается на другом устройстве');
+    // Потоковая синхронизация: владелец генерации регулярно (не чаще раза в
+    // STREAM_SYNC_MS) отправляет на сервер недописанный ответ. Без этого шага
+    // дельты во время genFlag блокировались и другие устройства видели ответ
+    // только после финального commit'а по окончании всей генерации.
+    // persistSoon -> persist -> scheduleSync ставит дебаунс-таймер на каждый
+    // чанк; этот интервал гарантирует, что пуш уходит ритмично, даже когда
+    // токены сыплются непрерывно (таймер иначе вечный перестановка не давала бы
+    // sync'у состояться до конца ответа).
+    let streamSyncTimer = null;
+    if (!watch) {
+      streamSyncTimer = setInterval(() => {
+        if (gen !== g || g.watch) return;
+        if (!genFlagGet()) return;               // генерация завершена — дальше обычный путь
+        if (SYNC.busy) return;                   // предыдущий PUT ещё в полёте
+        clearTimeout(SYNC.timer);                // не дублируем: один внеочередной пуш
+        pushState();
+      }, STREAM_SYNC_MS);
+    }
     try {
       const res = mode === 'attach'
         ? await fetch(API.attach + '?' + [watch ? 'watch=1' : '', 'key=' + encodeURIComponent(bot.id)].filter(Boolean).join('&'),
@@ -1019,6 +1181,9 @@
       else if (isNetworkError(err)) g.interrupted = true;
       else bot.error = err.message || String(err);
     } finally {
+      // потоковая синхронизация больше не нужна: интервал снимаем на любом
+      // выходе (успех, ошибка, остановка) — финальный commit делает commit(id)
+      if (streamSyncTimer) { clearInterval(streamSyncTimer); streamSyncTimer = null; }
       if (g.authLost) {
         // 401 в разгар генерации: иначе myGen-флаг залипнет и на следующем
         // логине блокировал pullState/scheduleSync до истечения TTL сервера.
@@ -1223,6 +1388,7 @@
       web_search: chips.web,
       reasoning: chips.reason,
       gen_key: msgs[idx].id,
+      chat_id: id, user_msg_id: userMsg.id || null,
     };
     if (img) { body.image_base64 = img.base64; body.image_mime = img.mime; }
 
@@ -1300,7 +1466,7 @@
       renderMessages({ scroll: false });
       refreshUI();
       const body = { message: prompt, stream: true, web_search: chips.web, reasoning: chips.reason,
-                     gen_key: nid };
+                     gen_key: nid, chat_id: id, user_msg_id: userKey };
       if (regenImg && regenImg.base64) { body.image_base64 = regenImg.base64; body.image_mime = regenImg.mime; }
       startGeneration(id, nidx, 'send', body).then(() => {
         const now = loadMsgs(id);
@@ -1663,8 +1829,9 @@
   // колесо/пинч — масштаб, перетаскивание — панорама (особенно полезно для
   // скриншотов с мелким текстом), ←/→ — переход между фото этого же ответа,
   // Esc или клик по тёмному фону — закрыть.
-  const lb = { root: null, img: null, cap: null, counter: null, prev: null, next: null,
-               urls: [], idx: -1, scale: 1, tx: 0, ty: 0, drag: null };
+  const lb = { root: null, img: null, cap: null, counter: null, prev: null, next: null, save: null,
+               urls: [], idx: -1, scale: 1, tx: 0, ty: 0, drag: null,
+               pointers: new Map(), pinch: null, lastTap: 0, lastPointer: 'mouse' };
 
   function buildLightbox() {
     if (lb.root) return;
@@ -1708,7 +1875,13 @@
 
     lb.prev = prev;
     lb.next = next;
-    lb.root.append(close, prev, next, lb.img, lb.cap, lb.counter);
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'lb-btn lb-save';
+    save.textContent = '⬇ Сохранить';
+    save.addEventListener('click', () => downloadImage(lb.urls[lb.idx], 'image'));
+    lb.save = save;
+    lb.root.append(close, prev, next, lb.img, lb.cap, lb.counter, save);
     document.body.appendChild(lb.root);
 
     // клик по тёмному фону (не по картинке/кнопкам) закрывает
@@ -1719,27 +1892,65 @@
       e.preventDefault();
       zoomBy(Math.exp(-e.deltaY * 0.0015));
     }, { passive: false });
+    // Жесты: мышь — перетаскивание и колесо; касание — панорама одним пальцем,
+    // щипок двумя пальцами для масштаба, двойной тап — приблизить / сбросить.
     lb.root.addEventListener('pointerdown', (e) => {
       if (e.target !== lb.img) return;
-      lb.drag = { x: e.clientX, y: e.clientY, tx: lb.tx, ty: lb.ty };
-      lb.root.classList.add('grabbing');
-      lb.img.setPointerCapture(e.pointerId);
+      lb.lastPointer = e.pointerType;
+      lb.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      try { lb.img.setPointerCapture(e.pointerId); } catch { /* нет поддержки — не критично */ }
+      if (lb.pointers.size === 2) {
+        const [a, b] = [...lb.pointers.values()];
+        lb.pinch = { dist: Math.hypot(a.x - b.x, a.y - b.y), scale: lb.scale };
+        lb.drag = null;
+      } else if (lb.pointers.size === 1) {
+        lb.drag = { x: e.clientX, y: e.clientY, tx: lb.tx, ty: lb.ty };
+        lb.root.classList.add('grabbing');
+      }
+      if (e.pointerType === 'touch' && lb.pointers.size === 1) {
+        const now = Date.now();
+        if (now - lb.lastTap < 300) { lb.lastTap = 0; toggleLbZoom(); }
+        else lb.lastTap = now;
+      }
     });
     lb.root.addEventListener('pointermove', (e) => {
-      if (!lb.drag) return;
+      if (!lb.pointers.has(e.pointerId)) return;
+      lb.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (lb.pinch && lb.pointers.size >= 2) {
+        const [a, b] = [...lb.pointers.values()];
+        const d = Math.hypot(a.x - b.x, a.y - b.y);
+        lb.scale = Math.min(8, Math.max(1, lb.pinch.scale * d / (lb.pinch.dist || 1)));
+        if (lb.scale <= 1.01) { lb.scale = 1; lb.tx = 0; lb.ty = 0; }
+        applyLbTransform();
+        return;
+      }
+      if (!lb.drag || lb.scale <= 1.01) return;     // панорама — только при увеличении
       lb.tx = lb.drag.tx + (e.clientX - lb.drag.x);
       lb.ty = lb.drag.ty + (e.clientY - lb.drag.y);
       applyLbTransform();
     });
-    const endDrag = () => { lb.drag = null; lb.root.classList.remove('grabbing'); };
-    lb.root.addEventListener('pointerup', endDrag);
-    lb.root.addEventListener('pointercancel', endDrag);
-    // двойной клик — сброс масштаба / быстрый зум 2x
-    lb.img.addEventListener('dblclick', () => {
-      if (lb.scale > 1.01) { lb.scale = 1; lb.tx = 0; lb.ty = 0; }
-      else lb.scale = 2;
-      applyLbTransform();
-    });
+    const endPointer = (e) => {
+      lb.pointers.delete(e.pointerId);
+      if (lb.pointers.size < 2) lb.pinch = null;
+      if (lb.pointers.size === 0) {
+        lb.drag = null;
+        lb.root.classList.remove('grabbing');
+      } else if (lb.pointers.size === 1) {
+        const p = [...lb.pointers.values()][0];       // второй палец убрали — продолжаем панораму
+        lb.drag = { x: p.x, y: p.y, tx: lb.tx, ty: lb.ty };
+      }
+    };
+    lb.root.addEventListener('pointerup', endPointer);
+    lb.root.addEventListener('pointercancel', endPointer);
+    // мышь: двойной клик. На касаниях двойной тап уже обработан в pointerdown,
+    // а браузер присылает и dblclick — второе переключение отменяло бы первое.
+    lb.img.addEventListener('dblclick', () => { if (lb.lastPointer !== 'touch') toggleLbZoom(); });
+  }
+
+  function toggleLbZoom() {
+    if (lb.scale > 1.01) { lb.scale = 1; lb.tx = 0; lb.ty = 0; }
+    else lb.scale = 2;
+    applyLbTransform();
   }
 
   function applyLbTransform() {
@@ -1917,21 +2128,42 @@
     return kept.length ? kept : null;
   }
 
+  // Интервал потоковой синхронизации во время генерации: владелец periodically
+  // отправляет на сервер недописанный ответ (pending-чанки), чтобы соседние
+  // устройства видели печать в реальном времени, а не дожидались финального
+  // commit'а. 2000 мс — компромисс между плавностью «стрима» и нагрузкой.
+  const STREAM_SYNC_MS = 2000;
+
   function scheduleSync(force) {
     if (!SYNC.ready || !currentScopeUid) return;
-    // Пока это устройство ведёт генерацию, синхронизация не нужна: частичные
-    // дельты на каждый чанк стриминга только создавали бы конфликты и флуд
-    // запросами на сервер. НО первичное состояние (вопрос пользователя +
-    // pending-бот) обязано уйти на сервер ДО startGeneration: иначе второе
-    // устройство не увидит state-changed по SSE и не сможет подхватить поток
-    // через gen-status/attach. Для этого sendNow/regenerate вызывают
-    // scheduleSync(true) — ровно один форс-пул начального снапшота; таймер
-    // уже стоит, а pushState отправит заголовок X-Client-Gen: 1, который
-    // сервер принимает от владельца лока. Финальный commit после окончания
-    // ответа уходит обычным путём (без force).
-    if (genFlagGet() && !force) return;
+    // Потоковая синхронизация: пока это устройство ведёт генерацию, дельты с
+    // частичным текстом ответа УХОДЯТ НА СЕРВЕР регулярно (каждые STREAM_SYNC_MS,
+    // см. streamSyncTimer в startGeneration). Раньше при genFlag любой плановый
+    // sync блокировался и на сервер попадал только начальный снапшот (по force)
+    // да финальный commit после [DONE]: первое сообщение синхронизировалось
+    // сразу, а все последующие — лишь после полной генерации.
+    // Защита от «каши» при этом сохраняется:
+    //  - PUT владельца идёт с заголовком X-Client-Gen, сервер его принимает,
+    //    остальные устройства в это время получают 429 и ждут;
+    //  - наблюдатели не пишут в своё хранилище промежуточный текст (watch-ветка
+    //    в startGeneration), их собственные pending-черновики срезаются
+    //    stripForeignPending перед PUT;
+    //  - серверный merge идемпотентен по устойчивым id сообщений, повторная
+    //    доставка того же чанка не создаёт дублей.
+    // force — немедленный пул начального состояния (вопрос + pending-бот) ДО
+    // startGeneration: иначе второе устройство не увидит state-changed по SSE
+    // и не сможет подхватить поток через gen-status/attach.
+    if (force) {
+      clearTimeout(SYNC.timer);
+      SYNC.timer = setTimeout(pushState, 0);   // немедленный форс-пул начального снапшота
+      return;
+    }
+    // Во время генерации плановые sync'и идут чаще обычного дебаунса (1500 мс):
+    // persist() дергается каждые PERSIST_DELAY_MS, но таймер переставляется на
+    // каждый чанк, поэтому реально пуш уходит по нижнему лимиту — STREAM_SYNC_MS
+    // (см. streamSyncTimer в startGeneration). Вне генерации — обычный дебаунс.
     clearTimeout(SYNC.timer);
-    SYNC.timer = setTimeout(pushState, 1500);
+    SYNC.timer = setTimeout(pushState, genFlagGet() ? Math.min(1500, STREAM_SYNC_MS) : 1500);
   }
 
   // Слияние полного состояния (первый вход/409): серверные версии приоритетнее
@@ -1960,7 +2192,7 @@
     for (const s of sessions) if (!byId.has(s.id) && !dels.has(s.id)) byId.set(s.id, s);
     sessions = [...byId.values()];
     for (const id of dels) {
-      delete cache[id]; delete lastSeen[id];
+      delete cache[id]; delete lastSeen[id]; hydrated.delete(id);
       // удаление чата, удалённого на другом устройстве: tombstone НЕ пишется
       // (иначе этот id удалил бы чат при возврате к прежнему аккаунту —
       // scope-реестр глобален в рамках одной вкладки хранилища)
@@ -1989,8 +2221,8 @@
     // фоновый merge, изменивший открытый диалог, гарантированно попал на
     // экран — иначе пользователь видел «ничего не изменилось». Остальной
     // cache при quiet не трогаем: перерисовка всё равно только для currentId.
-    if (!opts.quiet) cache = {};
-    else if (currentId) delete cache[currentId];
+    if (!opts.quiet) { cache = {}; hydrated.clear(); }
+    else if (currentId) { delete cache[currentId]; hydrated.delete(currentId); }
     await reloadDirtySafe();
     if (currentId) renderMessages({ scroll: false });
     refreshUI();
@@ -2011,6 +2243,15 @@
 
   // Клиентская партия серверного _merge_msgs: совпадения по ключу схлопаются,
   // новые сообщения вставляются в свою позицию, порядок сохраняется.
+  // Общее правило слияния одного сообщения (зеркало _merge_msg_fields на сервере):
+  // пустые text/reasoning не затирают известные; pending:false не возвращается в pending.
+  function mergeMsgFields(dst, item) {
+    const out = Object.assign({}, item);
+    if (dst.text && !item.text) out.text = dst.text;
+    if (dst.reasoning && !item.reasoning) out.reasoning = dst.reasoning;
+    if (dst.pending === false && item.pending) out.pending = false;
+    return out;
+  }
   function mergeMsgLists(base, incoming) {
     const result = base.map((m) => (m && typeof m === 'object' ? Object.assign({}, m) : m)).filter(Boolean);
     const keyToIdx = new Map();
@@ -2023,10 +2264,9 @@
       if (!item || typeof item !== 'object') return;
       const k = msgKey(item);
       if (k && keyToIdx.has(k)) {
-        // тот же объект — патч полями; пустой reasoning с сервера не затирает уже известный
+        // тот же объект — патч полями по общему правилу (см. mergeMsgFields)
         const dst = result[keyToIdx.get(k)];
-        const keepR = dst.reasoning && !item.reasoning ? { reasoning: dst.reasoning } : null;
-        Object.assign(dst, item, keepR || {});
+        Object.assign(dst, mergeMsgFields(dst, item));
         return;
       }
       let j = Math.min(pos, result.length);
@@ -2428,6 +2668,9 @@
     }
 
     try { sessions = await store().getSessions(); } catch { sessions = []; }
+    // открытый чат читаем из IndexedDB до первой отрисовки (а не из localStorage-зеркала)
+    const firstChat = sessions.slice().sort((a, b) => (b.updated || b.created) - (a.updated || a.created))[0];
+    if (firstChat) await hydrateChat(firstChat.id);
     SYNC.ready = await pullState();
     init();
     startRemotePoll();

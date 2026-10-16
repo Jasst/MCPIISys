@@ -5,6 +5,7 @@
 ИСПРАВЛЕНИЕ: для работы с памятью используется единый сервисный слой MemoryService,
 что устраняет дублирование логики с MCP-сервером.
 """
+import base64
 import sys
 import uuid
 from pathlib import Path
@@ -2587,7 +2588,8 @@ class CognitiveController:
     async def stream_response(self, message: str, web_search: bool = False,
                               image_base64: str = None, image_mime: str = None,
                               reasoning: bool = False, char_by_char: bool = None,
-                              gen_key: Optional[str] = None):
+                              gen_key: Optional[str] = None,
+                              chat_id: Optional[str] = None, user_msg_id: Optional[str] = None):
         """
         Тонкая обёртка над StreamingResponse. Реальная генерация выполняется в
         self._stream_response_worker, запущенном как отдельная asyncio.Task
@@ -2621,6 +2623,7 @@ class CognitiveController:
                     gen_id=gen_id, push=push, message=message, web_search=web_search,
                     image_base64=image_base64, image_mime=image_mime,
                     reasoning=reasoning, char_by_char=char_by_char,
+                    chat_id=chat_id, user_msg_id=user_msg_id, bot_id=gen_key,
                 ),
                 name=f"stream:{gen_id}",
             )
@@ -2734,7 +2737,9 @@ class CognitiveController:
 
     async def _stream_response_worker(self, gen_id: str, push, message: str, web_search: bool = False,
                                        image_base64: str = None, image_mime: str = None,
-                                       reasoning: bool = False, char_by_char: bool = None):
+                                       reasoning: bool = False, char_by_char: bool = None,
+                                       chat_id: Optional[str] = None, user_msg_id: Optional[str] = None,
+                                       bot_id: Optional[str] = None):
         """
         Фактическая генерация ответа. Запускается как ОТДЕЛЬНАЯ asyncio.Task
         (см. stream_response ниже) — а не как тело async-генератора, который
@@ -2829,6 +2834,7 @@ class CognitiveController:
             )
 
             full_response = ""
+            reasoning_acc = ""          # рассуждения для снапшота (в history не попадают)
             tool_trace: List[Dict[str, Any]] = []
             already_verified = False
             # Флаг ошибки внутреннего стрима. Раньше inner except делал `return`,
@@ -3045,6 +3051,7 @@ class CognitiveController:
                     ):
                         kind = event.get("kind")
                         if kind == "reasoning":
+                            reasoning_acc += event.get("text", "") or ""
                             await push(
                                 f"data: {json.dumps({'reasoning_token': event.get('text', '')})}\n\n"
                             )
@@ -3175,6 +3182,24 @@ class CognitiveController:
                     self._last_failure = {"user": message, "reason": _reason, "timestamp": time.time()}
             except Exception:
                 pass
+            # Фиксируем финальное сообщение на сервере: ответ остаётся в снапшоте,
+            # даже если все устройства были офлайн. Устройство-владелец больше не нужно.
+            try:
+                if chat_id and bot_id:
+                    from routes.ui_state import commit_final_message
+                    _le = getattr(self, "_last_exchange", None) or {}
+                    _ok = _le.get("user") == message and bool(_le.get("assistant"))
+                    _text = _le.get("assistant") if _ok else (locals().get("full_response") or "")
+                    _now_ms = int(time.time() * 1000)
+                    _bot = {"id": bot_id, "role": "assistant", "text": _text or "",
+                            "reasoning": locals().get("reasoning_acc") or "", "pending": False,
+                            "error": None if _ok else (getattr(self, "_last_failure", None) or {}).get("reason"),
+                            "time": _now_ms}
+                    _user = ({"id": user_msg_id, "role": "user", "text": message, "time": _now_ms}
+                             if user_msg_id else None)
+                    commit_final_message(str(self.user_id), chat_id, _user, _bot)
+            except Exception as _ce:
+                logger.warning(f"[commit] не удалось зафиксировать ответ на сервере: {_ce}")
             await self._finish_generation(gen_id)
 
     # ===== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ =====
@@ -3344,6 +3369,9 @@ class AIRequest(BaseModel):
     url_to_fetch: Optional[str] = Field(None, max_length=2000)
     # id сообщения-ответа на клиенте: поток привязан к нему, чужой не подхватывается
     gen_key: Optional[str] = Field(None, max_length=200)
+    # id чата и вопроса на клиенте: сервер сам фиксирует финальный ответ в снапшоте
+    chat_id: Optional[str] = Field(None, max_length=200)
+    user_msg_id: Optional[str] = Field(None, max_length=200)
 
 class ResearchRequest(BaseModel):
     goal: str = Field(..., min_length=1, max_length=2000)
@@ -3376,7 +3404,9 @@ async def chat_with_ai(body: AIRequest, address: str = Depends(require_auth)):
                 image_mime=body.image_mime,
                 reasoning=body.reasoning,
                 char_by_char=body.char_by_char,
-                gen_key=body.gen_key
+                gen_key=body.gen_key,
+                chat_id=body.chat_id,
+                user_msg_id=body.user_msg_id,
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache,no-store,must-revalidate", "X-Accel-Buffering": "no"}
