@@ -366,3 +366,8 @@ body.compact .bubble { padding: 8px 12px; }
   .topbar { padding-top: max(8px, env(safe-area-inset-top)); }
   .composer-wrap { padding-bottom: max(10px, env(safe-area-inset-bottom)); }
 }
+
+/* Индикатор обновления списка диалогов: якорь нулевой высоты между шапкой
+   боковой панели и списком, сам индикатор — поверх верхней части списка. */
+.sb-pull-anchor { position: relative; height: 0; }
+.sb-pull-anchor .pull-indicator { top: 6px; }

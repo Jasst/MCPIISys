@@ -5,6 +5,7 @@
 ИСПРАВЛЕНИЕ: для работы с памятью используется единый сервисный слой MemoryService,
 что устраняет дублирование логики с MCP-сервером.
 """
+import base64
 import sys
 import uuid
 from pathlib import Path
@@ -3526,21 +3527,37 @@ async def attach_to_active_stream(watch: bool = False, key: Optional[str] = None
     return StreamingResponse(_gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache,no-store,must-revalidate", "X-Accel-Buffering": "no"})
 
+def _exchange_from_history(history, user_text: str) -> Optional[Dict]:
+    """Последний обмен на user_text из персистентной history: user == text -> следующий assistant."""
+    items = list(history or [])
+    for i in range(len(items) - 1, -1, -1):
+        m = items[i]
+        if m.get("role") != "user" or m.get("content") != user_text:
+            continue
+        for n in items[i + 1:]:
+            if n.get("role") == "user":
+                break
+            if n.get("role") == "assistant" and not str(n.get("content", "")).startswith("[инструмент"):
+                return {"user": user_text, "assistant": n.get("content"), "timestamp": None}
+        break
+    return None
+
 @router.get("/chat/last_response")
 async def get_last_response(user_text: Optional[str] = None, address: str = Depends(require_auth)):
     """
-    Возвращает последний завершённый обмен (user -> assistant), чтобы после
-    перезагрузки страницы фронтенд мог подтянуть ответ, который LLM досчитала,
-    пока пользователь был не в чате (attach на это не способен — его буфер
-    уничтожается по завершении генерации).
+    Возвращает обмен (user -> assistant), чтобы фронтенд мог подтянуть ответ,
+    который LLM досчитала, пока пользователь/устройство был не в чате.
+    С user_text ищем СТРОГО обмен на это сообщение (в логе, затем в персистентной
+    history) и никогда не отдаём ответ на другое сообщение.
     """
     assistant = await get_assistant(address)
-    exchange = None
     if user_text:
-        exchange = next((e for e in reversed(list(getattr(assistant, "_exchange_log", []))) 
+        exchange = next((e for e in reversed(list(getattr(assistant, "_exchange_log", [])))
                          if e.get("user") == user_text), None)
-    if exchange is None:
-        exchange = getattr(assistant, "_last_exchange", None)
+        if exchange is None:
+            exchange = _exchange_from_history(assistant.history, user_text)
+        return exchange or {"user": None, "assistant": None}
+    exchange = getattr(assistant, "_last_exchange", None)
     if not exchange:
         # Fallback после перезапуска процесса: восстанавливаем из history.json
         user_msg = next((i.get("content") for i in reversed(assistant.history)

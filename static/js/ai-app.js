@@ -153,6 +153,7 @@
     scrim: $('#scrim'),
     menuBtn: $('#menuBtn'),
     list: $('#sessionList'),
+    sbPullIndicator: $('#sbPullIndicator'),
     search: $('#searchInput'),
     newBtn: $('#newChatBtn'),
     status: $('#status'),
@@ -809,6 +810,10 @@
 
   const genFlagGet = () => { try { return localStorage.getItem(KEY.gen) === '1'; } catch { return false; } };
   const genFlagSet = (v) => { try { v ? localStorage.setItem(KEY.gen, '1') : localStorage.removeItem(KEY.gen); } catch { /* ignore */ } };
+  // Признак владельца для финальной синхронизации. genFlag снимается сразу после
+  // завершения ответа (чтобы синхронизация открылась всем), а финальный PUT всё
+  // равно должен уйти от владельца с X-Client-Gen, и лок снимается только после него.
+  let finalCommitOwner = false;
 
   async function acquireGenLock() {
     if (!currentScopeUid) return true;              // локальный режим без входа — лок не нужен
@@ -842,8 +847,8 @@
     finally { clearTimeout(timer); }
   }
 
-  async function releaseGenLock() {
-    if (!currentScopeUid || !genFlagGet()) return;
+  async function releaseGenLock(force = false) {
+    if (!currentScopeUid || (!force && !genFlagGet())) return;
     genFlagSet(false);
     try {
       await fetch(API.genLock, {
@@ -1038,6 +1043,7 @@
         } else {
           if (!bot.text && !bot.error) bot.text = '(пустой ответ)';
           bot.pending = false;
+          finalCommitOwner = true;      // финальный PUT уйдёт от владельца, даже если genFlag уже снят
           genFlagSet(false);            // ответ завершён — синхронизация снова открыта всем
         }
         if (gen === g) gen = null;
@@ -1091,14 +1097,25 @@
       } else if (st.active && st.may_watch) {
         await startGeneration(id, idx, 'attach', null, 'watch');   // смотрим чужую печать
       } else if (!st.active && !genFlagGet()) {
-        // Генерации нет и она была не наша. Ждём sync владельца, но если сообщение
-        // висит дольше 3 минут — снимаем точки, иначе оно остаётся pending навсегда.
-        const m = loadMsgs(id)[idx];
-        if (m && Date.now() - (m.time || 0) > 180000) {
-          if (!m.text) m.error = 'Ответ не получен: генерация потеряна';
-          m.pending = false;
-          await commit(id);
-          if (currentId === id) renderMessages({ scroll: false });
+        // Генерации нет и она была не наша. Сначала спрашиваем сервер: финальный
+        // ответ сохраняется в history на сервере и не зависит от устройства-владельца.
+        const msgs = loadMsgs(id);
+        const m = msgs[idx];
+        const userMsg = msgs[idx - 1] && msgs[idx - 1].role === 'user' ? msgs[idx - 1].text : null;
+        if (m) {
+          const ok = await recoverFromLast(m, userMsg);
+          if (ok === null) continue;          // нет связи — не объявляем потерю, повторим позже
+          if (m.text) {
+            m.pending = false;
+            await commit(id);
+            if (currentId === id) renderMessages({ scroll: false });
+          } else if (Date.now() - (m.time || 0) > 180000) {
+            // сервер ответа не знает и сообщение висит давно — действительно потеряно
+            m.error = 'Ответ не получен: генерация потеряна';
+            m.pending = false;
+            await commit(id);
+            if (currentId === id) renderMessages({ scroll: false });
+          }
         }
         continue;
       } else {
@@ -2080,10 +2097,14 @@
     if (!currentScopeUid) return false;
     if (genFlagGet() && !force) return false;
     if (gen && !genFlagGet()) return false;
+    // opts.timeoutMs — жест «потянуть»: не даём спиннеру висеть на зависшем запросе
+    const ac = opts.timeoutMs ? new AbortController() : null;
+    const killTimer = ac ? setTimeout(() => ac.abort(), opts.timeoutMs) : null;
     try {
       const r = await fetch('/ai/ui-state', {
         credentials: 'same-origin', cache: 'no-store',
         headers: SYNC.etag ? { 'If-None-Match': SYNC.etag } : {},
+        signal: ac ? ac.signal : undefined,
       });
       if (r.status === 304) {                 // снапшот не менялся — ничего не делаем
         SYNC.etagMisses = 0;                  // сервер поддерживает ETag: канал рабочий
@@ -2108,6 +2129,7 @@
       SYNC.base = Math.max(st.updated || 0, SYNC.base || 0);
       return true;
     } catch { return false; }
+    finally { if (killTimer) clearTimeout(killTimer); }
   }
 
   // Дельта-канал: GET /ui-state/delta?since=base отдаёт только изменённые чаты.
@@ -2137,7 +2159,7 @@
     // Теперь лок отпускается ПОСЛЕ успешного PUT (в finally), а во время
     // запроса флаг остаётся взведённым — заголовок владельца уходит вместе
     // с финальным снапшотом.
-    const wasOwner = genFlagGet() && !gen;
+    const wasOwner = (genFlagGet() || finalCommitOwner) && !gen;
     SYNC.busy = true;
     try {
       const localRev = await store().currentRev();
@@ -2155,7 +2177,8 @@
         body.messages = {};
         for (const s of sessions) body.messages[s.id] = loadMsgs(s.id).slice(-MAX_STORED);
       } else {
-        const d = await store().since(SYNC.base);
+        const sentRev = SYNC.pushedRev ?? await store().getPushedRev();
+        const d = await store().since(sentRev);
         // Явная защита от «чужого pending»: наблюдатель (у него нет genFlag)
         // не должен отправлять на сервер черновик pending-сообщения, которое
         // пишет другое устройство, — серверный merge по id схлопнул бы его с
@@ -2178,9 +2201,11 @@
           // часов от клиентских условие `server.updated <= SYNC.base` было
           // истинным, и опрос навсегда переставал тянуть свежие данные.
           // SYNC.base всегда должен оставаться СЕРВЕРНОЙ версией; пустую
-          // дельту всё равно фиксируем как сохранённую (markSessionsSaved
-          // ниже не дойдёт — выходим раньше, делаем это сами).
-          try { await store().markSessionsSaved(SYNC.base); } catch { /* ignore */ }
+          // дельту всё равно фиксируем как отправленную (маркер pushed_rev):
+          // выходим раньше, поэтому делаем это здесь.
+          SYNC.pushedRev = localRev;
+          try { await store().markPushed(localRev); } catch { /* ignore */ }
+          finalCommitOwner = false;    // отправлять нечего
           return;
         }
         // Чужие pending-черновики на сервер не отправляем (см. комментарий
@@ -2196,7 +2221,7 @@
         }
       }
       const headers = { 'Content-Type': 'application/json' };
-      if (genFlagGet()) headers['X-Client-Gen'] = '1';   // мы ведём генерацию — сервер не заморозит наш PUT
+      if (genFlagGet() || finalCommitOwner) headers['X-Client-Gen'] = '1';   // мы ведём/завершаем генерацию — сервер не заморозит наш PUT
       const r = await fetch('/ai/ui-state', {
         method: 'PUT',
         headers,
@@ -2212,6 +2237,7 @@
         await checkRemoteGen();
       } else if (r.ok) {
         const j = await r.json();
+        finalCommitOwner = false;      // сервер принял версию, включая финальный ответ
         // КРИТИЧНО: сервер на no-op-дельте (пустые messages/deleted_chats при
         // фоновом тике) НЕ двигает updated и отвечает {'updated': <текущий>}.
         // Присвоение SYNC.base = j.updated могло откатить базу НАЗАД, если наш
@@ -2225,9 +2251,12 @@
         // увидят эти сообщения («чат есть на ПК, пустой на телефоне»).
         const newBase = Math.max(j.updated || 0, SYNC.base || 0);
         if (j.conflicts && j.conflicts.length) await resolveConflicts(j.conflicts);
-        if (newBase !== SYNC.base) {
-          SYNC.base = newBase;
-          await store().markSessionsSaved(newBase);
+        if (newBase !== SYNC.base) SYNC.base = newBase;
+        // маркер отправки двигаем только если сервер принял всё без конфликтов:
+        // отклонённые позиции должны уйти повторно, а не потеряться
+        if (!(j.conflicts && j.conflicts.length)) {
+          SYNC.pushedRev = localRev;
+          await store().markPushed(localRev);
         }
       } else if (r.status === 413) {
         toast('Сервер отклонил синхронизацию: слишком много данных');
@@ -2239,7 +2268,8 @@
       SYNC.busy = false;
       // Финальный PUT завершённого ответа отправлен (или не удался) — только
       // теперь отпускаем лок генерации, чтобы другие устройства разморозились.
-      if (wasOwner) await releaseGenLock();
+      // лок снимаем только после того, как финальная версия принята сервером
+      if (wasOwner && !finalCommitOwner) await releaseGenLock(true);
     }
   }
 
@@ -2352,12 +2382,12 @@
                 body: JSON.stringify({ client: true, cid: CID }),
               });
             } catch { /* TTL на сервере снимет лок сам */ }
-          } else if (st.mine) {
-            // сервер считает задачу нашей, но живой генерации в этой вкладке
-            // нет (gen === null) — тоже осиротевший флаг после перезагрузки
-            genFlagSet(false);
-            await releaseGenLock();
           }
+          // st.active && st.mine: генерация ЖИВА на сервере и наша. Флаг и лок
+          // НЕ трогаем: раньше здесь их снимали при каждой перезагрузке во время
+          // ответа — локальное сообщение переставало считаться своим, уходило
+          // в tombstone и «терялось» («генерация потеряна»). resumePending сам
+          // подхватит поток через attach (mine=true, replay).
         }
       } catch { /* нет связи — решаем консервативно, флаг оставляем */ }
     }
@@ -2416,8 +2446,12 @@
     if (SYNC.busy) { toast('Синхронизация уже выполняется…'); return false; }
     if (genFlagGet()) { await scheduleSync(); return false; }  // своя генерация: свой же поток и так виден
     const prevBase = SYNC.base;
-    const ok = await pullState(true);
+    const ok = await pullState(true, { timeoutMs: 8000 });
     if (!ok) { toast('Не удалось обновить: нет связи с сервером'); return false; }
+    // Сообщение, которое пришло с сервера как pending (точки), разрешаем сразу:
+    // resumePending возьмёт готовый ответ с сервера или подключится к живой генерации.
+    // Не ждём его — спиннер уже можно убрать.
+    resumePending();
     if (SYNC.base > prevBase) { toast('Чаты обновлены'); return true; }
     toast('Обновлений нет'); return false;
   }
@@ -2429,31 +2463,37 @@
   // (scrollTop <= 0) и нет активной ГЕНЕРАЦИИ В ЭТОМ ЧАТЕ (иначе сдвинули бы
   // живой поток). Пороги: START_PX — после какого натяжения считаем жест
   // «обновлением»; TRIGGER_PX — при каком смещении отпускание запускает refresh.
-  function initPullToRefresh() {
+  // Общий жест «потянуть вниз, чтобы обновить» для любого прокручиваемого списка.
+  // box       — прокручиваемый контейнер (жест стартует только у его верха);
+  // ind       — индикатор с .pi-spin и .pi-text;
+  // shiftEl   — элемент, который сдвигается за пальцем (или null);
+  // canStart  — дополнительное условие старта (например, нет генерации в этом чате);
+  // onRefresh — что сделать при отпускании после порога; texts — подписи индикатора.
+  function bindPullToRefresh(opts) {
     if (!('ontouchstart' in window) && navigator.maxTouchPoints <= 0) return; // десктоп — не нужен
-    const box = els.messages, inner = els.inner, ind = els.pullIndicator;
-    if (!box || !inner || !ind) return;
+    const { box, ind, shiftEl = null, canStart = () => true, onRefresh, texts } = opts;
+    if (!box || !ind) return;
     const MAX_PX = 90, START_PX = 8, TRIGGER_PX = 56;
     let startY = null, pulling = false, dist = 0, refreshing = false;
 
     const setShift = (px) => {
-      inner.style.transform = px ? `translateY(${px}px)` : '';
+      if (shiftEl) shiftEl.style.transform = px ? `translateY(${px}px)` : '';
       ind.classList.toggle('visible', px > 4);
       const pct = Math.min(1, px / TRIGGER_PX);
       ind.querySelector('.pi-spin').style.transform = `rotate(${Math.round(pct * 360)}deg)`;
       ind.querySelector('.pi-text').textContent =
-        refreshing ? 'Обновляем…' : (px >= TRIGGER_PX ? 'Отпустите — обновим чаты' : 'Потяните вниз, чтобы обновить чаты');
+        refreshing ? 'Обновляем…' : (px >= TRIGGER_PX ? texts.ready : texts.idle);
     };
     const settle = () => {
-      inner.style.transition = 'transform .2s ease';
+      if (shiftEl) shiftEl.style.transition = 'transform .2s ease';
       setShift(refreshing ? 34 : 0);
-      if (!refreshing) setTimeout(() => { inner.style.transition = ''; }, 220);
+      if (!refreshing && shiftEl) setTimeout(() => { shiftEl.style.transition = ''; }, 220);
     };
 
     box.addEventListener('touchstart', (e) => {
       if (refreshing || e.touches.length !== 1) return;
       if (box.scrollTop > 0) return;                    // не в самом верху — обычный скролл
-      if (gen && gen.sessionId === currentId) return;   // активная генерация здесь — не мешаем
+      if (!canStart()) return;
       startY = e.touches[0].clientY; pulling = false; dist = 0;
     }, { passive: true });
 
@@ -2483,7 +2523,7 @@
         refreshing = true;
         ind.classList.add('refreshing');
         setShift(34);
-        try { await refreshFromServer(); } finally {
+        try { await onRefresh(); } finally {
           refreshing = false;
           ind.classList.remove('refreshing');
           settle();
@@ -2494,6 +2534,23 @@
     };
     box.addEventListener('touchend', endGesture, { passive: true });
     box.addEventListener('touchcancel', endGesture, { passive: true });
+  }
+
+  // Два списка: сообщения текущего чата (сдвигается весь блок) и список диалогов
+  // в боковой панели (индикатор над списком, сам список не сдвигается).
+  function initPullToRefresh() {
+    bindPullToRefresh({
+      box: els.messages, ind: els.pullIndicator, shiftEl: els.inner,
+      canStart: () => !(gen && gen.sessionId === currentId),   // активная генерация здесь — не мешаем
+      onRefresh: refreshFromServer,
+      texts: { idle: 'Потяните вниз, чтобы обновить чаты', ready: 'Отпустите — обновим чаты' },
+    });
+    bindPullToRefresh({
+      box: els.list, ind: els.sbPullIndicator, shiftEl: null,
+      canStart: () => true,
+      onRefresh: refreshFromServer,
+      texts: { idle: 'Потяните вниз, чтобы обновить список', ready: 'Отпустите — обновим список' },
+    });
   }
 
   function init() {

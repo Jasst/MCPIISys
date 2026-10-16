@@ -406,6 +406,20 @@
     return { rev, messages, deletedChats: fresh.map((d) => d.sid), sessionsChanged: (sessionsRev || 0) > base };
   }
 
+  // Маркер «отправлено на сервер» — ЛОКАЛЬНЫЙ rev (монотонный счётчик клиента),
+  // а не серверная версия updated. Раньше дельта выбиралась как rev > SYNC.base,
+  // т.е. локальные часы сравнивались с серверными: при отстающих часах устройства
+  // новые изменения получали rev < base и навсегда оставались неотправленными
+  // (первое сообщение уходит, следующие и финальный ответ — нет).
+  async function getPushedRev() {
+    if (idbBroken) return Number(lsGet('pushed_rev') || 0);
+    try { return (await tx('meta', 'readonly', (s) => s.get('pushed_rev'))) || 0; } catch { return 0; }
+  }
+  async function markPushed(rev) {
+    if (idbBroken) { lsSet('pushed_rev', String(rev)); return; }
+    try { await tx('meta', 'readwrite', (s) => s.put(rev, 'pushed_rev')); } catch { /* ignore */ }
+  }
+
   async function markSessionsSaved(rev) {
     if (idbBroken) { lsSet('sessions_rev', String(rev)); return; }
     try { await tx('meta', 'readwrite', (s) => s.put(rev, 'sessions_rev')); } catch { /* ignore */ }
@@ -493,7 +507,7 @@
   global.AiStore = {
     init, guardScope, getSessions, saveSessions, loadMessages, commitMessages, patchMessage,
     appendMessage, removeSession, deleteChatSilent, since, currentRev, applyDelta, migrateLegacy,
-    markSessionsSaved, recordDeletedChat, deletedRegistry, onEvent: (fn) => listeners.push(fn),
+    markSessionsSaved, getPushedRev, markPushed, recordDeletedChat, deletedRegistry, onEvent: (fn) => listeners.push(fn),
     get broken() { return idbBroken; },
   };
 })(window);
