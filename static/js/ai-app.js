@@ -1255,6 +1255,8 @@
     }
     if (u < 0) return;
     const prompt = msgs[u].text || 'Продолжи';
+    const userRef = msgs[u];
+    const userKey = userRef.id || null;   // ищем вопрос по id: индекс может сдвинуться за время ожидания
     // картинка вопроса: data URL режем до base64, ссылку медиатеки скачиваем обратно —
     // иначе «получить другой ответ» на вопрос с фото терял изображение
     let regenImg = null;
@@ -1276,17 +1278,38 @@
     }
     const goRegen = () => {
       if (gen) { toast('Дождитесь окончания ответа'); return; }   // не допускать второй параллельный стрим
-      msgs.splice(u + 1);
-      msgs.push(newBotMessage());
-      const nidx = msgs.length - 1;
+      // Массив сообщений мог смениться за время загрузки картинки и лока (полный pull
+      // пересоздаёт кеш): работаем с актуальным массивом и находим вопрос заново.
+      const cur = loadMsgs(id);
+      const uu = userKey
+        ? cur.findIndex((m) => m && m.id === userKey)
+        : cur.findIndex((m) => m === userRef);
+      if (uu < 0) { toast('Не удалось найти вопрос для повтора'); return; }
+      // старый ответ сохраняем: если новый не появится (409, ошибка, стоп без текста) — вернём его
+      const snapshot = cur.slice(uu + 1).map((m) => Object.assign({}, m));
+      cur.splice(uu + 1);
+      cur.push(newBotMessage());
+      const nidx = cur.length - 1;
+      const nid = cur[nidx].id;
       commit(id);
       scheduleSync(true);   // форс-пул начального состояния ДО genFlag в startGeneration
       renderMessages({ scroll: false });
       refreshUI();
       const body = { message: prompt, stream: true, web_search: chips.web, reasoning: chips.reason,
-                     gen_key: loadMsgs(id)[nidx].id };
+                     gen_key: nid };
       if (regenImg && regenImg.base64) { body.image_base64 = regenImg.base64; body.image_mime = regenImg.mime; }
-      startGeneration(id, nidx, 'send', body);
+      startGeneration(id, nidx, 'send', body).then(() => {
+        const now = loadMsgs(id);
+        const at = now.findIndex((m) => m && m.id === nid);
+        if (at < 0) return;
+        const b = now[at];
+        if (b.text) return;                     // ответ получен (или «пустой ответ») — оставляем новый
+        now.splice(at, 1, ...snapshot);         // нового ответа нет — возвращаем прежний
+        if (b.error) toast(b.error);
+        commit(id);
+        if (currentId === id) renderMessages({ scroll: false });
+        refreshUI();
+      });
     };
     // Как и send(), regenerate обязан занять серверный генерационный лок:
     // /gen-status читает _active_generations (ui_state.py), а не _active_stream
@@ -1303,7 +1326,7 @@
     const start = () => { if (started) return; started = true; goRegen(); };
     if (!currentScopeUid) { start(); return; }
     acquireGenLock().then((ok) => {
-      if (!ok) { toast('Дождитесь окончания ответа на другом устройстве'); updateHint(); return; }
+      if (!ok) { started = true; toast('Дождитесь окончания ответа на другом устройстве'); updateHint(); return; }
       start();
     });
     setTimeout(start, 1200);
