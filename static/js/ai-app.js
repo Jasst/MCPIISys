@@ -1105,6 +1105,24 @@
     if (!bot) { if (gen === g) gen = null; refreshUI(); return; }
     g.bot = bot;
     if (watch) pushNote(bot, '👁 Ответ печатается на другом устройстве');
+    // Потоковая синхронизация: владелец генерации регулярно (не чаще раза в
+    // STREAM_SYNC_MS) отправляет на сервер недописанный ответ. Без этого шага
+    // дельты во время genFlag блокировались и другие устройства видели ответ
+    // только после финального commit'а по окончании всей генерации.
+    // persistSoon -> persist -> scheduleSync ставит дебаунс-таймер на каждый
+    // чанк; этот интервал гарантирует, что пуш уходит ритмично, даже когда
+    // токены сыплются непрерывно (таймер иначе вечный перестановка не давала бы
+    // sync'у состояться до конца ответа).
+    let streamSyncTimer = null;
+    if (!watch) {
+      streamSyncTimer = setInterval(() => {
+        if (gen !== g || g.watch) return;
+        if (!genFlagGet()) return;               // генерация завершена — дальше обычный путь
+        if (SYNC.busy) return;                   // предыдущий PUT ещё в полёте
+        clearTimeout(SYNC.timer);                // не дублируем: один внеочередной пуш
+        pushState();
+      }, STREAM_SYNC_MS);
+    }
     try {
       const res = mode === 'attach'
         ? await fetch(API.attach + '?' + [watch ? 'watch=1' : '', 'key=' + encodeURIComponent(bot.id)].filter(Boolean).join('&'),
@@ -1163,6 +1181,9 @@
       else if (isNetworkError(err)) g.interrupted = true;
       else bot.error = err.message || String(err);
     } finally {
+      // потоковая синхронизация больше не нужна: интервал снимаем на любом
+      // выходе (успех, ошибка, остановка) — финальный commit делает commit(id)
+      if (streamSyncTimer) { clearInterval(streamSyncTimer); streamSyncTimer = null; }
       if (g.authLost) {
         // 401 в разгар генерации: иначе myGen-флаг залипнет и на следующем
         // логине блокировал pullState/scheduleSync до истечения TTL сервера.
@@ -2107,21 +2128,42 @@
     return kept.length ? kept : null;
   }
 
+  // Интервал потоковой синхронизации во время генерации: владелец periodically
+  // отправляет на сервер недописанный ответ (pending-чанки), чтобы соседние
+  // устройства видели печать в реальном времени, а не дожидались финального
+  // commit'а. 2000 мс — компромисс между плавностью «стрима» и нагрузкой.
+  const STREAM_SYNC_MS = 2000;
+
   function scheduleSync(force) {
     if (!SYNC.ready || !currentScopeUid) return;
-    // Пока это устройство ведёт генерацию, синхронизация не нужна: частичные
-    // дельты на каждый чанк стриминга только создавали бы конфликты и флуд
-    // запросами на сервер. НО первичное состояние (вопрос пользователя +
-    // pending-бот) обязано уйти на сервер ДО startGeneration: иначе второе
-    // устройство не увидит state-changed по SSE и не сможет подхватить поток
-    // через gen-status/attach. Для этого sendNow/regenerate вызывают
-    // scheduleSync(true) — ровно один форс-пул начального снапшота; таймер
-    // уже стоит, а pushState отправит заголовок X-Client-Gen: 1, который
-    // сервер принимает от владельца лока. Финальный commit после окончания
-    // ответа уходит обычным путём (без force).
-    if (genFlagGet() && !force) return;
+    // Потоковая синхронизация: пока это устройство ведёт генерацию, дельты с
+    // частичным текстом ответа УХОДЯТ НА СЕРВЕР регулярно (каждые STREAM_SYNC_MS,
+    // см. streamSyncTimer в startGeneration). Раньше при genFlag любой плановый
+    // sync блокировался и на сервер попадал только начальный снапшот (по force)
+    // да финальный commit после [DONE]: первое сообщение синхронизировалось
+    // сразу, а все последующие — лишь после полной генерации.
+    // Защита от «каши» при этом сохраняется:
+    //  - PUT владельца идёт с заголовком X-Client-Gen, сервер его принимает,
+    //    остальные устройства в это время получают 429 и ждут;
+    //  - наблюдатели не пишут в своё хранилище промежуточный текст (watch-ветка
+    //    в startGeneration), их собственные pending-черновики срезаются
+    //    stripForeignPending перед PUT;
+    //  - серверный merge идемпотентен по устойчивым id сообщений, повторная
+    //    доставка того же чанка не создаёт дублей.
+    // force — немедленный пул начального состояния (вопрос + pending-бот) ДО
+    // startGeneration: иначе второе устройство не увидит state-changed по SSE
+    // и не сможет подхватить поток через gen-status/attach.
+    if (force) {
+      clearTimeout(SYNC.timer);
+      SYNC.timer = setTimeout(pushState, 0);   // немедленный форс-пул начального снапшота
+      return;
+    }
+    // Во время генерации плановые sync'и идут чаще обычного дебаунса (1500 мс):
+    // persist() дергается каждые PERSIST_DELAY_MS, но таймер переставляется на
+    // каждый чанк, поэтому реально пуш уходит по нижнему лимиту — STREAM_SYNC_MS
+    // (см. streamSyncTimer в startGeneration). Вне генерации — обычный дебаунс.
     clearTimeout(SYNC.timer);
-    SYNC.timer = setTimeout(pushState, 1500);
+    SYNC.timer = setTimeout(pushState, genFlagGet() ? Math.min(1500, STREAM_SYNC_MS) : 1500);
   }
 
   // Слияние полного состояния (первый вход/409): серверные версии приоритетнее
