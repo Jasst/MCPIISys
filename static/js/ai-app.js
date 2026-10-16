@@ -921,6 +921,10 @@
         bot.text = ex.assistant;
         return true;
       }
+      // сервер знает причину (ответ не сохранился): показываем её сразу
+      if (ex && ex.failure && (!userText || ex.user === userText)) {
+        bot.error = 'Ответ не получен: ' + ex.failure;
+      }
       return false;
     } catch {
       return null;
@@ -973,6 +977,9 @@
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
 
       // attach replays the whole buffer from the start: start from a clean slate
+      // reasoning, уже сохранённый на этом устройстве/сервере, запоминаем: если буфер
+      // генерации уже не хранит поток, replay его не вернёт, а текст подтянется с сервера.
+      const keepReasoning = bot.reasoning || '';
       if (mode === 'attach') { watch ? resetBotWatch(bot) : resetBot(bot); }
 
       let none = false;
@@ -988,6 +995,8 @@
 
       if (!controller.signal.aborted) {
         if (none) {
+          // поток уже не реплеится: вернём reasoning, который был до сброса
+          if (!bot.reasoning && keepReasoning) bot.reasoning = keepReasoning;
           const userMsg = msgs[idx - 1] && msgs[idx - 1].role === 'user' ? msgs[idx - 1].text : null;
           if (watch) {
             // чужая генерация уже завершилась: готовый ответ забираем с сервера
@@ -998,7 +1007,7 @@
           } else if (!bot.text && !bot.error) {
             const ok = await recoverFromLast(bot, userMsg);
             if (ok === null) g.interrupted = true;
-            else if (!ok) bot.error = 'Ответ не найден на сервере (возможно, сервер перезапускался)';
+            else if (!ok && !bot.error) bot.error = 'Ответ не найден на сервере (возможно, сервер перезапускался во время генерации)';
           }
         } else if (!finished) {
           // Поток оборвался до [DONE]: ответ на сервере продолжается, его надо дождаться
@@ -1109,9 +1118,9 @@
             m.pending = false;
             await commit(id);
             if (currentId === id) renderMessages({ scroll: false });
-          } else if (Date.now() - (m.time || 0) > 180000) {
-            // сервер ответа не знает и сообщение висит давно — действительно потеряно
-            m.error = 'Ответ не получен: генерация потеряна';
+          } else if (m.error || Date.now() - (m.time || 0) > 180000) {
+            // сервер не знает ответа: причина уже в m.error (от сервера) либо сообщение висит давно
+            if (!m.error) m.error = 'Ответ не найден на сервере (возможно, сервер перезапускался во время генерации)';
             m.pending = false;
             await commit(id);
             if (currentId === id) renderMessages({ scroll: false });
@@ -1250,6 +1259,8 @@
     }
     if (u < 0) return;
     const prompt = msgs[u].text || 'Продолжи';
+    const userRef = msgs[u];
+    const userKey = userRef.id || null;   // ищем вопрос по id: индекс может сдвинуться за время ожидания
     // картинка вопроса: data URL режем до base64, ссылку медиатеки скачиваем обратно —
     // иначе «получить другой ответ» на вопрос с фото терял изображение
     let regenImg = null;
@@ -1271,17 +1282,38 @@
     }
     const goRegen = () => {
       if (gen) { toast('Дождитесь окончания ответа'); return; }   // не допускать второй параллельный стрим
-      msgs.splice(u + 1);
-      msgs.push(newBotMessage());
-      const nidx = msgs.length - 1;
+      // Массив сообщений мог смениться за время загрузки картинки и лока (полный pull
+      // пересоздаёт кеш): работаем с актуальным массивом и находим вопрос заново.
+      const cur = loadMsgs(id);
+      const uu = userKey
+        ? cur.findIndex((m) => m && m.id === userKey)
+        : cur.findIndex((m) => m === userRef);
+      if (uu < 0) { toast('Не удалось найти вопрос для повтора'); return; }
+      // старый ответ сохраняем: если новый не появится (409, ошибка, стоп без текста) — вернём его
+      const snapshot = cur.slice(uu + 1).map((m) => Object.assign({}, m));
+      cur.splice(uu + 1);
+      cur.push(newBotMessage());
+      const nidx = cur.length - 1;
+      const nid = cur[nidx].id;
       commit(id);
       scheduleSync(true);   // форс-пул начального состояния ДО genFlag в startGeneration
       renderMessages({ scroll: false });
       refreshUI();
       const body = { message: prompt, stream: true, web_search: chips.web, reasoning: chips.reason,
-                     gen_key: loadMsgs(id)[nidx].id };
+                     gen_key: nid };
       if (regenImg && regenImg.base64) { body.image_base64 = regenImg.base64; body.image_mime = regenImg.mime; }
-      startGeneration(id, nidx, 'send', body);
+      startGeneration(id, nidx, 'send', body).then(() => {
+        const now = loadMsgs(id);
+        const at = now.findIndex((m) => m && m.id === nid);
+        if (at < 0) return;
+        const b = now[at];
+        if (b.text) return;                     // ответ получен (или «пустой ответ») — оставляем новый
+        now.splice(at, 1, ...snapshot);         // нового ответа нет — возвращаем прежний
+        if (b.error) toast(b.error);
+        commit(id);
+        if (currentId === id) renderMessages({ scroll: false });
+        refreshUI();
+      });
     };
     // Как и send(), regenerate обязан занять серверный генерационный лок:
     // /gen-status читает _active_generations (ui_state.py), а не _active_stream
@@ -1298,7 +1330,7 @@
     const start = () => { if (started) return; started = true; goRegen(); };
     if (!currentScopeUid) { start(); return; }
     acquireGenLock().then((ok) => {
-      if (!ok) { toast('Дождитесь окончания ответа на другом устройстве'); updateHint(); return; }
+      if (!ok) { started = true; toast('Дождитесь окончания ответа на другом устройстве'); updateHint(); return; }
       start();
     });
     setTimeout(start, 1200);
@@ -1991,7 +2023,10 @@
       if (!item || typeof item !== 'object') return;
       const k = msgKey(item);
       if (k && keyToIdx.has(k)) {
-        Object.assign(result[keyToIdx.get(k)], item);   // тот же объект — патч полями
+        // тот же объект — патч полями; пустой reasoning с сервера не затирает уже известный
+        const dst = result[keyToIdx.get(k)];
+        const keepR = dst.reasoning && !item.reasoning ? { reasoning: dst.reasoning } : null;
+        Object.assign(dst, item, keepR || {});
         return;
       }
       let j = Math.min(pos, result.length);
