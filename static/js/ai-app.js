@@ -208,11 +208,38 @@
   // при расхождении версий берём более свежий снимок.
   const lastSeen = {};        // id -> массив
   const lastSeenAt = {};      // id -> время чтения снимка
+  // Источник сообщений чата — IndexedDB. localStorage-зеркало больше не читается
+  // (оно неполное и устаревает). Чат считается загруженным (hydrated) только после
+  // чтения из хранилища; пока не загружен, в хранилище ничего не пишем — иначе
+  // пустой кеш стёр бы историю.
+  const hydrated = new Set();
+  const hydrating = new Map();
+  function hydrateChat(id) {
+    if (hydrated.has(id)) return Promise.resolve();
+    if (!hydrating.has(id)) {
+      hydrating.set(id, (async () => {
+        try {
+          const arr = await store().loadMessages(id);
+          const disk = dedupeByKeys(arr.map((x) => x.m).filter(Boolean));
+          const mem = cache[id] || [];          // то, что успели записать до загрузки
+          cache[id] = disk.length ? mergeMsgLists(disk, mem).slice(-MAX_STORED) : mem;
+          lastSeen[id] = cache[id];
+          hydrated.add(id);
+          if (currentId === id) renderMessages({ scroll: false });
+        } catch (e) {
+          console.warn('hydrateChat:', e);      // не помечаем загруженным: запись в этот чат пропустим
+        } finally {
+          hydrating.delete(id);
+        }
+      })());
+    }
+    return hydrating.get(id);
+  }
   function loadMsgs(id) {
     if (!(id in cache)) {
-      const v = readJSON(LS_MSGS + id, []);
-      cache[id] = Array.isArray(v) ? v : [];
+      cache[id] = [];
       lastSeenAt[id] = 0;
+      hydrateChat(id);
     }
     // dedupeByKeys — единый механизм против дублей при повторном открытии чата.
     // История может прийти из двух источников (IndexedDB и localStorage-зеркало),
@@ -291,10 +318,13 @@
       const arr = await store().loadMessages(id);
       const msgs = dedupeByKeys(arr.map((x) => x.m).filter(Boolean));
       if (msgs.length >= (cache[id] || []).length) { cache[id] = msgs.slice(-MAX_STORED); lastSeen[id] = cache[id]; }
+      hydrated.add(id);
     } catch { /* оставляем прежний кеш */ }
   }
 
   async function persist(id) {
+    if (!hydrated.has(id)) await hydrateChat(id);
+    if (!hydrated.has(id)) return;          // история не прочитана — не перезаписываем её
     const msgs = loadMsgs(id);
     let ok = true;
     try { await store().commitMessages(id, msgs.slice(-MAX_STORED), null); }
@@ -328,6 +358,7 @@
     sessions.unshift({ id, name, created: now, updated: now });
     cache[id] = [];
     lastSeen[id] = cache[id];
+    hydrated.add(id);                       // новый чат: на диске ничего нет
     saveSessions();
     persist(id);
     return id;
@@ -1223,6 +1254,7 @@
       web_search: chips.web,
       reasoning: chips.reason,
       gen_key: msgs[idx].id,
+      chat_id: id, user_msg_id: userMsg.id || null,
     };
     if (img) { body.image_base64 = img.base64; body.image_mime = img.mime; }
 
@@ -1300,7 +1332,7 @@
       renderMessages({ scroll: false });
       refreshUI();
       const body = { message: prompt, stream: true, web_search: chips.web, reasoning: chips.reason,
-                     gen_key: nid };
+                     gen_key: nid, chat_id: id, user_msg_id: userKey };
       if (regenImg && regenImg.base64) { body.image_base64 = regenImg.base64; body.image_mime = regenImg.mime; }
       startGeneration(id, nidx, 'send', body).then(() => {
         const now = loadMsgs(id);
@@ -1960,7 +1992,7 @@
     for (const s of sessions) if (!byId.has(s.id) && !dels.has(s.id)) byId.set(s.id, s);
     sessions = [...byId.values()];
     for (const id of dels) {
-      delete cache[id]; delete lastSeen[id];
+      delete cache[id]; delete lastSeen[id]; hydrated.delete(id);
       // удаление чата, удалённого на другом устройстве: tombstone НЕ пишется
       // (иначе этот id удалил бы чат при возврате к прежнему аккаунту —
       // scope-реестр глобален в рамках одной вкладки хранилища)
@@ -1989,8 +2021,8 @@
     // фоновый merge, изменивший открытый диалог, гарантированно попал на
     // экран — иначе пользователь видел «ничего не изменилось». Остальной
     // cache при quiet не трогаем: перерисовка всё равно только для currentId.
-    if (!opts.quiet) cache = {};
-    else if (currentId) delete cache[currentId];
+    if (!opts.quiet) { cache = {}; hydrated.clear(); }
+    else if (currentId) { delete cache[currentId]; hydrated.delete(currentId); }
     await reloadDirtySafe();
     if (currentId) renderMessages({ scroll: false });
     refreshUI();
@@ -2011,6 +2043,15 @@
 
   // Клиентская партия серверного _merge_msgs: совпадения по ключу схлопаются,
   // новые сообщения вставляются в свою позицию, порядок сохраняется.
+  // Общее правило слияния одного сообщения (зеркало _merge_msg_fields на сервере):
+  // пустые text/reasoning не затирают известные; pending:false не возвращается в pending.
+  function mergeMsgFields(dst, item) {
+    const out = Object.assign({}, item);
+    if (dst.text && !item.text) out.text = dst.text;
+    if (dst.reasoning && !item.reasoning) out.reasoning = dst.reasoning;
+    if (dst.pending === false && item.pending) out.pending = false;
+    return out;
+  }
   function mergeMsgLists(base, incoming) {
     const result = base.map((m) => (m && typeof m === 'object' ? Object.assign({}, m) : m)).filter(Boolean);
     const keyToIdx = new Map();
@@ -2023,10 +2064,9 @@
       if (!item || typeof item !== 'object') return;
       const k = msgKey(item);
       if (k && keyToIdx.has(k)) {
-        // тот же объект — патч полями; пустой reasoning с сервера не затирает уже известный
+        // тот же объект — патч полями по общему правилу (см. mergeMsgFields)
         const dst = result[keyToIdx.get(k)];
-        const keepR = dst.reasoning && !item.reasoning ? { reasoning: dst.reasoning } : null;
-        Object.assign(dst, item, keepR || {});
+        Object.assign(dst, mergeMsgFields(dst, item));
         return;
       }
       let j = Math.min(pos, result.length);
@@ -2428,6 +2468,9 @@
     }
 
     try { sessions = await store().getSessions(); } catch { sessions = []; }
+    // открытый чат читаем из IndexedDB до первой отрисовки (а не из localStorage-зеркала)
+    const firstChat = sessions.slice().sort((a, b) => (b.updated || b.created) - (a.updated || a.created))[0];
+    if (firstChat) await hydrateChat(firstChat.id);
     SYNC.ready = await pullState();
     init();
     startRemotePoll();

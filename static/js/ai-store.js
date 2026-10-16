@@ -271,7 +271,9 @@
       }
     }
     for (const i of removedIndexes(prev.length, msgs.length, removedFrom)) {
-      changed.push({ idx: i, ver: (prev[i] ? prev[i].v : 0) + 1, m: null, rev });
+      // gid — id удаляемого сообщения: сервер удаляет по нему, а не по позиции
+      changed.push({ idx: i, ver: (prev[i] ? prev[i].v : 0) + 1, m: null, rev,
+                     gid: prev[i] && prev[i].m ? prev[i].m.id : undefined });
     }
     if (!idbBroken && db) {
       try {
@@ -279,7 +281,7 @@
           const t = db.transaction(['messages', 'meta'], 'readwrite');
           const s = t.objectStore('messages');
           for (const c of changed) {
-            s.put({ sid, idx: c.idx, ver: c.ver, m: c.m, rev: c.rev });
+            s.put({ sid, idx: c.idx, ver: c.ver, m: c.m, rev: c.rev, gid: c.gid });
             const lo = IDBKeyRange.bound(keyOf(sid, c.idx, 0), keyOf(sid, c.idx, c.ver));
             const req = s.getAll(lo);
             req.onsuccess = () => {
@@ -398,7 +400,9 @@
       // первое же редактирование/патч поднимал ver выше длины истории и сервер
       // либо отбрасывал запись (i < 1 / не int), либо возвращал conflict;
       // message:null без корректной позиции вообще не удалял сообщение.
-      (messages[r.sid] = messages[r.sid] || []).push({ i: r.idx + 1, m: r.m });
+      const item = { i: r.idx + 1, m: r.m };
+      if (r.m === null && r.gid) item.id = r.gid;     // tombstone по id, позиция — справочная
+      (messages[r.sid] = messages[r.sid] || []).push(item);
     }
     const sessionsRev = await tx('meta', 'readonly', (s) => s.get('sessions_rev'));
     const deletedChats = await tx('meta', 'readonly', (s) => s.get('deleted_chats')) || [];
