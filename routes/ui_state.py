@@ -247,14 +247,19 @@ def _msg_key(m) -> str | None:
     role+text(+time если есть): два устройства, создавшие одинаковый объект,
     дают одинаковый ключ и тоже схлопываются. Ключ обязателен и для сообщений
     без времени — иначе пересланный повторно полный снимок удваивал историю
-    («чат копируется сам себя» после каждого sync)."""
+    («чат копируется сам себя» после каждого sync).
+
+    ВАЖНО: текст берётся ПОЛНОСТЬЮ, а не первыми 80 символами. Раньше усечение
+    склеивало разные длинные ответы ассистента, начинающиеся с одной фразы:
+    устройство B получало на их месте чужой текст («сообщение сгенерировано на
+    одном устройстве — отсутствует/испорчено на другом»)."""
     if not isinstance(m, dict):
         return None
     mid = m.get('id')
     if isinstance(mid, str) and mid:
         return f'id:{mid}'
     t = m.get('time')
-    txt = (m.get('text') or '')[:80]
+    txt = m.get('text') or ''
     if isinstance(t, (int, float)):
         return f'ct:{m.get("role", "")}|{int(t)}|{txt}'
     return f'cx:{m.get("role", "")}|{txt}'
@@ -308,49 +313,62 @@ def _merge_msgs(base: list, incoming: list) -> list:
     result = deduped
 
     key_to_idx: dict[str, int] = {}
-    used_keys: set[str] = set()
     for i, msg in enumerate(result):
         k = _msg_key(msg)
         if k and k not in key_to_idx:
             key_to_idx[k] = i
-            used_keys.add(k)
 
-    # ключи серверной истории: повторная вставка сообщения с уже известным
-    # ключом (пересланный полный снимок, дошедшая позже дельта того же PUT) —
-    # идемпотентна: схлопываем в существующее, а не плодим вторую копию.
-    # Раньше при отсутствии ключа у base-сообщений каждое такое сообщение
-    # вставлялось заново и история удваивалась («чат копируется сам себя»).
-    seen_keys = set(key_to_idx)
+    # Ключи серверной истории: повторная доставка сообщения с уже известным
+    # ключом (тот же снимок, дошедшая позже дельта того же PUT) идемпотентна —
+    # схлопываем в существующее, а не плодим вторую копию. Раньше здесь стоял
+    # «used_keys»: ключ, однажды использованный при вставке, больше не считался
+    # серверным, и одно и то же сообщение из incoming вставлялось повторно;
+    # кроме того, патч известного сообщения вставлялся НОВЫМ объектом вместо
+    # слияния полей — устаревший пустой черновик клиента ложился рядом с
+    # финальным ответом, и на втором устройстве чат выглядел «пустым» или
+    # перекошенным. Теперь любое совпадение ключа — это всегда патч на месте.
     for pos, item in enumerate(incoming):
         if not isinstance(item, dict):
             continue
         key = _msg_key(item)
-        if key and key in seen_keys and key not in used_keys:
-            cur = result[key_to_idx[key]]
-            if isinstance(cur, dict):
-                cur.update(_merge_msg_fields(cur, item))
-            continue
         if key and key in key_to_idx:
             cur = result[key_to_idx[key]]
             if isinstance(cur, dict):
-                cur.update(_merge_msg_fields(cur, item))
+                merged = _merge_msg_fields(cur, item)
+                if merged is not cur:
+                    result[key_to_idx[key]] = cur = merged
             continue
         j = min(pos, len(result))
-        while j < len(result):
-            ek = _msg_key(result[j])
-            if (not key and not ek) or (key and ek and key != ek and ek not in used_keys):
-                break
-            j += 1
+        if key:
+            # Новое сообщение с устойчивым ключом из снимка: позиция pos — это
+            # индекс в ПРИСЛАННОМ списке, а не в слитой истории (base может быть
+            # длиннее/короче). Вставляем строго перед первым сообщением, которое
+            # в присланном списке идёт после него и уже известно серверу, — так
+            # порядок вопросов/ответов сохраняется даже при «кривых» позициях.
+            # Раньше поиск останавливался на ЛЮБОМ известном сообщении, и новый
+            # ответ ассистента вставлялся ПЕРЕД своим вопросом пользователя —
+            # на втором устройстве история приезжала перекошенной («путаются
+            # сообщения», патч уходит не в тот объект).
+            known_here = set(key_to_idx)
+            j = len(result)
+            for q in range(pos + 1, len(incoming)):
+                nk = _msg_key(incoming[q]) if isinstance(incoming[q], dict) else None
+                if nk and nk in known_here:
+                    j = next((p for p, x in enumerate(result) if _msg_key(x) == nk), len(result))
+                    break
+        else:
+            while j < len(result):
+                ek = _msg_key(result[j])
+                if not ek:
+                    break
+                j += 1
         result.insert(j, dict(item))
         if key:
             key_to_idx[key] = j
-            used_keys.add(key)
         for p in range(j + 1, len(result)):
             pk = _msg_key(result[p])
             if pk:
                 key_to_idx[pk] = p
-                if not key or pk != key:
-                    used_keys.add(pk)
     return result[-MAX_MSGS_PER_CHAT:]
 
 
@@ -531,8 +549,21 @@ def _apply_delta(current: dict, delta: dict) -> tuple[dict, list]:
                     changed = True
                 continue
             key = _msg_key(m)
-            at = next((p for p, x in enumerate(hist) if x is not None and _msg_key(x) == key),
-                      None) if key else None
+            # Совпадение ищем сначала по ТОЧНОЙ позиции (i-1), как это делает
+            # клиентский applyServerDelta (next[pos] = m). Раньше поиск шёл по
+            # всему списку: legacy-сообщения без id (старые чаты, снимки других
+            # клиентов) с тем же role+text считались «тем же объектом», патч
+            # применялся к первому дублю, а на втором устройстве правка
+            # не появлялась вовсе («сообщение есть на одном устройстве, нет на
+            # другом»). Теперь идентичный текст на другой позиции — это другое
+            # сообщение, оно уходит вставку/патч строго по своей позиции.
+            at = None
+            if key and 1 <= i <= len(hist) and hist[i - 1] is not None \
+                    and _msg_key(hist[i - 1]) == key:
+                at = i - 1
+            elif key:
+                at = next((p for p, x in enumerate(hist) if x is not None and _msg_key(x) == key),
+                          None)
             if at is not None:                              # тот же объект — патч поверх
                 # Позицию уже известного сообщения НЕ меняем: i в дельте — позиция в
                 # массиве клиента, она может расходиться с серверной (усечение до
