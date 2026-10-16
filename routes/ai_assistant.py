@@ -5,6 +5,7 @@
 ИСПРАВЛЕНИЕ: для работы с памятью используется единый сервисный слой MemoryService,
 что устраняет дублирование логики с MCP-сервером.
 """
+import base64
 import sys
 import uuid
 from pathlib import Path
@@ -74,7 +75,7 @@ def _split_reasoning(text: str) -> Tuple[str, str]:
 from collections import OrderedDict, defaultdict
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 from GCN.mcp_client_manager import MCPToolManager
 
@@ -347,6 +348,14 @@ class CognitiveController:
         # Текущая фоновая генерация ответа (см. stream_response) — не привязана
         # к конкретному HTTP-соединению, живёт пока не допишется целиком.
         self._active_stream: Optional[Dict] = None
+        # Завершённые потоки, ещё доступные для attach-реплея (gen_id -> state).
+        # _finish_generation помечает state["done"]=True и выставляет его сюда на
+        # ATTACH_REPLAY_TTL_S перед тем как отцепить от _active_stream: подписчик
+        # /chat/attach?watch=1 успевает добрать хвост финального ответа, не дожидаясь
+        # PUT владельца через синхронизацию. Хранится только ссылка на тот же dict —
+        # буфер не копируется; новые чанки после done не пишутся (push сверяется с
+        # _active_stream), так что состояние здесь неизменно и потокобезопасно.
+        self._finished_streams: "OrderedDict[str, Dict]" = OrderedDict()
         # Лок на мутации _active_stream state (subscribers/done/buffer):
         # гарантирует атомарность «подписаться → снять снимок буфера» и
         # «пометить done → разослать None → очистить subscribers».
@@ -2575,7 +2584,8 @@ class CognitiveController:
 
     async def stream_response(self, message: str, web_search: bool = False,
                               image_base64: str = None, image_mime: str = None,
-                              reasoning: bool = False, char_by_char: bool = None):
+                              reasoning: bool = False, char_by_char: bool = None,
+                              gen_key: Optional[str] = None):
         """
         Тонкая обёртка над StreamingResponse. Реальная генерация выполняется в
         self._stream_response_worker, запущенном как отдельная asyncio.Task
@@ -2600,7 +2610,8 @@ class CognitiveController:
         state = self._active_stream
         if state is None or state.get("done"):
             gen_id = f"{self.user_id}:{time.time_ns()}"
-            state = {"gen_id": gen_id, "buffer": [], "subscribers": set(), "done": False}
+            state = {"gen_id": gen_id, "buffer": [], "subscribers": set(), "done": False,
+                     "key": gen_key}
             self._active_stream = state
             push = self._make_push(gen_id)
             task = self._spawn_background_task(
@@ -2613,8 +2624,12 @@ class CognitiveController:
             )
             state["task"] = task
         else:
-            gen_id = state["gen_id"]
-            logger.info(f"stream_response: подключаюсь к уже идущей генерации {gen_id} вместо новой")
+            # Раньше здесь новый запрос подключался к ЧУЖОЙ идущей генерации и получал её
+            # ответ. Теперь честно отказываем: клиент покажет «ответ уже пишется».
+            logger.info(f"stream_response: генерация {state['gen_id']} уже идёт, отказ")
+            yield f"data: {json.dumps({'error': 'generation_busy'})}\n\n"
+            yield "data: [DONE]\n\n"
+            return
 
         queue: asyncio.Queue = asyncio.Queue()
         # ИСПРАВЛЕНИЕ race condition:
@@ -2685,6 +2700,11 @@ class CognitiveController:
         подписчик из stream_response, который добавился к subscribers под тем же
         локом, либо застанет done=True сразу при снятии снимка буфера,
         либо получит None от _finish_generation, но никак не оба раза.
+
+        Завершённый state НЕ исчезает мгновенно: он выставляется в
+        _finished_streams на ATTACH_REPLAY_TTL_S (см. attach_to_active_stream),
+        чтобы запоздавший наблюдатель (watch=1) мог replay-нуть финальный ответ
+        из буфера, не дожидаясь PUT владельца через синхронизацию.
         """
         state = self._active_stream
         if state is None or state.get("gen_id") != gen_id:
@@ -2697,6 +2717,17 @@ class CognitiveController:
                 await q.put(None)
             state["subscribers"].clear()
         if self._active_stream is state:
+            # держим ссылку на неизменный done-state для TTL-реплея; чистим
+            # просроченные записи и ограничиваем размер (защита от разрастания)
+            now = time.time()
+            state["_finished_at"] = now
+            fin = self._finished_streams
+            fin[gen_id] = state
+            fin.move_to_end(gen_id)
+            while fin and next(iter(fin.values())).get("_finished_at", now) < now - ATTACH_REPLAY_TTL_S:
+                fin.popitem(last=False)
+            while len(fin) > _FINISHED_STREAMS_MAX:
+                fin.popitem(last=False)
             self._active_stream = None
 
     async def _stream_response_worker(self, gen_id: str, push, message: str, web_search: bool = False,
@@ -2726,6 +2757,18 @@ class CognitiveController:
         и всегда дописывает историю/память до конца.
         """
         timer = StageTimer(f"gen={gen_id[:8]}")
+        # Ранний ack В САМОМ НАЧАЛЕ воркера (до пайплайна памяти, реестра MCP и
+        # подготовки сообщений): клиент получает первое событие потока мгновенно,
+        # как только фоновая задача стартовала. Без этого первые секунды запроса
+        # (классификация намерений, регистрация инструментов, сборка контекста)
+        # в SSE не приходило НИЧЕГО, и интерфейс выглядел «подвешенным»: кнопка
+        # не реагировала, индикатор «печатает» не загорался, хотя генерация уже
+        # шла. Клиент по событию status подтверждает отправку и включает
+        # индикацию; старые клиенты событие просто игнорируют.
+        try:
+            await push(f"data: {json.dumps({'status': 'accepted'})}\n\n")
+        except Exception:  # noqa: BLE001 — ack best-effort, на генерацию не влияет
+            pass
         try:
             self.gate.begin_user_turn()  # пользователь важнее фона; отменяет отложенные проверки
             # Подтягиваем изменения, сделанные другими процессами (например, MCP)
@@ -2743,6 +2786,12 @@ class CognitiveController:
                 return
 
             await self._ensure_external_tools_registered()
+
+            # Если пользователь приложил фото, а модель его не «видит» — честно
+            # предупреждаем в потоке: иначе молчаливый текстовый ответ на вопрос
+            # про картинку выглядит как галлюцинация.
+            if image_base64 and not LM_STUDIO_VISION_SUPPORTED:
+                await push(f"data: {json.dumps({'warning': 'Текущая модель не поддерживает анализ изображений — фото не будет учтено в ответе'})}\n\n")
 
             # Классификация (без LLM) ДО подготовки сообщений: на быстром маршруте
             # пропускаем LLM-реранк памяти. force_slow считаем так же, как это делает
@@ -2885,6 +2934,29 @@ class CognitiveController:
                                         f"generate_image: не удалось распарсить результат инструмента как JSON: {result[:200]!r}"
                                     )
                             logger.info(f"generate_image result: {result}")
+                            # image_utils может вернуть data URL вместо ссылки на файл —
+                            # сохраняем в медиатеку и отдаём фронтенду короткий URL,
+                            # иначе гигантский base64 уходит в SSE и оседает в истории.
+                            if isinstance(result, dict) and isinstance(result.get("image_url"), str) \
+                                    and result["image_url"].startswith("data:image/"):
+                                try:
+                                    import hashlib as _hl
+                                    _head, _, _b64 = result["image_url"].partition(",")
+                                    _mime = _head.split(":")[1].split(";")[0]
+                                    _raw = base64.b64decode(_b64)
+                                    _ext = {"image/png": ".png", "image/jpeg": ".jpg",
+                                            "image/webp": ".webp"}.get(_mime, ".png")
+                                    _h = _hl.sha256(_raw).hexdigest()
+                                    _mdir = Path(__file__).resolve().parent.parent / "ui_media"
+                                    _mdir.mkdir(parents=True, exist_ok=True)
+                                    _mpath = _mdir / (_h + _ext)
+                                    if not _mpath.exists():
+                                        _mpath.write_bytes(_raw)
+                                    result["image_url"] = f"/ai/ui-media/{_h}{_ext}"
+                                    logger.info(f"generate_image: data URL сохранён в медиатеку ({len(_raw)} байт)")
+                                except Exception as e:
+                                    logger.warning(f"generate_image: не удалось сохранить data URL: {e}")
+                                    result.pop("image_url", None)
                             if isinstance(result, dict) and result.get("image_url"):
                                 image_url = result["image_url"]
                                 logger.info(f"Sending image_url event: {image_url}")
@@ -3235,6 +3307,12 @@ async def get_assistant(user_id: str):
 # =====================================================================
 router = APIRouter(prefix='/ai', tags=['ai'])
 
+# TTL-окно, в котором завершённая генерация остаётся доступной для
+# /chat/attach?watch=1 (replay финального буфера вместо ожидания PUT-владельца
+# через синхронизацию), и ограничение на число хранимых done-state'ов.
+ATTACH_REPLAY_TTL_S = 60.0
+_FINISHED_STREAMS_MAX = 8
+
 class AIRequest(BaseModel):
     message: str = Field(..., min_length=MIN_MESSAGE_LENGTH, max_length=MAX_MESSAGE_LENGTH)
     stream: bool = True
@@ -3247,6 +3325,8 @@ class AIRequest(BaseModel):
     # Раньше поля не было в модели — FastAPI/pydantic отбрасывали его молча,
     # и ссылка оставалась только в тексте сообщения на усмотрение LLM.
     url_to_fetch: Optional[str] = Field(None, max_length=2000)
+    # id сообщения-ответа на клиенте: поток привязан к нему, чужой не подхватывается
+    gen_key: Optional[str] = Field(None, max_length=200)
 
 class ResearchRequest(BaseModel):
     goal: str = Field(..., min_length=1, max_length=2000)
@@ -3266,6 +3346,11 @@ async def chat_with_ai(body: AIRequest, address: str = Depends(require_auth)):
         body.message = f"{body.message}\n{body.url_to_fetch}".strip()
     assistant = await get_assistant(address)
     if body.stream:
+        busy = assistant._active_stream
+        if busy is not None and not busy.get("done"):
+            # Другая генерация уже идёт (другое устройство, другой чат): раньше новый
+            # запрос молча подключался к её потоку и получал ЧУЖОЙ ответ.
+            return JSONResponse({"detail": "generation_busy"}, status_code=409)
         return StreamingResponse(
             assistant.stream_response(
                 message=body.message,
@@ -3273,7 +3358,8 @@ async def chat_with_ai(body: AIRequest, address: str = Depends(require_auth)):
                 image_base64=body.image_base64,
                 image_mime=body.image_mime,
                 reasoning=body.reasoning,
-                char_by_char=body.char_by_char
+                char_by_char=body.char_by_char,
+                gen_key=body.gen_key
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache,no-store,must-revalidate", "X-Accel-Buffering": "no"}
@@ -3288,7 +3374,8 @@ async def chat_with_ai(body: AIRequest, address: str = Depends(require_auth)):
     return {"reply": response, "meta": meta}
 
 @router.get("/chat/attach")
-async def attach_to_active_stream(address: str = Depends(require_auth)):
+async def attach_to_active_stream(watch: bool = False, key: Optional[str] = None,
+                                  address: str = Depends(require_auth)):
     """
     Подключение к УЖЕ ИДУЩЕЙ генерации (см. CognitiveController._active_stream):
     сначала реплеит накопленный буфер с самого начала, затем live-хвост до
@@ -3297,14 +3384,115 @@ async def attach_to_active_stream(address: str = Depends(require_auth)):
     LLM ещё печатала. Если генерации нет/она закончилась — отдаёт
     no_active_generation, и клиент забирает готовый ответ через
     /ai/chat/last_response (attach-буфер после завершения уничтожается).
+
+    watch=True — «наблюдатель»: другое устройство того же аккаунта подключается
+    к живой генерации только чтобы СМОТРЕТЬ печать в реальном времени. Оно не
+    пишет финальный ответ в своё состояние (это делает владелец генерационного
+    лока; его PUT придёт последним и победит), поэтому параллельные подписчики
+    безопасны и не создают «кашу». Буфер при этом НЕ уничтожается по завершении
+    сразу: он держится ATTACH_REPLAY_TTL_S, чтобы наблюдатель, отставший на
+    время, успел добрать хвост.
     """
     assistant = await get_assistant(address)
-    state = assistant._active_stream
+
+    def _fresh_finished():
+        """Самый свежий завершённый поток в TTL-окне (или None). Записи старше
+        ATTACH_REPLAY_TTL_S выбрасываются — иначе словарь рос бы до конца жизни
+        ассистента."""
+        now = time.time()
+        fin = assistant._finished_streams
+        while fin and next(iter(fin.values())).get("_finished_at", now) < now - ATTACH_REPLAY_TTL_S:
+            fin.popitem(last=False)
+        if not fin:
+            return None
+        st = next(reversed(fin.values()))
+        return st if (st.get("done") and _ours(st)) else None
+
+    def _ours(st):
+        # подключаемся только к потоку этого сообщения; без key — как раньше
+        return st is not None and (not key or not st.get("key") or st.get("key") == key)
+
+    state = assistant._active_stream if _ours(assistant._active_stream) else None
+    # ВАЖНО: отсутствие _active_stream проверяем ВНУТРИ SSE-генератора, а не
+    # здесь. Между POST /gen-lock (пишет _active_generations в ui_state.py) и
+    # моментом, когда владелец дойдёт до stream_response (создаёт _active_stream
+    # здесь), есть окно: /gen-status уже говорит active:true/may_watch:true, а
+    # attach при синхронной проверке ответил бы no_active_generation — наблюдатель
+    # ушёл бы в g.interrupted и ждал scheduleResume(5000). Теперь watch-подписчик
+    # держит SSE открытым (keep-alive раз в 2 с) до ATTACH_START_WAIT_S и
+    # подхватывает буфер, как только генерация стартует; если так и не стартовала —
+    # честно отвечаем no_active_generation, и клиент заберёт финал через
+    # синхронизацию (как раньше). Для владельца (без watch) поведение прежнее.
+    # синхронной проверки достаточно только для решения «есть ли живой поток
+    # прямо сейчас»; для watch-подписчика отсутствие потока — не приговор,
+    # он может появиться с минуты на минуту (см. _wait_start выше)
     if not state or state.get("done"):
+        ATTACH_START_WAIT_S = 8.0
+        ATTACH_POLL_S = 0.25
+        if watch:
+            async def _wait_start():
+                waited = 0.0
+                while True:
+                    st = assistant._active_stream if _ours(assistant._active_stream) else None
+                    was_done = bool(st is not None and st.get("done"))
+                    if was_done:
+                        # активный state уже done — он сейчас и так в TTL-реестре
+                        st = None
+                    if st is None:
+                        # ВАЖНО: ловим и уже завершённый поток (done=True): в TTL-окне
+                        # после ответа его буфер — самый быстрый способ показать
+                        # наблюдателю финал, чем ждать PUT-владельца/SSE state-changed.
+                        # Для владельца без watch поведение прежнее (no_active_generation
+                        # -> recoverFromLast/last_response).
+                        st = _fresh_finished()
+                        was_done = st is not None
+                    if st is not None:
+                        queue: asyncio.Queue = asyncio.Queue()
+                        async with assistant._stream_state_lock:
+                            # снимок буфера и подписка — атомарно под тем же локом,
+                            # что использует stream_response: чанк, отправленный
+                            # между этими точками, попадёт ровно один раз
+                            snapshot = list(st["buffer"])
+                            if not was_done:
+                                st["subscribers"].add(queue)
+                            was_done = was_done or bool(st.get("done"))
+                        try:
+                            for chunk in snapshot:
+                                yield chunk
+                            if was_done:
+                                yield "data: [DONE]\n\n"
+                                return
+                            while True:
+                                try:
+                                    chunk = await asyncio.wait_for(queue.get(), timeout=2.0)
+                                except asyncio.TimeoutError:
+                                    yield ": keep-alive\n\n"
+                                    continue
+                                if chunk is None:
+                                    break
+                                yield chunk
+                            yield "data: [DONE]\n\n"
+                        finally:
+                            st["subscribers"].discard(queue)
+                        return
+                    if waited >= ATTACH_START_WAIT_S:
+                        break
+                    await asyncio.sleep(ATTACH_POLL_S)
+                    waited += ATTACH_POLL_S
+                    yield ": keep-alive\n\n"
+                yield "data: " + json.dumps({"no_active_generation": True}) + "\n\n"
+            return StreamingResponse(_wait_start(), media_type="text/event-stream",
+                                     headers={"Cache-Control": "no-cache,no-store,must-revalidate",
+                                              "X-Accel-Buffering": "no"})
         async def _none():
             yield "data: " + json.dumps({"no_active_generation": True}) + "\n\n"
         return StreamingResponse(_none(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    if watch:
+        # только просмотр: не даём наблюдателю случайно перезапустить генерацию
+        # повторным attach после обрыва — он получит no_active_generation и
+        # дождётся финального состояния через синхронизацию
+        pass
 
     async def _gen():
         queue: asyncio.Queue = asyncio.Queue()
@@ -3339,21 +3527,37 @@ async def attach_to_active_stream(address: str = Depends(require_auth)):
     return StreamingResponse(_gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache,no-store,must-revalidate", "X-Accel-Buffering": "no"})
 
+def _exchange_from_history(history, user_text: str) -> Optional[Dict]:
+    """Последний обмен на user_text из персистентной history: user == text -> следующий assistant."""
+    items = list(history or [])
+    for i in range(len(items) - 1, -1, -1):
+        m = items[i]
+        if m.get("role") != "user" or m.get("content") != user_text:
+            continue
+        for n in items[i + 1:]:
+            if n.get("role") == "user":
+                break
+            if n.get("role") == "assistant" and not str(n.get("content", "")).startswith("[инструмент"):
+                return {"user": user_text, "assistant": n.get("content"), "timestamp": None}
+        break
+    return None
+
 @router.get("/chat/last_response")
 async def get_last_response(user_text: Optional[str] = None, address: str = Depends(require_auth)):
     """
-    Возвращает последний завершённый обмен (user -> assistant), чтобы после
-    перезагрузки страницы фронтенд мог подтянуть ответ, который LLM досчитала,
-    пока пользователь был не в чате (attach на это не способен — его буфер
-    уничтожается по завершении генерации).
+    Возвращает обмен (user -> assistant), чтобы фронтенд мог подтянуть ответ,
+    который LLM досчитала, пока пользователь/устройство был не в чате.
+    С user_text ищем СТРОГО обмен на это сообщение (в логе, затем в персистентной
+    history) и никогда не отдаём ответ на другое сообщение.
     """
     assistant = await get_assistant(address)
-    exchange = None
     if user_text:
-        exchange = next((e for e in reversed(list(getattr(assistant, "_exchange_log", []))) 
+        exchange = next((e for e in reversed(list(getattr(assistant, "_exchange_log", [])))
                          if e.get("user") == user_text), None)
-    if exchange is None:
-        exchange = getattr(assistant, "_last_exchange", None)
+        if exchange is None:
+            exchange = _exchange_from_history(assistant.history, user_text)
+        return exchange or {"user": None, "assistant": None}
+    exchange = getattr(assistant, "_last_exchange", None)
     if not exchange:
         # Fallback после перезапуска процесса: восстанавливаем из history.json
         user_msg = next((i.get("content") for i in reversed(assistant.history)

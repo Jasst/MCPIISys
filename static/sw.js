@@ -1,12 +1,15 @@
 /* Service worker: делает приложение устанавливаемым и открывает оболочку офлайн.
  * Ответы ИИ, входа и API НЕ кешируются: это всегда свежие данные пользователя.
  */
-const VERSION = 'ai-v2';
+// bump при изменении статики: новый текст sw.js заставляет браузер
+// перерегистрировать worker, а activate вычистит старый кеш
+const VERSION = 'ai-v3';
 const STATIC_CACHE = `static-${VERSION}`;
 const SHELL = [
   '/static/style.css',
   '/static/ai.css',
   '/static/js/ai-app.js',
+  '/static/js/ai-store.js',
   '/static/icon-192.png',
   '/static/icon-512.png',
   '/static/favicon.ico',
@@ -76,9 +79,34 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // JS и CSS всегда сначала из сети: иначе старый скрипт может работать с новым HTML
+  // JS и CSS всегда сначала из сети: иначе старый скрипт может работать с новым HTML.
+  // Кроме того, сравниваем свежий ответ с кешем: если файл изменился на сервере,
+  // сами вызываем update() — это заставляет браузер установить новый вариант SW,
+  // который в activate вычистит устаревший кеш. Без этого пользователю пришлось бы
+  // вручную обновлять/удалять service worker или переустанавливать PWA после каждого
+  // релиза статики.
   if (url.pathname.endsWith('.js') || url.pathname.endsWith('.css')) {
-    event.respondWith(networkFirst(request));
+    event.respondWith((async () => {
+      const cache = await caches.open(STATIC_CACHE);
+      const cached = await cache.match(request);
+      let response;
+      try {
+        response = await fetch(request);
+      } catch {
+        return cached || Response.error();
+      }
+      if (response.ok) {
+        cache.put(request, response.clone());
+        if (cached) {
+          try {
+            const a = await cached.text();
+            const b = await response.clone().text();
+            if (a !== b) self.registration.update();
+          } catch {}
+        }
+      }
+      return response;
+    })());
     return;
   }
 
