@@ -5,7 +5,6 @@
 ИСПРАВЛЕНИЕ: для работы с памятью используется единый сервисный слой MemoryService,
 что устраняет дублирование логики с MCP-сервером.
 """
-import base64
 import sys
 import uuid
 from pathlib import Path
@@ -484,6 +483,9 @@ class CognitiveController:
         # Журнал последних обменов: фронтенд находит ответ по тексту вопроса,
         # даже если после него успели прийти другие сообщения
         self._exchange_log = deque(maxlen=50)
+        # Причина последней неудачной генерации (ответ не сохранился): клиент получает её
+        # сразу, вместо общего «потеряна» через 3 минуты. В памяти — после рестарта пусто.
+        self._last_failure: Optional[Dict] = None
         self._last_exchange: Optional[Dict] = None
 
         # ===== Автономный движок (GCN/autonomy.py): единая очередь фоновых
@@ -3158,6 +3160,21 @@ class CognitiveController:
         finally:
             self.gate.end_user_turn()
             logger.info(timer.report())
+            # Если ответ не сохранился (пустой текст модели, ошибка стрима, отмена) —
+            # записываем причину, чтобы клиент показал её сразу.
+            try:
+                _le = getattr(self, "_last_exchange", None) or {}
+                if not (_le.get("user") == message and _le.get("assistant")):
+                    _fr = locals().get("full_response") or ""
+                    if locals().get("_stream_error"):
+                        _reason = "ошибка соединения с моделью во время генерации"
+                    elif not _fr:
+                        _reason = "модель не вернула текст ответа (возможно, весь лимит ушёл на размышления)"
+                    else:
+                        _reason = "ответ не сохранился на сервере"
+                    self._last_failure = {"user": message, "reason": _reason, "timestamp": time.time()}
+            except Exception:
+                pass
             await self._finish_generation(gen_id)
 
     # ===== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ =====
@@ -3556,6 +3573,10 @@ async def get_last_response(user_text: Optional[str] = None, address: str = Depe
                          if e.get("user") == user_text), None)
         if exchange is None:
             exchange = _exchange_from_history(assistant.history, user_text)
+        if exchange is None:
+            fl = getattr(assistant, "_last_failure", None)
+            if fl and fl.get("user") == user_text:
+                return {"user": user_text, "assistant": None, "failure": fl.get("reason")}
         return exchange or {"user": None, "assistant": None}
     exchange = getattr(assistant, "_last_exchange", None)
     if not exchange:

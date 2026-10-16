@@ -921,6 +921,10 @@
         bot.text = ex.assistant;
         return true;
       }
+      // сервер знает причину (ответ не сохранился): показываем её сразу
+      if (ex && ex.failure && (!userText || ex.user === userText)) {
+        bot.error = 'Ответ не получен: ' + ex.failure;
+      }
       return false;
     } catch {
       return null;
@@ -1003,7 +1007,7 @@
           } else if (!bot.text && !bot.error) {
             const ok = await recoverFromLast(bot, userMsg);
             if (ok === null) g.interrupted = true;
-            else if (!ok) bot.error = 'Ответ не найден на сервере (возможно, сервер перезапускался)';
+            else if (!ok && !bot.error) bot.error = 'Ответ не найден на сервере (возможно, сервер перезапускался во время генерации)';
           }
         } else if (!finished) {
           // Поток оборвался до [DONE]: ответ на сервере продолжается, его надо дождаться
@@ -1114,9 +1118,9 @@
             m.pending = false;
             await commit(id);
             if (currentId === id) renderMessages({ scroll: false });
-          } else if (Date.now() - (m.time || 0) > 180000) {
-            // сервер ответа не знает и сообщение висит давно — действительно потеряно
-            m.error = 'Ответ не получен: генерация потеряна';
+          } else if (m.error || Date.now() - (m.time || 0) > 180000) {
+            // сервер не знает ответа: причина уже в m.error (от сервера) либо сообщение висит давно
+            if (!m.error) m.error = 'Ответ не найден на сервере (возможно, сервер перезапускался во время генерации)';
             m.pending = false;
             await commit(id);
             if (currentId === id) renderMessages({ scroll: false });
