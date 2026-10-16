@@ -973,6 +973,9 @@
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
 
       // attach replays the whole buffer from the start: start from a clean slate
+      // reasoning, уже сохранённый на этом устройстве/сервере, запоминаем: если буфер
+      // генерации уже не хранит поток, replay его не вернёт, а текст подтянется с сервера.
+      const keepReasoning = bot.reasoning || '';
       if (mode === 'attach') { watch ? resetBotWatch(bot) : resetBot(bot); }
 
       let none = false;
@@ -988,6 +991,8 @@
 
       if (!controller.signal.aborted) {
         if (none) {
+          // поток уже не реплеится: вернём reasoning, который был до сброса
+          if (!bot.reasoning && keepReasoning) bot.reasoning = keepReasoning;
           const userMsg = msgs[idx - 1] && msgs[idx - 1].role === 'user' ? msgs[idx - 1].text : null;
           if (watch) {
             // чужая генерация уже завершилась: готовый ответ забираем с сервера
@@ -1991,7 +1996,10 @@
       if (!item || typeof item !== 'object') return;
       const k = msgKey(item);
       if (k && keyToIdx.has(k)) {
-        Object.assign(result[keyToIdx.get(k)], item);   // тот же объект — патч полями
+        // тот же объект — патч полями; пустой reasoning с сервера не затирает уже известный
+        const dst = result[keyToIdx.get(k)];
+        const keepR = dst.reasoning && !item.reasoning ? { reasoning: dst.reasoning } : null;
+        Object.assign(dst, item, keepR || {});
         return;
       }
       let j = Math.min(pos, result.length);
