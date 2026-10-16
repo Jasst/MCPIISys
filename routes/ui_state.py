@@ -546,6 +546,27 @@ def _apply_delta(current: dict, delta: dict) -> tuple[dict, list]:
         # в одной отправке — разные сообщения («сообщения появились один раз и
         # пропали на другом устройстве»).
         seen_keys: set = set()
+
+        def _find_at(m, key, i, hist):
+            """Позиция того же объекта в серверной истории (или None)."""
+            if not key:
+                return None
+            if 1 <= i <= len(hist) and hist[i - 1] is not None \
+                    and _msg_key(hist[i - 1]) == key:
+                return i - 1                                # точная позиция — тот же объект
+            if isinstance(m.get('id'), str) and m.get('id'):
+                # Глобальный поиск — только для НАСТОЯЩЕГО id: он уникален.
+                return next((p for p, x in enumerate(hist)
+                             if x is not None and _msg_key(x) == key), None)
+            return None
+
+        # ДВУХПРОХОДНАЯ обработка списка дельты. Проход 1 применяет патчи уже
+        # известных сообщений и tombstone'ы; проход 2 вставляет новые. Раньше
+        # всё шло одним проходом: «патч + вставка» в одной отправке
+        # (финализация ответа b2 и новый вопрос u3) давали вставку u3 В ПЕРЕШЁД
+        # между b1 и b2 — на другом устройстве порядок вопросов/ответов
+        # съезжал («сообщения перепутываются, следующие не появляются»).
+        pending_new: list = []                              # (i, m, key) — новые
         for it in items:
             if not isinstance(it, dict):
                 continue
@@ -573,20 +594,7 @@ def _apply_delta(current: dict, delta: dict) -> tuple[dict, list]:
             # не появлялась вовсе («сообщение есть на одном устройстве, нет на
             # другом»). Теперь идентичный текст на другой позиции — это другое
             # сообщение, оно уходит вставку/патч строго по своей позиции.
-            at = None
-            if key and 1 <= i <= len(hist) and hist[i - 1] is not None \
-                    and _msg_key(hist[i - 1]) == key:
-                at = i - 1
-            elif key and has_id:
-                # Глобальный поиск по списку — только для сообщений с НАСТОЯЩИМ
-                # id: он уникален и идентифицирует объект на любом устройстве.
-                # Для content-ключа (ct:role|time|text / cx:role|text, т.е.
-                # legacy без id) такой поиск патчил ЛЮБУЮ копию того же текста:
-                # правка одного сообщения перезаписывала совсем другое. У
-                # совпадения по content-ключу есть ровно один безопасный
-                # вариант — точная позиция выше (первая ветка if).
-                at = next((p for p, x in enumerate(hist) if x is not None and _msg_key(x) == key),
-                          None)
+            at = _find_at(m, key, i, hist)
             if at is not None:                              # тот же объект — патч поверх
                 # Позицию уже известного сообщения НЕ меняем: i в дельте — позиция в
                 # массиве клиента, она может расходиться с серверной (усечение до
@@ -609,20 +617,76 @@ def _apply_delta(current: dict, delta: dict) -> tuple[dict, list]:
             elif key is None and i > len(hist):
                 conflicts.append({'sid': sid, 'i': i})      # позиции нет — не дописываем вслепую
                 continue
-            else:                                           # новое сообщение: вставляем СТРОГО
-                j = min(i - 1, len(hist))                   # по своей позиции, сдвигая
-                hist.insert(j, dict(m))                     # хвост — порядок вопросов и
-                changed = True                              # ответов сохраняется даже при
-                                                            # «кривой» позиции дельты.
-                                                            # Раньше все новые записи с
-                                                            # ключом дописывались в конец:
-                                                            # u3 из дельты уезжал за b2 и
-                                                            # история приезжала перкошенной.
-                                                            # Legacy без ключа с позицией за
-                                                            # концом — честный конфликт
-                                                            # (выше), вслепую не дописываем.
-            if key:
-                seen_keys.add(key)
+            elif key is None:                               # legacy без ключа — прежняя вставка
+                j = min(i - 1, len(hist))                   # по позиции сразу: сопоставить её
+                while j < len(hist):                        # с серверным объектом нельзя
+                    ek = _msg_key(hist[j])
+                    if not ek:
+                        break
+                    j += 1
+                hist.insert(j, m)
+                changed = True
+            else:                                           # НОВОЕ сообщение с ключом —
+                pending_new.append((i, m, key))             # откладываем до прохода 2:
+                if key:                                     # пусть сначала применятся все
+                    seen_keys.add(key)                      # патчи этого списка
+        # Проход 2: вставка новых сообщений. Опорная точка — СЕРВЕРНАЯ позиция
+        # последнего сообщения, которое в присланном списке стоит ПЕРЕД данным
+        # новым и уже известно серверу (из истории или запатчено проходом 1).
+        # Раньше опору искали по индексу hist[i-2]: при «кривой» позиции это
+        # чужой объект — новый ответ вставлялся между вопросом и его же
+        # ответом, порядок на втором устройстве съезжал («сообщения
+        # перепутываются, следующие не появляются»). Теперь новый вопрос u3
+        # после запатченного b2 (серверная позиция 3) уезжает строго в конец,
+        # а новое сообщение между известными соседями — ровно в их интервал.
+        pos_of: dict = {}                                   # key -> серверная позиция
+        for it in items:                                    # опоры считаем по исходному
+            im = it.get('m') if isinstance(it, dict) else None   # списку дельты, НЕ по
+            if not isinstance(im, dict):                        # изменяемой вставками hist
+                continue
+            ik = _msg_key(im)
+            ia = _find_at(im, ik, it.get('i'), hist) if isinstance(it.get('i'), int) else None
+            if ik and ia is not None:
+                pos_of[ik] = ia
+        anchor_at = []                                      # для каждого pending_new
+        for n, (i, m, key) in enumerate(pending_new):
+            a = None
+            for q in range(n - 1, -1, -1):                  # ближайшие предшественники
+                pq = pending_new[q][2]
+                if pq in pos_of:
+                    a = pos_of[pq]
+                    break
+            if a is None:
+                for q in range(len(items) - 1, -1, -1):     # или известные из начало списка
+                    it = items[q]
+                    if not isinstance(it, dict):
+                        continue
+                    im = it.get('m')
+                    if not isinstance(im, dict):
+                        continue
+                    ik = _msg_key(im)
+                    if ik and ik in pos_of:
+                        a = pos_of[ik]
+                        break
+            anchor_at.append(a)
+        inserted = 0
+        for n, (i, m, key) in enumerate(pending_new):
+            a = anchor_at[n]
+            if a is None:                                   # опоры нет — новая запись
+                hist.append(dict(m))                        # уходит в КОНЕЦ истории:
+                inserted += 1                               # позиция дельты — индекс в
+                changed = True                              # присланном списке, она не
+                continue                                    # задаёт место в серверной
+            j = min(a + 1 + inserted, len(hist))            # сразу после опоры, с учётом
+            while j < len(hist):                            # ранее вставленных соседей
+                ek = _msg_key(hist[j])                      # хвост сдвигаем, но не трогаем
+                if not ek or ek not in server_keys:
+                    break
+                j += 1
+            hist.insert(j, dict(m))
+            inserted += 1
+            pos_of[key] = j                                 # последующие вставки могут
+            changed = True                                  # опираться и на нас
         cleaned = [x for x in hist if x is not None][-MAX_MSGS_PER_CHAT:]
         if cleaned:
             messages[sid] = cleaned
