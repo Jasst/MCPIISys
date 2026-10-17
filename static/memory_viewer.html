@@ -18,7 +18,7 @@ html,body{height:100%;margin:0;background:var(--bg);color:var(--text);
 #left{border-right:1px solid var(--line)}
 #right{border-left:1px solid var(--line)}
 #stage{position:relative;overflow:hidden}
-#cv{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:grab}
+#cv{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:grab;touch-action:none}
 #cv.grabbing{cursor:grabbing}
 #feed{height:120px;overflow:auto;border-top:1px solid var(--line);background:var(--panel);
   padding:6px 10px;font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;color:var(--muted)}
@@ -63,6 +63,28 @@ label{color:var(--muted);font-size:12px}
 .ro-note{color:var(--warn);font-size:12px;margin:4px 0}
 a.back{color:var(--acc);text-decoration:none;padding:5px 2px}
 a.back:hover{text-decoration:underline}
+/* ---- мобильная раскладка: панель деталей как выдвижная шторка ---- */
+#zoombar{display:none;position:absolute;right:8px;bottom:8px;z-index:5;flex-direction:column;gap:6px}
+#zoombar button{width:38px;height:38px;font-size:17px;border-radius:9px;background:#243049d9}
+#sheet-head{display:none}
+@media (max-width:900px){
+  #main{grid-template-columns:1fr;height:auto}
+  #left{order:3;border-right:none;border-top:1px solid var(--line)}
+  #stage{height:58vh;min-height:340px}
+  #right{position:fixed;left:0;right:0;bottom:0;z-index:20;max-height:72vh;overflow:auto;
+    border-left:none;border-top:2px solid var(--acc);border-radius:16px 16px 0 0;
+    transform:translateY(105%);transition:transform .22s ease;box-shadow:0 -8px 30px rgba(0,0,0,.55);
+    padding-bottom:max(10px, env(safe-area-inset-bottom))}
+  body.sheet-open #right{transform:none}
+  #sheet-head{display:block;position:sticky;top:0;background:var(--panel);z-index:2}
+  #top,#feed{position:static}
+  #top input[type=search]{flex:1;min-width:0}
+  #top label{font-size:11px}
+  #zoombar{display:flex}
+  button{padding:7px 11px}
+  input,select,textarea,button{font-size:14px}
+  textarea{min-height:80px}
+}
 </style>
 </head>
 <body>
@@ -81,8 +103,11 @@ a.back:hover{text-decoration:underline}
   <label>тип <select id="ftype"><option value="">все</option></select></label>
   <label>доверие ≥ <input id="minc" type="range" min="0" max="100" value="0"><span id="minc-v">0%</span></label>
   <button id="fit" title="вписать в экран">Вписать</button>
+  <button id="add" title="добавить запись в память">＋ Запись</button>
   <span id="counts" class="mono"></span>
 </div>
+
+<div id="sheet-head" hidden></div>
 
 <div id="main">
   <aside id="left">
@@ -91,8 +116,15 @@ a.back:hover{text-decoration:underline}
     <h3>Легенда</h3>
     <div class="legend" id="legend"></div>
   </aside>
-  <section id="stage"><canvas id="cv"></canvas></section>
+  <section id="stage"><canvas id="cv"></canvas>
+    <div id="zoombar">
+      <button id="zin" title="приблизить">＋</button>
+      <button id="zout" title="отдалить">－</button>
+      <button id="zfit" title="вписать в экран" style="font-size:13px">⤢</button>
+    </div>
+  </section>
   <aside id="right">
+    <div id="sheet-head"></div>
     <div id="detail"><div class="mono">Выбери узел на графе или в списке хабов.</div></div>
   </aside>
 </div>
@@ -114,6 +146,7 @@ const S = {
   byId: new Map(), pos: new Map(), selected: null, visible: new Set(), visibleEdges: [],
   alpha: 1, layout: "graph", live: true, view: {x: 0, y: 0, k: 1},
   drag: null, hover: null, degreeRank: new Set(), dirtyDetail: false,
+  pointers: new Map(), pinch: null, tap: null,
 };
 
 const $ = (s) => document.querySelector(s);
@@ -384,14 +417,41 @@ function loop() {
   requestAnimationFrame(loop);
 }
 
-/* ---------- мышь ---------- */
-cv.addEventListener("pointerdown", (ev) => {
+/* ---------- указатели: мышь, касание, щипок (pinch-zoom) ---------- */
+function localPos(ev) {
   const rect = cv.getBoundingClientRect();
-  const sx = ev.clientX - rect.left, sy = ev.clientY - rect.top;
-  const id = hitNode(sx, sy);
+  return [ev.clientX - rect.left, ev.clientY - rect.top];
+}
+
+function zoomAt(sx, sy, f) {
+  const before = worldAt(sx, sy);
+  S.view.k = Math.min(6, Math.max(0.15, S.view.k * f));
+  const after = worldAt(sx, sy);
+  // держим точку под курсором/пальцем на месте
+  S.view.x += (after.x - before.x) * S.view.k;
+  S.view.y += (after.y - before.y) * S.view.k;
+}
+
+function endPinch() {
+  S.pinch = null;
+  S.drag = null;
+  cv.classList.remove("grabbing");
+}
+
+cv.addEventListener("pointerdown", (ev) => {
+  const [sx, sy] = localPos(ev);
+  S.pointers.set(ev.pointerId, [sx, sy]);
   cv.setPointerCapture(ev.pointerId);
+  if (S.pointers.size === 2) {
+    const pts = [...S.pointers.values()];
+    S.pinch = {d: Math.hypot(pts[0][0] - pts[1][0], pts[0][1] - pts[1][1]) || 1};
+    S.drag = null; // узел, схваченный первым пальцем, остаётся закреплённым
+    return;
+  }
+  if (S.pointers.size > 2) return;
+  const id = hitNode(sx, sy);
   if (id) {
-    S.drag = {type: "node", id, moved: false};
+    S.drag = {type: "node", id, moved: false, sx, sy};
     S.pos.get(id).pinned = true;
   } else {
     S.drag = {type: "pan", sx, sy, vx: S.view.x, vy: S.view.y};
@@ -399,18 +459,28 @@ cv.addEventListener("pointerdown", (ev) => {
   }
 });
 cv.addEventListener("pointermove", (ev) => {
-  const rect = cv.getBoundingClientRect();
-  const sx = ev.clientX - rect.left, sy = ev.clientY - rect.top;
-  if (!S.drag) {
-    const hid = hitNode(sx, sy);
-    if (hid !== S.hover) { S.hover = hid; cv.style.cursor = hid ? "pointer" : "grab"; }
+  const [sx, sy] = localPos(ev);
+  if (S.pointers.has(ev.pointerId)) S.pointers.set(ev.pointerId, [sx, sy]);
+  if (S.pinch && S.pointers.size >= 2) {
+    const pts = [...S.pointers.values()];
+    const d = Math.hypot(pts[0][0] - pts[1][0], pts[0][1] - pts[1][1]) || 1;
+    const cx = (pts[0][0] + pts[1][0]) / 2, cy = (pts[0][1] + pts[1][1]) / 2;
+    zoomAt(cx, cy, d / S.pinch.d);
+    S.pinch.d = d;
     return;
   }
+  if (!S.drag) {
+    if (ev.pointerType !== "touch") {
+      const hid = hitNode(sx, sy);
+      if (hid !== S.hover) { S.hover = hid; cv.style.cursor = hid ? "pointer" : "grab"; }
+    }
+    return;
+  }
+  if (Math.hypot(sx - S.drag.sx, sy - S.drag.sy) > 6) S.drag.moved = true;
   if (S.drag.type === "node") {
     const w = worldAt(sx, sy);
     const p = S.pos.get(S.drag.id);
     p.x = w.x; p.y = w.y; p.vx = 0; p.vy = 0;
-    S.drag.moved = true;
     S.alpha = Math.max(S.alpha, 0.15);
   } else {
     S.view.x = S.drag.vx + (sx - S.drag.sx);
@@ -418,35 +488,46 @@ cv.addEventListener("pointermove", (ev) => {
   }
 });
 cv.addEventListener("pointerup", (ev) => {
+  S.pointers.delete(ev.pointerId);
+  if (S.pinch) {
+    if (S.pointers.size < 2) endPinch();
+    return;
+  }
   if (S.drag && S.drag.type === "node") {
-    const id = S.drag.id;
-    if (!S.drag.moved) selectNode(id);
-    else {
-      // закрепляем позицию после перетаскивания; двойной клик снимает закрепление
-    }
-  } else if (S.drag && S.drag.type === "pan" && Math.abs(ev.clientX - (cv.getBoundingClientRect().left + S.drag.sx)) < 3) {
+    if (!S.drag.moved) selectNode(S.drag.id);
+  } else if (S.drag && S.drag.type === "pan" && !S.drag.moved) {
     selectNode(null);
   }
   S.drag = null;
   cv.classList.remove("grabbing");
 });
+cv.addEventListener("pointercancel", (ev) => {
+  S.pointers.delete(ev.pointerId);
+  if (S.pinch && S.pointers.size < 2) endPinch();
+  if (!S.pinch) { S.drag = null; cv.classList.remove("grabbing"); }
+});
 cv.addEventListener("dblclick", (ev) => {
-  const rect = cv.getBoundingClientRect();
-  const id = hitNode(ev.clientX - rect.left, ev.clientY - rect.top);
+  const [sx, sy] = localPos(ev);
+  const id = hitNode(sx, sy);
   if (id) { S.pos.get(id).pinned = false; S.alpha = Math.max(S.alpha, 0.3); }
 });
 cv.addEventListener("wheel", (ev) => {
   ev.preventDefault();
-  const rect = cv.getBoundingClientRect();
-  const sx = ev.clientX - rect.left, sy = ev.clientY - rect.top;
-  const before = worldAt(sx, sy);
-  const f = Math.exp(-ev.deltaY * 0.0015);
-  S.view.k = Math.min(6, Math.max(0.15, S.view.k * f));
-  const after = worldAt(sx, sy);
-  // держим точку под курсором на месте
-  S.view.x += (after.x - before.x) * S.view.k;
-  S.view.y += (after.y - before.y) * S.view.k;
+  const [sx, sy] = localPos(ev);
+  zoomAt(sx, sy, Math.exp(-ev.deltaY * 0.0015));
 }, {passive: false});
+// двойное касание — приблизить (на мобильных нет колеса мыши)
+cv.addEventListener("touchend", (ev) => {
+  const now = Date.now();
+  const t = ev.changedTouches[0];
+  if (S.tap && now - S.tap.t < 320 && Math.hypot(t.clientX - S.tap.x, t.clientY - S.tap.y) < 30) {
+    const rect = cv.getBoundingClientRect();
+    zoomAt(t.clientX - rect.left, t.clientY - rect.top, 1.7);
+    S.tap = null;
+  } else {
+    S.tap = {t: now, x: t.clientX, y: t.clientY};
+  }
+});
 
 function fitView() {
   S.view = {x: 0, y: 0, k: 1};
@@ -458,10 +539,29 @@ function fitView() {
 }
 
 /* ---------- выбор и детали ---------- */
+const TOUCH_MODE = () => matchMedia("(max-width: 900px)").matches;
+function openSheet() { document.body.classList.add("sheet-open"); }
+function closeSheet() { document.body.classList.remove("sheet-open"); }
+
+function renderSheetHead() {
+  const head = $("#sheet-head");
+  head.innerHTML = "";
+  head.append(h("div", {class: "row", style: "justify-content:space-between;margin:0"},
+    h("strong", {}, "Объект памяти"),
+    h("div", {class: "row", style: "margin:0"},
+      h("button", {id: "sheet-new", class: "primary small", onclick: startCreate}, "＋ новая"),
+      h("button", {class: "small", onclick: closeSheet}, "✕ закрыть"))));
+  const b = $("#sheet-new");
+  if (b) b.disabled = S.readonly;
+}
+
 function selectNode(id) {
   S.selected = id;
   rebuildNeighbours();
-  if (id) loadDetail(id); else clearDetail();
+  if (id) {
+    loadDetail(id);
+    if (TOUCH_MODE()) openSheet();
+  } else { clearDetail(); closeSheet(); }
 }
 
 function clearDetail() {
@@ -485,6 +585,7 @@ function renderDetail(d) {
   const ro = S.readonly;
   const box = $("#detail");
   box.innerHTML = "";
+  renderSheetHead();
   const typeBadge = h("span", {class: "badge", style: `border-color:${TYPE_COLORS[d.type] || "#555"}`}, d.type);
   box.append(
     h("div", {class: "row"}, typeBadge, h("span", {class: "badge"}, d.scope), h("span", {class: "badge"}, `v${d.version}`)),
@@ -577,14 +678,52 @@ function edgeRow(d, relation, otherId, subject, outgoing) {
 async function edit(op, args) {
   if (S.readonly) return;
   try {
-    await api(API + "/edit", {op, args});
+    const res = await api(API + "/edit", {op, args});
     log(`${op}: готово`, "ok");
     await refresh(true);
-    if (op === "retract") { S.selected = null; clearDetail(); }
+    if (op === "retract") { S.selected = null; clearDetail(); closeSheet(); }
+    else if (op === "create" && res.id) selectNode(res.id);
     else if (S.selected) loadDetail(S.selected);
+    return res;
   } catch (e) {
     log(`${op}: ${e.message}`, "bad");
   }
+}
+
+/* ---------- создание новой записи ---------- */
+function startCreate() {
+  if (S.readonly) { log("режим только чтение: создание отключено", "bad"); return; }
+  const box = $("#detail");
+  box.innerHTML = "";
+  renderSheetHead();
+  const subj = h("textarea", {placeholder: "О чём эта запись? Например: «Люблю утренние пробежки»"});
+  const pred = h("input", {value: "is_fact", size: 20});
+  const conf = h("input", {type: "range", min: "0", max: "100", value: "70"});
+  const confV = h("span", {}, "0.70");
+  conf.addEventListener("input", () => { confV.textContent = (conf.value / 100).toFixed(2); });
+  const err = h("div", {class: "verdict-bad"});
+  const saveBtn = h("button", {class: "primary"}, "Сохранить в память");
+  saveBtn.addEventListener("click", async () => {
+    err.textContent = "";
+    if (!subj.value.trim()) { err.textContent = "текст не может быть пустым"; return; }
+    saveBtn.disabled = true;
+    const res = await edit("create", {subject: subj.value.trim(),
+      predicate: pred.value.trim() || undefined, confidence: conf.value / 100});
+    saveBtn.disabled = false;
+    if (!res) err.textContent = "не удалось сохранить (см. журнал внизу)";
+  });
+  box.append(
+    h("h3", {}, "Новая запись"),
+    h("div", {class: "mono"}, "появится как claim; после сохранения её можно править и связывать"),
+    h("div", {class: "row"}, subj),
+    h("div", {class: "row"}, h("label", {}, "предикат"), pred),
+    h("div", {class: "row"}, h("label", {}, "доверие"), conf, confV),
+    h("div", {class: "row"}, saveBtn, h("button", {onclick: () => {
+      if (S.selected) loadDetail(S.selected); else clearDetail();
+    }}, "Отмена")),
+    err);
+  if (TOUCH_MODE()) openSheet();
+  setTimeout(() => subj.focus(), 50);
 }
 
 async function llmReview(id, box) {
@@ -679,14 +818,25 @@ $("#q").addEventListener("input", applyFilter);
 $("#ftype").addEventListener("change", applyFilter);
 $("#minc").addEventListener("input", applyFilter);
 $("#fit").addEventListener("click", fitView);
+$("#add").addEventListener("click", startCreate);
+$("#zin").addEventListener("click", () => { const r = cv.getBoundingClientRect(); zoomAt(r.width / 2, r.height / 2, 1.4); });
+$("#zout").addEventListener("click", () => { const r = cv.getBoundingClientRect(); zoomAt(r.width / 2, r.height / 2, 1 / 1.4); });
+$("#zfit").addEventListener("click", fitView);
 $("#live").addEventListener("click", (e) => {
   S.live = !S.live;
   e.target.textContent = S.live ? "Live: вкл" : "Live: пауза";
 });
 window.addEventListener("resize", resize);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeSheet(); selectNode(null); } });
 
 setInterval(() => {
-  if (S.live) refresh(false).catch((err) => log("обновление: " + err.message, "bad"));
+  // не перезаписываем панель, пока пользователь что-то печатает или нажал «Отмена» в форме
+  const ae = document.activeElement;
+  const editing = ae && $("#right").contains(ae) &&
+    (ae.tagName === "TEXTAREA" || ae.tagName === "INPUT" || ae.tagName === "SELECT");
+  if (S.live && !editing && !S.dirtyDetail) {
+    refresh(false).catch((err) => log("обновление: " + err.message, "bad"));
+  }
 }, 2000);
 
 resize();
