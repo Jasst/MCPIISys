@@ -96,8 +96,9 @@ Claude Desktop, к mcp_server_blockcoin.py) всё работает надёжн
 import json
 import logging
 import re
+import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Awaitable
+from typing import Any, Callable, Dict, List, Optional, Awaitable, Tuple
 import asyncio
 from pathlib import Path
 
@@ -402,14 +403,40 @@ def _strict_parse_json_object(raw: str) -> Optional[Dict]:
 # =====================================================================
 # Основной класс — принимает решение и выполняет ReAct-цикл
 # =====================================================================
+_ERROR_PREFIXES = ("ошибка", "error:", "exception:")
+NATIVE_REPROBE_EVERY = 20  # после отключения нативного режима (в памяти) пробовать снова раз в N запусков
+
+
+def _is_error_text(text: str) -> bool:
+    """Ошибка = текст начинается с явного префикса. Слово «ошибка» внутри веб-страницы ошибкой не считается."""
+    return (text or "").lstrip().lower().startswith(_ERROR_PREFIXES)
+
+
+def _call_signature(tool: str, arguments: Dict[str, Any]) -> str:
+    """Единая сигнатура вызова: и для дедупликации повторов, и для запоминания ошибок."""
+    norm: Dict[str, Any] = {}
+    for k, v in (arguments or {}).items():
+        if isinstance(v, str):
+            v = v.strip()
+            if k == "query":
+                v = " ".join(v.lower().split())
+        norm[k] = v
+    return f"{tool}|{json.dumps(norm, sort_keys=True, ensure_ascii=False, default=str)}"
+
+
 class ToolRouter:
     def __init__(self, registry: ToolRegistry, llm_raw_caller, llm_text_caller):
         self.registry = registry
         self.llm_raw_caller = llm_raw_caller
         self.llm_text_caller = llm_text_caller
-        # ИСПРАВЛЕНИЕ #4: загружаем персистентный флаг native_supported
-        self._native_supported: Optional[bool] = self._load_native_flag()
-        # ПУНКТ №10: Scratchpad для persistent reasoning между раундами ReAct
+        # На диск пишется только True («модель умеет function calling»).
+        # False живёт только в памяти процесса: один сбой не отключает нативный режим навсегда.
+        # Старый файл с False (записанный прежней логикой) игнорируется.
+        loaded = self._load_native_flag()
+        self._native_supported: Optional[bool] = True if loaded is True else None
+        self._native_confirmed: bool = self._native_supported is True
+        self._native_misses = 0
+        self._runs_since_disabled = 0
         self._scratchpad: List[str] = []
 
     def _load_native_flag(self) -> Optional[bool]:
@@ -432,40 +459,91 @@ class ToolRouter:
         except Exception:
             pass
 
-    async def _execute_tool(self, qualified_name: str, arguments: Dict[str, Any]) -> str:
+    def _confirm_native(self) -> None:
+        self._native_confirmed = True
+        if self._native_supported is not True:
+            self._native_supported = True
+            self._save_native_flag(True)
+
+    def _note_native_miss(self) -> None:
+        """Нативный вызов сказал «инструмент не нужен», а fallback нашёл нужный инструмент.
+        Два таких случая подряд без единого подтверждения — модель, вероятно, не умеет tool_calls."""
+        if self._native_confirmed or self._native_supported is False:
+            return
+        self._native_misses += 1
+        if self._native_misses >= 2:
+            self._native_supported = False
+            self._runs_since_disabled = 0
+            logger.info("ToolRouter: нативный function calling отключён в памяти процесса (будет перепроверен позже)")
+
+    def _should_probe_native(self) -> bool:
+        if self._native_supported is not False:
+            return True
+        self._runs_since_disabled += 1
+        return self._runs_since_disabled % NATIVE_REPROBE_EVERY == 0
+
+    def _resolve_tool_name(self, name: str) -> str:
+        if not name:
+            return ""
+        if self.registry.get(name):
+            return name
+        for qname, spec in self.registry._tools.items():
+            if spec.original_tool_name == name:
+                return qname
+        return name
+
+    async def _execute_tool(self, qualified_name: str, arguments: Dict[str, Any]) -> Tuple[bool, str]:
+        """Возвращает (успех, текст). Успех определяется типом сбоя, а не поиском слов в тексте."""
         spec = self.registry.get(qualified_name)
         if not spec:
-            return f"Ошибка: инструмент '{qualified_name}' не найден."
+            return False, f"Ошибка: инструмент '{qualified_name}' не найден."
         timeout = spec.timeout_seconds or TOOL_CALL_TIMEOUT_SECONDS
         try:
             result = await asyncio.wait_for(spec.handler(arguments), timeout=timeout)
-            if not isinstance(result, str):
-                result = json.dumps(result, ensure_ascii=False, default=str)
-            return result
         except asyncio.TimeoutError:
             logger.error(f"Tool '{qualified_name}' timed out after {timeout}s")
-            return f"Ошибка: инструмент '{qualified_name}' не ответил за {timeout}с."
+            return False, f"Ошибка: инструмент '{qualified_name}' не ответил за {timeout}с."
         except Exception as e:
             logger.error(f"Tool '{qualified_name}' failed: {e}", exc_info=True)
-            return f"Ошибка вызова инструмента '{qualified_name}': {e}"
+            return False, f"Ошибка вызова инструмента '{qualified_name}': {e}"
+        if isinstance(result, dict) and result.get("error"):
+            return False, json.dumps(result, ensure_ascii=False, default=str)
+        if not isinstance(result, str):
+            result = json.dumps(result, ensure_ascii=False, default=str)
+        return not _is_error_text(result), result
 
-    async def _decide_native(self, running_messages: List[Dict], temp: float) -> Optional[List[Dict]]:
+    async def _decide_native(self, running_messages: List[Dict], temp: float):
+        """Возвращает (статус, решения, сырые tool_calls, текст ассистента).
+        статус: 'tool_calls' — модель вызвала инструменты;
+                'no_tool'    — ответ получен, вызовов нет;
+                'error'      — запрос не удался (пустой ответ, _error, исключение)."""
         tools = self.registry.as_openai_tools()
-        msg = await self.llm_raw_caller(running_messages, temp=temp, max_tokens=500, tools=tools)
-        tool_calls = msg.get("tool_calls") if msg else None
-        if not tool_calls:
-            return None
-        decisions = []
-        for tc in tool_calls:
-            fn = tc.get("function", {})
-            name = fn.get("name", "")
+        try:
+            msg = await self.llm_raw_caller(running_messages, temp=temp, max_tokens=500, tools=tools)
+        except Exception as e:
+            logger.warning(f"ToolRouter: нативный запрос упал: {e}")
+            return "error", None, None, ""
+        if not msg or msg.get("_error"):
+            return "error", None, None, ""
+        raw_calls = msg.get("tool_calls") or []
+        if not raw_calls:
+            return "no_tool", None, None, ""
+        decisions: List[Dict[str, Any]] = []
+        for i, tc in enumerate(raw_calls):
+            fn = tc.get("function") or {}
+            name = fn.get("name") or ""
             try:
                 args = json.loads(fn.get("arguments") or "{}")
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, TypeError):
                 args = {}
-            if name:
-                decisions.append({"tool": name, "arguments": args})
-        return decisions or None
+            if not isinstance(args, dict):
+                args = {}
+            # Каждому решению соответствует ровно один tool_call (по индексу), поэтому
+            # пустое имя не отбрасываем, а помечаем и получаем свой ответ role=tool.
+            decisions.append({"tool": name, "arguments": args})
+            if not tc.get("id"):
+                tc["id"] = f"call_{uuid.uuid4().hex[:12]}"
+        return "tool_calls", decisions, raw_calls, msg.get("content") or ""
 
     async def _reflect_on_failure(self, tool: str, args: Dict, error: str,
                                    history_tail: str) -> Dict:
@@ -511,36 +589,6 @@ class ToolRouter:
         else:
             return {"diagnosis": "Неясная ошибка", "next_action": "give_up", "modified_args": {}, "suggested_tool": None, "new_plan": None}
 
-    async def _verify_tool_result(self, question: str, tool: str, result: str) -> str:
-        """
-        ПУНКТ №2: Дешёвый судья для проверки результата инструмента.
-        Возвращает: 'sufficient' | 'partial' | 'irrelevant' | 'error'.
-        """
-        if not result or result.strip() == "":
-            return "error"
-
-        result_lower = result.lower()
-
-        # Явные маркеры ошибки
-        if any(m in result_lower for m in ["ошибка", "error", "exception", "timeout", "не удалось"]):
-            if any(m in result_lower for m in ["не найдено", "404", "nothing found", "no results"]):
-                return "irrelevant"  # Не ошибка, просто пусто
-            return "error"
-
-        # Маркеры пустого/нерелевантного результата
-        if any(m in result_lower for m in ["ничего не найдено", "no results found", "пусто", "empty"]):
-            return "irrelevant"
-
-        # Если результат очень короткий и не содержит данных
-        if len(result) < 20 and not any(c.isdigit() for c in result):
-            return "partial"
-
-        # Эвристика: если результат содержит данные (URL, числа, текст > 50 символов)
-        if len(result) > 50 or any(m in result for m in ["http", "www", "."]):
-            return "sufficient"
-
-        return "partial"
-
     async def _decide_fallback(self, message: str, history_tail: str,
                                 tool_results_so_far: str, temp: float) -> Optional[Dict]:
         prompt = TOOL_DECISION_PROMPT.format(
@@ -555,32 +603,29 @@ class ToolRouter:
     # ===== ОСНОВНОЙ МЕТОД =====
     async def run(self, message: str, base_messages: List[Dict], history_tail: str = "") -> Dict[str, Any]:
         """
-        Запускает ReAct-цикл: до MAX_TOOL_ITERATIONS раундов вызова инструментов,
-        затем возвращает собранные результаты — финальный текст ответа генерирует
-        вызывающий код (ai_assistant.py), передав tool_trace в _build_messages.
+        ReAct-цикл: до max_iterations раундов вызова инструментов.
 
         Возвращает:
-            {"tool_trace": [{"tool": ..., "arguments": ..., "result": ...}, ...],
+            {"tool_trace": [{"tool", "arguments", "result", "ok", "verification"}, ...],
              "used_native": bool}
+
+        В нативном режиме диалог ведётся по протоколу OpenAI: сообщение ассистента с
+        tool_calls, затем role=tool с tool_call_id на каждый вызов. Текстовый fallback
+        передаёт результаты обычным сообщением.
         """
         if self.registry.is_empty():
             return {"tool_trace": [], "used_native": False}
 
-        # === Очистка scratchpad для нового запроса (предотвращение загрязнения контекста) ===
         self._scratchpad = []
-
         message_lower = (message or "").lower()
 
         tool_trace: List[Dict[str, Any]] = []
         used_native = False
         running_messages: List[Dict] = list(base_messages)
 
-        # === ИСПРАВЛЕНИЕ: автоматическое извлечение GitHub-пути ===
-        # Если в сообщении есть GitHub-ссылка, добавляем подсказку с уже извлечённым путём
-        # Это гарантирует, что LLM вызовет fetch_github_file с правильным аргументом.
+        # Подсказка для GitHub-ссылок: путь уже извлечён, модели остаётся вызвать инструмент.
         github_path = None
-        urls = re.findall(r'https?://github\.com/[^\s<>"\')\]]+', message)
-        for url in urls:
+        for url in re.findall(r'https?://github\.com/[^\s<>"\')\]]+', message or ""):
             path = extract_github_path(url)
             if path:
                 github_path = path
@@ -594,11 +639,7 @@ class ToolRouter:
             running_messages = running_messages + [{"role": "user", "content": hint}]
             history_tail = f"{hint}\n\n{history_tail}" if history_tail else hint
 
-        # === НОВОЕ: подсказка для запросов о собственном коде / архитектуре ===
-        # Без неё модель на вопрос "как ты устроен?" / "прочитай свой код"
-        # отвечает "нет доступа к исходному коду", хотя code-tools
-        # (read_code/search_code/project_structure/analyze_error)
-        # зарегистрированы в реестре и переданы в as_openai_tools().
+        # Подсказка для вопросов о собственном коде.
         _CODE_QUERY_MARKERS = (
             "твой код", "свой код", "твоя архитектура", "свою архитектуру",
             "твой исходник", "свои файлы", "твои файлы", "свой исходный код",
@@ -623,24 +664,30 @@ class ToolRouter:
             running_messages = running_messages + [{"role": "user", "content": code_hint}]
             history_tail = f"{code_hint}\n\n{history_tail}" if history_tail else code_hint
 
-        seen_calls: set = set()
-        # === ИСПРАВЛЕНИЕ: отслеживаем ошибки, чтобы не повторять их ===
-        seen_errors: set = set()   # (tool, frozenset(sorted(args.items())))
-
-        # ПУНКТ №1: Динамический лимит итераций при активном перепланировании
+        # Одна таблица на весь запуск: сигнатура -> текст результата (успех или ошибка).
+        # Повтор той же сигнатуры не выполняется: модель получает прежний результат.
+        seen_results: Dict[str, str] = {}
         max_iterations = MAX_TOOL_ITERATIONS
-        replan_count = 0  # счётчик перепланирований
+        replan_count = 0
+        probe_native = self._should_probe_native()
 
-        for round_idx in range(max_iterations):
+        # while, а не for: лимит, увеличенный при перепланировании, должен реально действовать.
+        round_idx = 0
+        while round_idx < max_iterations:
             decisions: Optional[List[Dict]] = None
+            raw_calls: Optional[List[Dict]] = None
+            native_text = ""
+            native_status = "skipped"
 
-            if self._native_supported is not False:
-                decisions = await self._decide_native(running_messages, temp=0.0)
-                if decisions is not None:
+            if probe_native:
+                native_status, decisions, raw_calls, native_text = await self._decide_native(
+                    running_messages, temp=0.0
+                )
+                if native_status == "tool_calls":
                     used_native = True
-                    self._native_supported = True
-                    self._save_native_flag(True)  # ИСПРАВЛЕНИЕ #4: сохраняем флаг
+                    self._confirm_native()
                 elif used_native:
+                    # Нативный режим уже работал в этом запуске: пустой или сбойный ответ — конец цикла.
                     break
 
             if decisions is None and not used_native:
@@ -648,155 +695,115 @@ class ToolRouter:
                     f"- {t['tool']}({t['arguments']}) -> {str(t['result'])[:300]}" for t in tool_trace
                 )
                 decision = await self._decide_fallback(message, history_tail, results_text, temp=0.0)
-                # ИСПРАВЛЕНИЕ (crash "Stream error: 'NoneType' object has no attribute 'get'"):
-                # _decide_fallback возвращает None, когда LLM выдала пустой ответ или
-                # не-JSON (сбой LM Studio, таймаут). Раньше decision.get(...) сразу падал
-                # с AttributeError, исключение вылетало из ToolRouter.run и гасило весь
-                # ответ чата (в стрим-режиме это ловилось как "Stream error"). None =
-                # "модель не смогла принять решение" — просто завершаем ReAct-цикл
-                # и отвечаем без инструментов.
                 if decision is None:
-                    logger.debug("ToolRouter: fallback-решение недоступно (пустой/невалидный ответ LLM) — завершаю цикл.")
+                    logger.debug("ToolRouter: fallback-решение недоступно — завершаю цикл.")
                     break
-                tool_name = decision.get("tool")
-                if tool_name and decision.get("action") == "call_tool":
-                    spec = self.registry.get(tool_name)
-                    if not spec:
-                        for qname, tspec in self.registry._tools.items():
-                            if tspec.original_tool_name == tool_name:
-                                decision["tool"] = qname
-                                break
-                if not decision or decision.get("action") != "call_tool":
+                if decision.get("action") != "call_tool" or not decision.get("tool"):
                     break
                 decisions = [{"tool": decision.get("tool"), "arguments": decision.get("arguments", {})}]
-
-                if self._native_supported is None:
-                    self._native_supported = False
-                    self._save_native_flag(False)  # ИСПРАВЛЕНИЕ #4: сохраняем флаг
-
-            if decisions:
-                logger.info(f"ToolRouter: round {round_idx}, decisions: {decisions}")
+                raw_calls = None
+                if native_status == "no_tool":
+                    self._note_native_miss()
 
             if not decisions:
                 break
 
-            # Фильтруем повторы и ошибки
-            to_execute: List[Dict[str, Any]] = []
-            for d in decisions:
-                args = d.get("arguments", {})
-                normalized_args = {}
-                for k, v in args.items():
-                    if isinstance(v, str):
-                        normalized_args[k] = v.strip().lower() if k == "query" else v.strip()
-                    else:
-                        normalized_args[k] = v
-                sig = (d.get("tool"), json.dumps(normalized_args, sort_keys=True, ensure_ascii=False))
-                if sig in seen_calls:
-                    logger.info(f"ToolRouter: пропускаю повторный вызов {sig} — результат уже есть в tool_trace.")
-                    continue
-                # === ИСПРАВЛЕНИЕ: если этот вызов уже дал ошибку, не повторяем ===
-                if sig in seen_errors:
-                    logger.info(f"ToolRouter: пропускаю ранее ошибочный вызов {sig}.")
-                    continue
-                seen_calls.add(sig)
-                to_execute.append(d)
+            logger.info(f"ToolRouter: round {round_idx}, decisions: {decisions}")
 
-            new_calls_this_round = len(to_execute)
+            # 1. Разбор решений: имена, дедупликация, ответы на каждый вызов.
+            responses: Dict[int, str] = {}
+            to_execute: List[Tuple[int, Dict[str, Any], str]] = []
+            for idx, d in enumerate(decisions):
+                name = self._resolve_tool_name(d.get("tool") or "")
+                args = d.get("arguments") or {}
+                if not name:
+                    responses[idx] = "Ошибка: вызов без имени инструмента."
+                    continue
+                sig = _call_signature(name, args)
+                if sig in seen_results:
+                    responses[idx] = (
+                        "[Повтор: этот вызов уже выполнялся в этом запросе, результат прежний]\n"
+                        + seen_results[sig]
+                    )
+                    continue
+                to_execute.append((idx, {"tool": name, "arguments": args}, sig))
+
+            # 2. Выполнение.
             round_results: List[Dict[str, Any]] = []
+            round_hints: List[str] = []
             if to_execute:
                 if TOOL_PARALLEL_EXECUTION and len(to_execute) > 1:
-                    results = await asyncio.gather(
-                        *[self._execute_tool(d["tool"], d.get("arguments", {})) for d in to_execute],
-                        return_exceptions=True,
+                    outcomes = await asyncio.gather(
+                        *[self._execute_tool(d["tool"], d["arguments"]) for _, d, _ in to_execute]
                     )
                 else:
-                    results = []
-                    for d in to_execute:
-                        try:
-                            results.append(await self._execute_tool(d["tool"], d.get("arguments", {})))
-                        except Exception as e:
-                            results.append(e)
+                    outcomes = [await self._execute_tool(d["tool"], d["arguments"]) for _, d, _ in to_execute]
 
-                for d, result in zip(to_execute, results):
-                    if isinstance(result, Exception):
-                        logger.error(f"Tool '{d['tool']}' raised during parallel execution: {result}")
-                        result = f"Ошибка вызова инструмента '{d['tool']}': {result}"
-                    entry = {"tool": d["tool"], "arguments": d.get("arguments", {}), "result": result}
+                for (idx, d, sig), (ok, text) in zip(to_execute, outcomes):
+                    seen_results[sig] = text
+                    responses[idx] = text
+                    entry = {
+                        "tool": d["tool"],
+                        "arguments": d["arguments"],
+                        "result": text,
+                        "ok": ok,
+                        "verification": "sufficient" if ok else "error",
+                    }
                     tool_trace.append(entry)
                     round_results.append(entry)
+                    if ok:
+                        continue
 
-                    # === ИСПРАВЛЕНИЕ: если результат содержит явную ошибку, запоминаем сигнатуру как ошибочную ===
-                    result_str = str(result).lower()
-                    if "ошибка" in result_str or "не найдено" in result_str or "404" in result_str:
-                        sig = (d["tool"], json.dumps(d.get("arguments", {}), sort_keys=True, ensure_ascii=False))
-                        seen_errors.add(sig)
-                        # ПУНКТ №1: Рефлексия над неудачей
-                        reflection = await self._reflect_on_failure(
-                            d["tool"], d.get("arguments", {}), result,
-                            history_tail
+                    # Рефлексия только для реального сбоя, а не для слова «ошибка» в тексте.
+                    reflection = await self._reflect_on_failure(d["tool"], d["arguments"], text, history_tail)
+                    action = reflection.get("next_action", "give_up")
+                    diagnosis = reflection.get("diagnosis", "неизвестно")
+                    logger.info(f"Рефлексия над ошибкой: {diagnosis} -> {action}")
+
+                    if action == "different_tool" and reflection.get("suggested_tool"):
+                        round_hints.append(
+                            f"[Диагноз: {diagnosis}]\n"
+                            f"[Попробуй другой инструмент: {reflection['suggested_tool']} "
+                            f"с аргументами {reflection.get('modified_args') or '{}'}]"
                         )
-                        logger.info(f"Рефлексия над ошибкой: {reflection.get('diagnosis', 'неизвестно')}")
+                    elif action == "retry_modified" and reflection.get("modified_args"):
+                        round_hints.append(
+                            f"[Диагноз: {diagnosis}]\n"
+                            f"[Попробуй снова с исправленными аргументами: {reflection['modified_args']}]"
+                        )
+                    if reflection.get("new_plan") and replan_count < 2:
+                        replan_count += 1
+                        max_iterations = min(MAX_TOOL_ITERATIONS_DYNAMIC, max_iterations + 2)
+                        round_hints.append(f"[Новый план после ошибки]\n{reflection['new_plan']}")
+                        logger.info(f"Перепланирование #{replan_count}, новый лимит: {max_iterations}")
 
-                        # === ИСПРАВЛЕНИЕ: реально используем результат рефлексии ===
-                        next_action = reflection.get("next_action", "give_up")
+            # 3. Сообщения для следующего раунда.
+            if raw_calls is not None:
+                running_messages.append({"role": "assistant", "content": native_text, "tool_calls": raw_calls})
+                for idx, raw in enumerate(raw_calls):
+                    running_messages.append({
+                        "role": "tool",
+                        "tool_call_id": raw.get("id", ""),
+                        "content": responses.get(idx, "(нет результата)"),
+                    })
+            elif round_results:
+                running_messages.append({
+                    "role": "user",
+                    "content": (
+                        "[Результаты только что вызванных инструментов — используй их, "
+                        "не вызывай те же инструменты с теми же аргументами повторно]\n"
+                        + build_tool_trace_context(round_results)
+                    ),
+                })
+            for hint in round_hints:
+                running_messages.append({"role": "user", "content": hint})
 
-                        if next_action == "give_up":
-                            logger.info("Reflection: сдаюсь, завершаю ReAct-цикл для этого инструмента")
-                            entry["verification"] = "error"
-                        elif next_action == "different_tool" and reflection.get("suggested_tool"):
-                            suggested = reflection["suggested_tool"]
-                            modified_args = reflection.get("modified_args", {})
-                            running_messages.append({
-                                "role": "user",
-                                "content": (
-                                    f"[Диагноз: {reflection.get('diagnosis', 'неизвестно')}]\n"
-                                    f"[Попробуй другой инструмент: {suggested} "
-                                    f"с аргументами {modified_args if modified_args else '{}'}]"
-                                ),
-                            })
-                            logger.info(f"Reflection: предложен другой инструмент {suggested}")
-                        elif next_action == "retry_modified" and reflection.get("modified_args"):
-                            running_messages.append({
-                                "role": "user",
-                                "content": (
-                                    f"[Диагноз: {reflection.get('diagnosis', 'неизвестно')}]\n"
-                                    f"[Попробуй снова с исправленными аргументами: {reflection['modified_args']}]"
-                                ),
-                            })
-                            logger.info("Reflection: предложены исправленные аргументы")
+            if not to_execute:
+                break  # все вызовы были повторами — новой информации нет
 
-                        # Если модель предлагает перепланирование
-                        if reflection.get("new_plan") and replan_count < 2:
-                            replan_count += 1
-                            max_iterations = min(MAX_TOOL_ITERATIONS_DYNAMIC, max_iterations + 2)
-                            running_messages.append({
-                                "role": "user",
-                                "content": f"[Новый план после ошибки]\n{reflection['new_plan']}",
-                            })
-                            logger.info(f"Перепланирование #{replan_count}, новый лимит: {max_iterations}")
-
-                    # ПУНКТ №2: Верификация результата
-                    verification = await self._verify_tool_result(message, d["tool"], result)
-                    if verification == "irrelevant":
-                        logger.info(f"Результат инструмента {d['tool']} нерелевантен")
-                        # Помечаем как нерелевантный для модели
-                        entry["verification"] = "irrelevant"
-                    elif verification == "error":
-                        logger.warning(f"Результат инструмента {d['tool']} содержит ошибку")
-                        entry["verification"] = "error"
-                    elif verification == "partial":
-                        entry["verification"] = "partial"
-                    else:
-                        entry["verification"] = "sufficient"
-
-            if new_calls_this_round == 0:
-                break
-
-            # === ПУНКТ №10: Обновление scratchpad после каждого раунда ===
-            # Гейт: только для сложных задач (2+ инструментов) и не на первом раунде
+            # 4. Сжатие состояния для сложных задач (как раньше).
             if round_idx > 0 and len(tool_trace) >= 2 and _looks_compound(message):
                 try:
-                    # Короткий LLM-вызов для сжатия состояния
                     scratchpad_prompt = (
                         f"Запрос: {message[:200]}\n"
                         f"Выполнено инструментов: {len(tool_trace)}\n"
@@ -807,37 +814,23 @@ class ToolRouter:
                         "3) Какой следующий логичный шаг\n"
                         "Без воды, только конкретика."
                     )
-                    scratchpad_summary = await self.llm_text_caller(
-                        [{"role": "user", "content": scratchpad_prompt}],
-                        temp=0.0,
-                        max_tokens=150,
+                    summary = await self.llm_text_caller(
+                        [{"role": "user", "content": scratchpad_prompt}], temp=0.0, max_tokens=150
                     )
-                    if scratchpad_summary:
-                        self._scratchpad.append(scratchpad_summary.strip())
-                        # Держим только последние 3 записи
-                        if len(self._scratchpad) > 3:
-                            self._scratchpad = self._scratchpad[-3:]
-
-                        # Добавляем scratchpad в контекст для следующего раунда
-                        running_messages = running_messages + [{
+                    if summary:
+                        self._scratchpad.append(summary.strip())
+                        self._scratchpad = self._scratchpad[-3:]
+                        running_messages.append({
                             "role": "user",
-                            "content": f"[Scratchpad — что я уже знаю]\n{scratchpad_summary.strip()}",
-                        }]
-                        logger.debug(f"Scratchpad обновлён: {scratchpad_summary[:80]}...")
+                            "content": f"[Scratchpad — что я уже знаю]\n{summary.strip()}",
+                        })
                 except Exception as e:
                     logger.debug(f"Scratchpad update failed: {e}")
 
-            running_messages = running_messages + [{
-                "role": "user",
-                "content": (
-                    "[Результаты только что вызванных инструментов — используй их, "
-                    "не вызывай те же инструменты с теми же аргументами повторно]\n"
-                    + build_tool_trace_context(round_results)
-                ),
-            }]
-
-            if not used_native and len(tool_trace) >= max_iterations:
+            if raw_calls is None and not used_native and len(tool_trace) >= max_iterations:
                 break
+
+            round_idx += 1
 
         return {"tool_trace": tool_trace, "used_native": used_native}
 

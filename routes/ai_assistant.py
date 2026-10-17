@@ -1431,7 +1431,14 @@ class CognitiveController:
         memory_context = ""
         # ИСПРАВЛЕНИЕ (причина №2 — "путаница" памяти в браузерном чате, которой
         # нет в MCP-режиме): отсекаем низкорелевантные результаты по порогу.
-        context_facts = [f for f in relevant if f.get("_score", f.get("score", 0.0)) >= MEMORY_CONTEXT_MIN_SCORE]
+        # Фильтр по релевантности к вопросу, а не по доверию. Элементы без семантического сигнала
+        # (подтянуты только графом) проходят по доверию.
+        def _passes_memory_filter(f):
+            rel = f.get("relevance")
+            if rel is None:
+                return f.get("confidence", 0.0) >= MEMORY_CONTEXT_MIN_SCORE
+            return rel >= MEMORY_MIN_RELEVANCE
+        context_facts = [f for f in relevant if _passes_memory_filter(f)]
         if context_facts:
             type_labels = {
                 "claim": "факт", "concept": "концепт (обобщение)",
@@ -1514,7 +1521,7 @@ class CognitiveController:
                     for item in extra:
                         item_copy = dict(item)
                         item_copy["_goal_boosted"] = True
-                        item_copy["_score"] = item_copy.get("_score", item_copy.get("score", 0.5)) + 0.15
+                        item_copy["_score"] = item_copy.get("_score", 0.0) + GOAL_RANK_BOOST
                         goal_relevant.append(item_copy)
 
                 # Merge с dedup по gcn_id или text

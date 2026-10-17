@@ -219,14 +219,15 @@ class CognitiveMemory:
         self.prediction_cache: Dict[str, List[int]] = {}
 
         # ---- Динамические веса (для гибридного поиска) ----
+        # Веса только тех каналов, которые считает GCN.hybrid_retrieve. Раньше сюда попадали
+        # bm25/cosine: они не использовались, но входили в нормировку, и семантика с графом
+        # получали примерно 60% заданного веса.
         self._dynamic_weights = {
-            "bm25": HYBRID_WEIGHT_BM25,
-            "cosine": HYBRID_WEIGHT_COSINE,
-            "freshness": HYBRID_WEIGHT_FRESHNESS,
+            "semantic": HYBRID_WEIGHT_SEMANTIC,
             "graph": HYBRID_WEIGHT_GRAPH,
-            "semantic": HYBRID_WEIGHT_SEMANTIC,  # добавить
-            "confidence": HYBRID_WEIGHT_CONFIDENCE,  # добавить
-            "evidence": HYBRID_WEIGHT_EVIDENCE,  # добавить
+            "freshness": HYBRID_WEIGHT_FRESHNESS,
+            "confidence": HYBRID_WEIGHT_CONFIDENCE,
+            "evidence": HYBRID_WEIGHT_EVIDENCE,
         }
 
         # ---- Вспомогательные структуры ----
@@ -1062,52 +1063,50 @@ class CognitiveMemory:
     # ==================== ГИБРИДНЫЙ ПОИСК ====================
     async def retrieve_hybrid(self, query: str, top_k: int = 5, use_graph: bool = True) -> List[Dict]:
         """
-        Гибридный поиск через GCN с преобразованием результата в старый формат.
-        Добавлена адаптивная корректировка весов в зависимости от типа запроса.
+        Гибридный поиск по слою памяти.
+
+        Порядок результатов задаёт итоговый скор (семантика + граф + свежесть + доверие +
+        активация), а не доверие к факту. В результатах сохраняются relevance (0..1, нормировано
+        по пулу кандидатов) и semantic_sim (сырой косинус), чтобы фильтрация и реранк опирались
+        на близость к вопросу.
         """
-        cache_key = f"hybrid_{query}_{top_k}_{use_graph}"
+        start_node = self.hierarchy.working_memory[-1] if use_graph and self.hierarchy.working_memory else None
+
+        # ИСПРАВЛЕНИЕ: ключ кэша учитывает стартовый узел. Раньше тот же вопрос в другом контексте
+        # рабочей памяти возвращал устаревший результат в течение TTL.
+        cache_key = f"hybrid_{query}_{top_k}_{use_graph}_{start_node}"
         if cache_key in self._cache:
             result, ts = self._cache[cache_key]
             if time.time() - ts < self._cache_ttl:
                 return result
 
-        # Генерируем вектор запроса (is_query=True — асимметричный префикс e5)
         query_vector = None
         if self.use_embeddings:
             query_vector = self._get_embedding(query, is_query=True).tolist()
 
-        start_node = self.hierarchy.working_memory[-1] if use_graph and self.hierarchy.working_memory else None
-
-        # ===== АДАПТИВНАЯ КОРРЕКТИРОВКА ВЕСОВ =====
+        # Адаптивные веса по типу запроса (логика прежняя).
         weights = self._dynamic_weights.copy()
-
-        # Определяем тип запроса
         if self._is_time_sensitive(query):
-            # Временные запросы (курсы, новости) – повышаем свежесть
             weights['freshness'] = min(0.8, weights.get('freshness', 0.15) + 0.3)
             weights['semantic'] = max(0.2, weights.get('semantic', 0.40) - 0.1)
             weights['graph'] = max(0.1, weights.get('graph', 0.20) - 0.05)
         elif self._is_factual(query):
-            # Фактологические запросы – повышаем семантику и граф
             weights['semantic'] = min(0.7, weights.get('semantic', 0.40) + 0.2)
             weights['graph'] = min(0.5, weights.get('graph', 0.20) + 0.1)
             weights['freshness'] = max(0.05, weights.get('freshness', 0.15) - 0.05)
-
-        # Нормируем веса
         total = sum(weights.values())
         if total > 0:
             weights = {k: v / total for k, v in weights.items()}
-        # =========================================
 
-        # Выполняем поиск в GCN с модифицированными весами
         gcn_results = self.gcn_store.hybrid_retrieve(
             query_vector=query_vector,
             start_node=start_node,
             top_k=top_k * 3,
-            weights=weights
+            weights=weights,
+            with_details=True,
         )
 
-        # Применяем spreading activation для графового буста
+        # Spreading activation для графового буста.
         activation_map: Dict[int, float] = {}
         if use_graph and self.hierarchy.working_memory:
             seed_local_ids = []
@@ -1122,7 +1121,8 @@ class CognitiveMemory:
                     logger.debug(f"spread_activation failed in retrieve_hybrid: {e}")
 
         result = []
-        for obj in gcn_results:
+        for det in gcn_results:
+            obj = det["obj"]
             meta = obj.object if isinstance(obj.object, dict) else {}
             fid = None
             activation_boost = 0.0
@@ -1152,9 +1152,8 @@ class CognitiveMemory:
                 item_type = obj.type.value
                 importance = meta.get("importance", 1.0)
 
-            base_score = obj.confidence
-            final_score = (min(1.0, base_score + HYBRID_WEIGHT_GRAPH * activation_boost)
-                           if activation_boost else base_score)
+            # Итоговый скор уже содержит семантику, граф, свежесть и доверие (см. GCN.hybrid_retrieve).
+            final_score = det["score"] + (HYBRID_WEIGHT_GRAPH * activation_boost if activation_boost else 0.0)
 
             result.append({
                 "id": fid,
@@ -1162,6 +1161,8 @@ class CognitiveMemory:
                 "type": item_type,
                 "timestamp": obj.created.timestamp(),
                 "score": final_score,
+                "relevance": det["relevance"],
+                "semantic_sim": det["semantic_sim"],
                 "confidence": obj.confidence,
                 "importance": importance,
                 "activation": activation_boost,
@@ -1794,40 +1795,40 @@ class GCNMemoryRouter:
         shared_results = await self.shared_memory.retrieve_hybrid(query, top_k=top_k)
         global_results = await self.global_memory.retrieve_hybrid(query, top_k=top_k)
 
-        # Применяем веса к скорам в зависимости от scope
-        # Приватные выше, глобальные чуть ниже, общие посередине
-        for item in private_results:
-            item["_score"] = item.get("score", 0.5) * 1.2  # +20%
-        for item in shared_results:
-            item["_score"] = item.get("score", 0.5) * 1.0  # базовый
-        for item in global_results:
-            item["_score"] = item.get("score", 0.5) * 0.9  # -10%
+        # Копии: результаты retrieve_hybrid кэшируются, а ниже мы перезаписываем _score и relevance.
+        private_results = [dict(i) for i in private_results]
+        shared_results = [dict(i) for i in shared_results]
+        global_results = [dict(i) for i in global_results]
 
-        # УЛУЧШЕНИЕ (кросс-слойная связность / "глобальный мозг"): раньше три
-        # слоя памяти были полностью изолированы друг от друга — три
-        # независимых retrieve_hybrid, объединённых только конкатенацией и
-        # статичным весом по scope. Личный факт пользователя A никак не мог
-        # "дотянуться" через граф до факта пользователя B, даже если оба
-        # физически обосновывают один и тот же глобальный концепт. Теперь,
-        # если личный/общий факт был явно заземлён на глобальный концепт
-        # через ребро GROUNDS_IN (см. add_knowledge ниже), подтягиваем этот
-        # концепт в выдачу — так запрос в приватной памяти может всплыть
-        # коллективной абстракцией, а не только изолированным личным фактом.
+        # Слияние слоёв: взвешенный Reciprocal Rank Fusion. Внутри слоя важен ранг (списки уже
+        # отсортированы по итоговому скору), а не абсолютное значение, поэтому слои с разной
+        # шкалой становятся сопоставимыми. Вес слоя сохраняет приоритет личной памяти.
+        for layer, w in ((private_results, 1.2), (shared_results, 1.0), (global_results, 0.9)):
+            for rank, item in enumerate(layer):
+                item["_score"] = w / (RRF_K + rank + 1)
+
         grounded_extra = (self._pull_grounded_concepts(private_results, self.private_memory.store)
                           + self._pull_grounded_concepts(shared_results, self.shared_memory.store))
 
-        combined = private_results + shared_results + global_results + grounded_extra
-
-        # Убираем дубликаты по тексту (можно по id, но для надёжности по тексту)
-        seen_texts = set()
-        unique = []
-        for item in combined:
+        # Дедуп по тексту: остаётся вариант с наибольшим _score, а не первый встреченный.
+        best: Dict[str, Dict] = {}
+        for item in private_results + shared_results + global_results + grounded_extra:
             text = item.get("text", "")
-            if text and text not in seen_texts:
-                seen_texts.add(text)
-                unique.append(item)
+            if not text:
+                continue
+            if text not in best or item.get("_score", 0.0) > best[text].get("_score", 0.0):
+                best[text] = item
+        unique = list(best.values())
 
-        # Сортируем по _score
+        # Релевантность к вопросу: min-max по всему пулу (один эмбеддер, косинусы сравнимы).
+        sims = [i["semantic_sim"] for i in unique if i.get("semantic_sim") is not None]
+        if sims:
+            lo, hi = min(sims), max(sims)
+            span = hi - lo
+            for i in unique:
+                s = i.get("semantic_sim")
+                i["relevance"] = None if s is None else ((s - lo) / span if span > 1e-9 else 1.0)
+
         unique.sort(key=lambda x: x.get("_score", 0.0), reverse=True)
         return unique
 
@@ -1839,7 +1840,7 @@ class GCNMemoryRouter:
         через обычный multi-scope retrieve() (private+shared+global, rerank,
         grounded-концепты — весь существующий пайплайн), затем результаты
         сливаются по gcn_id: факт, найденный по нескольким подзапросам,
-        получает буст _score (+0.07 за каждый доп. хит) — это устраняет
+        получает буст _score (+0.5 от _score за каждый доп. хит) — это устраняет
         главный недостаток single-embedding поиска по составным вопросам,
         когда релевантный факт "размазан" между несколькими смысловыми
         частями запроса. Финальный порядок — один общий LLM-реранк уже по
@@ -1862,7 +1863,7 @@ class GCNMemoryRouter:
                 if not key:
                     continue
                 if key in merged:
-                    merged[key]["_score"] = min(1.0, merged[key].get("_score", 0.0) + 0.07)
+                    merged[key]["_score"] = merged[key].get("_score", 0.0) + 0.5 * item.get("_score", 0.0)
                     merged[key]["_hits"] = merged[key].get("_hits", 1) + 1
                 else:
                     item["_hits"] = 1
@@ -1995,39 +1996,41 @@ class GCNMemoryRouter:
         return result
 
     def _pull_grounded_concepts(self, results: List[Dict], source_store: "MemoryStore") -> List[Dict]:
-        """Для топовых результатов данного слоя подтягивает связанные GLOBAL-концепты
-        через ребро GROUNDS_IN (см. add_knowledge). Часть кросс-слойного заземления
-        памяти — полноценный spreading activation через границы store пока не
-        реализован (это отдельный шаг), но точечное "притягивание" уже связанных
-        концептов работает и является дешёвой первой версией этой идеи."""
-        extra = []
-        seen = set()
-        for item in results[:5]:
-            gid = item.get("gcn_id")
+        """
+        Для топовых результатов слоя подтягивает связанные GLOBAL-концепты через ребро GROUNDS_IN.
+        Скор концепта выводится из скора факта, который его подтянул, а не из доверия к концепту:
+        концепт попадает в выдачу только через факт, релевантный вопросу.
+        """
+        extra: Dict[str, Dict] = {}
+        for parent in results[:5]:
+            gid = parent.get("gcn_id")
             if not gid:
                 continue
+            parent_score = parent.get("_score", 0.0)
             for relation, target_id in source_store._graph.get_neighbors(gid, "GROUNDS_IN"):
-                if target_id in seen:
-                    continue
-                seen.add(target_id)
                 gobj = self.global_memory.store.get(target_id)
                 if gobj is None:
                     continue
-                score = gobj.confidence * 0.85  # чуть ниже "родного" глобального результата
-                extra.append({
+                score = parent_score * 0.85  # чуть ниже породившего факта
+                prev = extra.get(target_id)
+                if prev is not None and prev["_score"] >= score:
+                    continue
+                extra[target_id] = {
                     "id": None,
                     "text": gobj.subject,
                     "type": "concept",
                     "timestamp": gobj.created.timestamp(),
-                    "score": score,
+                    "score": gobj.confidence,
                     "confidence": gobj.confidence,
                     "importance": 1.2,
                     "activation": 0.0,
                     "gcn_id": gobj.id,
                     "_score": score,
+                    "relevance": None,
+                    "semantic_sim": parent.get("semantic_sim"),  # нормируется вместе с пулом
                     "scope": gobj.scope.value,
-                })
-        return extra
+                }
+        return list(extra.values())
 
     def add_knowledge(self, subject: str, predicate: str, obj: Any,
                       scope: MemoryScope = MemoryScope.PRIVATE,

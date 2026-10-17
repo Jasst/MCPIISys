@@ -1135,8 +1135,9 @@ class MemoryStore:
             start_node: Optional[str] = None,
             top_k: int = 10,
             alpha: float = 0.7,
-            weights: Optional[Dict[str, float]] = None
-    ) -> List[KnowledgeObject]:
+            weights: Optional[Dict[str, float]] = None,
+            with_details: bool = False,
+    ) -> List[Any]:
         # ... генерация вектора из текста ...
         if query_text and query_vector is None and embedder_func:
             try:
@@ -1160,17 +1161,27 @@ class MemoryStore:
         if total > 0:
             weights = {k: v / total for k, v in weights.items()}
 
-        candidates = set()
-        scores = {}
+        candidates: Set[str] = set()
+        scores: Dict[str, float] = {}
 
-        # 1. Семантический
+        # 1. Семантический канал. Сырые косинусы сохраняем; нормировку делаем внутри запроса:
+        # косинусы e5 сжаты в узком диапазоне, и без растяжения вклад семантики почти не
+        # различает кандидатов.
+        sem_sim: Dict[str, float] = {}
         if query_vector is not None:
-            sem_results = self.semantic_search(query_vector, top_k=top_k * 3)
-            for obj_id, sim in sem_results:
+            for obj_id, sim in self.semantic_search(query_vector, top_k=top_k * 3):
                 candidates.add(obj_id)
-                scores[obj_id] = scores.get(obj_id, 0.0) + max(0.0, min(1.0, sim)) * weights['semantic']
+                sem_sim[obj_id] = float(sim)
+        sem_rel: Dict[str, float] = {}
+        if sem_sim:
+            lo, hi = min(sem_sim.values()), max(sem_sim.values())
+            span = hi - lo
+            for obj_id, sim in sem_sim.items():
+                sem_rel[obj_id] = (sim - lo) / span if span > 1e-9 else 1.0
+        for obj_id, rel in sem_rel.items():
+            scores[obj_id] = scores.get(obj_id, 0.0) + rel * weights['semantic']
 
-        # 2. Графовый
+        # 2. Графовый канал.
         if start_node:
             graph_ids = self.graph_search(start_node, max_depth=2)
             for obj_id in graph_ids:
@@ -1180,6 +1191,7 @@ class MemoryStore:
                 edge_weight = self._graph.get_relation_weight(start_node, "synapse", obj_id) or 1.0
                 scores[obj_id] = scores.get(obj_id, 0.0) + min(1.0, edge_weight) * weights['graph']
 
+        # 3. Дополнительные факторы
         # 3. Дополнительные факторы
         now = datetime.now(timezone.utc)
         for obj_id in list(candidates):
@@ -1211,9 +1223,19 @@ class MemoryStore:
             ev = min(len(obj.evidence), 5) / 5
             scores[obj_id] += ev * weights['evidence']
 
-        # Сортировка и возврат объектов
-        sorted_ids = sorted(candidates, key=lambda x: scores.get(x, 0.0), reverse=True)
-        return [self._objects[oid] for oid in sorted_ids[:top_k]]
+        # Сортировка: итоговый скор учитывает семантику, граф, свежесть, доверие и доказательства.
+        sorted_ids = sorted(candidates, key=lambda x: scores.get(x, 0.0), reverse=True)[:top_k]
+        if not with_details:
+            return [self._objects[oid] for oid in sorted_ids]
+        return [
+            {
+                "obj": self._objects[oid],
+                "score": scores.get(oid, 0.0),
+                "relevance": sem_rel.get(oid),     # 0..1 внутри запроса; None — нет семантического сигнала
+                "semantic_sim": sem_sim.get(oid),  # сырой косинус; None — нет семантического сигнала
+            }
+            for oid in sorted_ids
+        ]
 
     # ---------- Персистентность ----------
     def _merge_disk_state(self, path: str):
