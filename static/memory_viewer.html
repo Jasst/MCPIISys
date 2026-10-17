@@ -1,0 +1,697 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Моя память — GCN</title>
+<style>
+:root{--bg:#0e1117;--panel:#161b25;--panel2:#1c2330;--line:#2a3142;--text:#e6e9f0;--muted:#8b95a8;
+  --acc:#6aa9ff;--bad:#ff6b6b;--ok:#5fd38d;--warn:#f0b35a}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--text);
+  font:13px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+#top{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px 10px;background:var(--panel);
+  border-bottom:1px solid var(--line)}
+#top .title{font-weight:600;margin-right:6px}
+#main{display:grid;grid-template-columns:270px 1fr 360px;height:calc(100% - 120px)}
+#left,#right{overflow:auto;background:var(--panel);padding:10px}
+#left{border-right:1px solid var(--line)}
+#right{border-left:1px solid var(--line)}
+#stage{position:relative;overflow:hidden}
+#cv{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:grab}
+#cv.grabbing{cursor:grabbing}
+#feed{height:120px;overflow:auto;border-top:1px solid var(--line);background:var(--panel);
+  padding:6px 10px;font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;color:var(--muted)}
+#feed .bad{color:var(--bad)} #feed .ok{color:var(--ok)} #feed .info{color:var(--muted)}
+h3{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:12px 0 6px}
+h3:first-child{margin-top:0}
+.card{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:8px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.kv{display:flex;justify-content:space-between;gap:8px;font-size:12px}
+.kv span:first-child{color:var(--muted)}
+.bar-row{display:grid;grid-template-columns:110px 1fr 40px;gap:6px;align-items:center;font-size:12px;margin:3px 0}
+.bar{height:8px;background:var(--acc);border-radius:4px;min-width:2px}
+.hist{display:flex;align-items:flex-end;gap:3px;height:60px}
+.hist div{flex:1;background:var(--acc);opacity:.85;border-radius:2px 2px 0 0;min-height:1px}
+.hist-l{display:flex;justify-content:space-between;color:var(--muted);font-size:10px}
+button{background:#243049;color:var(--text);border:1px solid #33405e;border-radius:6px;padding:5px 9px;
+  cursor:pointer;font:inherit}
+button:hover:not(:disabled){background:#2c3b5c}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.danger{border-color:#6b2e2e;background:#3a1f22}
+button.danger:hover:not(:disabled){background:#4d2629}
+button.primary{background:#23406b;border-color:#3b64a0}
+button.small{padding:2px 7px;font-size:12px}
+input,select,textarea{background:#0f1420;color:var(--text);border:1px solid #33405e;border-radius:6px;
+  padding:5px 7px;font:inherit;max-width:100%}
+textarea{width:100%;min-height:58px;resize:vertical}
+input[type=range]{padding:0;width:110px}
+label{color:var(--muted);font-size:12px}
+.row{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:6px 0}
+.badge{display:inline-block;padding:1px 7px;border-radius:999px;font-size:11px;border:1px solid var(--line);
+  color:var(--text)}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;color:var(--muted);word-break:break-all}
+.edge{display:flex;gap:6px;align-items:center;font-size:12px;padding:3px 0;border-bottom:1px dashed var(--line)}
+.edge .rel{color:var(--acc);min-width:110px}
+.edge .nb{flex:1;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.edge .nb:hover{text-decoration:underline}
+.verdict-ok{color:var(--ok)} .verdict-bad{color:var(--bad)} .verdict-warn{color:var(--warn)}
+.hub{cursor:pointer;padding:2px 0;font-size:12px}
+.hub:hover{text-decoration:underline}
+.legend{display:flex;flex-wrap:wrap;gap:6px 10px;font-size:11px;color:var(--muted)}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:4px;vertical-align:-1px}
+.ro-note{color:var(--warn);font-size:12px;margin:4px 0}
+a.back{color:var(--acc);text-decoration:none;padding:5px 2px}
+a.back:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<div id="top">
+  <a class="back" href="/">← к чату</a>
+  <span class="title">Моя память</span>
+  <span id="status" class="badge">…</span>
+  <button id="live" title="обновлять каждые 2 секунды">Live: вкл</button>
+  <label>вид
+    <select id="layout">
+      <option value="graph">граф связей</option>
+      <option value="pca">векторы (2D проекция)</option>
+    </select>
+  </label>
+  <input id="q" type="search" placeholder="поиск по тексту…" size="22">
+  <label>тип <select id="ftype"><option value="">все</option></select></label>
+  <label>доверие ≥ <input id="minc" type="range" min="0" max="100" value="0"><span id="minc-v">0%</span></label>
+  <button id="fit" title="вписать в экран">Вписать</button>
+  <span id="counts" class="mono"></span>
+</div>
+
+<div id="main">
+  <aside id="left">
+    <h3>Метрики</h3>
+    <div id="metrics"></div>
+    <h3>Легенда</h3>
+    <div class="legend" id="legend"></div>
+  </aside>
+  <section id="stage"><canvas id="cv"></canvas></section>
+  <aside id="right">
+    <div id="detail"><div class="mono">Выбери узел на графе или в списке хабов.</div></div>
+  </aside>
+</div>
+
+<div id="feed"></div>
+
+<script>
+"use strict";
+const API = "/ai/memory";
+const TYPE_COLORS = {claim:"#6aa9ff", concept:"#5fd38d", observation:"#f0b35a", goal:"#c792ea",
+  evidence:"#7fdbca", hypothesis:"#ffcb6b", episode:"#82aaff", notification:"#f78c6c",
+  identity_core:"#ff5370", entity:"#b2ccd6", procedure:"#e2b8ff", relationship:"#9ad1ff"};
+const REL_COLORS = {CONTRADICTS:"#ff6b6b", CONTRADICT:"#ff6b6b", GROUNDS_IN:"#8b95a8", CAUSES:"#f0b35a",
+  ENABLES:"#5fd38d", PREVENTS:"#ff6b6b", INHIBITS:"#ff6b6b", REQUIRES:"#c792ea"};
+const REP = 2600, SPRING = 0.03, GRAV = 0.0025, DAMP = 0.82;
+
+const S = {
+  memory: null, readonly: false, snap: null, version: null,
+  byId: new Map(), pos: new Map(), selected: null, visible: new Set(), visibleEdges: [],
+  alpha: 1, layout: "graph", live: true, view: {x: 0, y: 0, k: 1},
+  drag: null, hover: null, degreeRank: new Set(), dirtyDetail: false,
+};
+
+const $ = (s) => document.querySelector(s);
+const cv = $("#cv"), ctx = cv.getContext("2d");
+
+function h(tag, props, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (v === undefined || v === null || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k === "value") el.value = v;
+    else if (k === "checked") el.checked = !!v;
+    else el.setAttribute(k, v === true ? "" : String(v));
+  }
+  for (const c of kids.flat()) {
+    if (c === null || c === undefined || c === false) continue;
+    el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  }
+  return el;
+}
+
+function log(msg, cls = "info") {
+  const t = new Date().toLocaleTimeString("ru-RU");
+  const feed = $("#feed");
+  feed.prepend(h("div", {class: cls}, `${t}  ${msg}`));
+  while (feed.childNodes.length > 200) feed.lastChild.remove();
+}
+
+async function api(path, body) {
+  const opt = body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body)};
+  const r = await fetch(path, opt);
+  let data = {};
+  try { data = await r.json(); } catch (_) { /* пустой ответ */ }
+  if (r.status === 401) { location.href = "/login"; throw new Error("нужен вход"); }
+  if (!r.ok) throw new Error(data.detail || data.error || ("HTTP " + r.status));
+  return data;
+}
+
+/* ---------- загрузка ---------- */
+async function init() {
+  const st = await api(API + "/status");
+  S.readonly = !!st.readonly;
+  S.memory = "me";
+  $("#status").textContent = st.readonly ? "только чтение" : "чтение и запись";
+  $("#status").style.color = st.readonly ? "var(--warn)" : "var(--ok)";
+  await refresh(true);
+}
+
+async function refresh(force) {
+  if (!S.memory) return;
+  const snap = await api(API + "/snapshot?max_nodes=800");
+  if (!force && snap.version === S.version) return;
+  const prevById = S.byId;
+  const nextById = new Map(snap.nodes.map((n) => [n.id, n]));
+  if (S.version !== null && prevById.size) {
+    let added = 0, removed = 0, changed = 0;
+    for (const id of nextById.keys()) if (!prevById.has(id)) added++;
+    for (const [id, p] of prevById) {
+      const n = nextById.get(id);
+      if (!n) removed++;
+      else if (n.version !== p.version || n.subject !== p.subject || n.confidence !== p.confidence) changed++;
+    }
+    if (added + removed + changed) log(`изменения памяти: +${added}  −${removed}  ~${changed}`, "ok");
+  }
+  S.snap = snap;
+  S.version = snap.version;
+  S.byId = nextById;
+  syncPositions();
+  fillTypeFilter(snap.metrics.by_type);
+  applyFilter();
+  renderMetrics(snap.metrics);
+  if (S.selected && S.byId.has(S.selected)) loadDetail(S.selected);
+  else if (S.selected) { S.selected = null; clearDetail(); }
+  S.alpha = Math.max(S.alpha, 0.3);
+}
+
+function fillTypeFilter(byType) {
+  const sel = $("#ftype"), cur = sel.value;
+  sel.innerHTML = "";
+  sel.append(h("option", {value: ""}, "все"));
+  for (const t of Object.keys(byType || {})) sel.append(h("option", {value: t}, `${t} (${byType[t]})`));
+  sel.value = cur;
+}
+
+function syncPositions() {
+  const keep = new Set(S.byId.keys());
+  for (const id of [...S.pos.keys()]) if (!keep.has(id)) S.pos.delete(id);
+  for (const id of keep) {
+    if (!S.pos.has(id)) {
+      S.pos.set(id, {x: (Math.random() - 0.5) * 320, y: (Math.random() - 0.5) * 320, vx: 0, vy: 0, pinned: false});
+    }
+  }
+  if (S.layout === "pca") applyPca();
+}
+
+function applyPca() {
+  const pca = (S.snap && S.snap.pca) || {};
+  for (const [id, p] of S.pos) {
+    const c = pca[id];
+    if (c) { p.x = c[0] * 380; p.y = c[1] * 380; p.vx = 0; p.vy = 0; }
+  }
+  S.alpha = 0;
+}
+
+function applyFilter() {
+  const q = $("#q").value.trim().toLowerCase();
+  const t = $("#ftype").value;
+  const minc = Number($("#minc").value) / 100;
+  $("#minc-v").textContent = Math.round(minc * 100) + "%";
+  S.visible = new Set();
+  for (const n of (S.snap ? S.snap.nodes : [])) {
+    if (t && n.type !== t) continue;
+    if (n.confidence < minc) continue;
+    if (q && !(n.subject.toLowerCase().includes(q) || (n.predicate || "").toLowerCase().includes(q))) continue;
+    S.visible.add(n.id);
+  }
+  S.visibleEdges = (S.snap ? S.snap.edges : []).filter((e) => S.visible.has(e.s) && S.visible.has(e.t));
+  const total = S.snap ? S.snap.total_nodes : 0, shown = S.snap ? S.snap.shown_nodes : 0;
+  $("#counts").textContent = `${S.visible.size}/${shown} узлов · ${S.visibleEdges.length} рёбер · всего ${total}`;
+  if (S.layout === "graph") S.alpha = Math.max(S.alpha, 0.4);
+}
+
+/* ---------- физика и отрисовка ---------- */
+function tick() {
+  if (S.layout !== "graph" || S.alpha < 0.003) return;
+  const ids = [...S.visible].filter((id) => S.pos.has(id));
+  const n = ids.length;
+  const a = S.alpha;
+  const P = ids.map((id) => S.pos.get(id));
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const p = P[i], q = P[j];
+      let dx = p.x - q.x, dy = p.y - q.y;
+      let d2 = dx * dx + dy * dy;
+      if (d2 < 1) { dx = Math.random() - 0.5; dy = Math.random() - 0.5; d2 = 1; }
+      const f = (REP / d2) * a / Math.sqrt(d2);
+      p.vx += dx * f; p.vy += dy * f;
+      q.vx -= dx * f; q.vy -= dy * f;
+    }
+  }
+  const index = new Map(ids.map((id, i) => [id, i]));
+  for (const e of S.visibleEdges) {
+    const i = index.get(e.s), j = index.get(e.t);
+    if (i === undefined || j === undefined) continue;
+    const p = P[i], q = P[j];
+    const dx = q.x - p.x, dy = q.y - p.y;
+    const d = Math.sqrt(dx * dx + dy * dy) || 1;
+    const target = 70 + (1 - Math.min(1, e.w)) * 60;
+    const f = (d - target) * SPRING * a;
+    p.vx += (dx / d) * f; p.vy += (dy / d) * f;
+    q.vx -= (dx / d) * f; q.vy -= (dy / d) * f;
+  }
+  for (const p of P) {
+    p.vx -= p.x * GRAV * a; p.vy -= p.y * GRAV * a;
+    if (!p.pinned) { p.x += p.vx; p.y += p.vy; }
+    p.vx *= DAMP; p.vy *= DAMP;
+  }
+  S.alpha *= 0.985;
+}
+
+function nodeRadius(n) { return 4 + Math.min(11, Math.sqrt(n.degree || 0) * 2.3); }
+
+function resize() {
+  const r = cv.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = Math.max(1, Math.round(r.width * dpr));
+  cv.height = Math.max(1, Math.round(r.height * dpr));
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function toScreen(p) {
+  const r = cv.getBoundingClientRect();
+  return [r.width / 2 + S.view.x + p.x * S.view.k, r.height / 2 + S.view.y + p.y * S.view.k];
+}
+
+function draw() {
+  const r = cv.getBoundingClientRect();
+  ctx.clearRect(0, 0, r.width, r.height);
+  if (!S.snap) return;
+  const k = S.view.k;
+  // рёбра
+  for (const e of S.visibleEdges) {
+    const p = S.pos.get(e.s), q = S.pos.get(e.t);
+    if (!p || !q) continue;
+    const [x1, y1] = toScreen(p), [x2, y2] = toScreen(q);
+    const involved = S.selected && (e.s === S.selected || e.t === S.selected);
+    ctx.beginPath();
+    ctx.strokeStyle = REL_COLORS[e.r] || "#3b4356";
+    ctx.globalAlpha = S.selected ? (involved ? 0.95 : 0.12) : 0.5;
+    ctx.lineWidth = (involved ? 2 : 1) + Math.min(2, e.w);
+    ctx.setLineDash(e.r.startsWith("CONTRADICT") ? [5, 4] : []);
+    ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  // узлы
+  const showLabels = k > 1.3;
+  for (const id of S.visible) {
+    const n = S.byId.get(id), p = S.pos.get(id);
+    if (!n || !p) continue;
+    const [x, y] = toScreen(p);
+    const rad = nodeRadius(n) * Math.min(1.6, Math.max(0.7, k));
+    const dim = S.selected && id !== S.selected && !isNeighbour(id);
+    ctx.globalAlpha = dim ? 0.18 : (0.45 + 0.55 * Math.min(1, n.confidence));
+    ctx.beginPath();
+    ctx.fillStyle = TYPE_COLORS[n.type] || "#9aa3b5";
+    ctx.arc(x, y, rad, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    if (hasContradiction(id)) {
+      ctx.lineWidth = 2; ctx.strokeStyle = "#ff6b6b"; ctx.stroke();
+    }
+    if (id === S.selected) {
+      ctx.beginPath(); ctx.arc(x, y, rad + 5, 0, Math.PI * 2);
+      ctx.lineWidth = 2; ctx.strokeStyle = "#ffffff"; ctx.stroke();
+    }
+    if (showLabels || id === S.selected || id === S.hover || S.degreeRank.has(id)) {
+      ctx.globalAlpha = dim ? 0.25 : 0.95;
+      ctx.fillStyle = "#e6e9f0";
+      ctx.font = "11px system-ui, sans-serif";
+      const label = n.subject.length > 40 ? n.subject.slice(0, 38) + "…" : n.subject;
+      ctx.fillText(label, x + rad + 4, y + 3);
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+const contradicting = new Set();
+function hasContradiction(id) { return contradicting.has(id); }
+function rebuildContradictions() {
+  contradicting.clear();
+  for (const e of (S.snap ? S.snap.edges : [])) if (e.r.startsWith("CONTRADICT")) { contradicting.add(e.s); contradicting.add(e.t); }
+}
+let neighSet = new Set();
+function rebuildNeighbours() {
+  neighSet = new Set();
+  if (!S.selected || !S.snap) return;
+  for (const e of S.snap.edges) {
+    if (e.s === S.selected) neighSet.add(e.t);
+    else if (e.t === S.selected) neighSet.add(e.s);
+  }
+}
+function isNeighbour(id) { return neighSet.has(id); }
+
+function worldAt(sx, sy) {
+  const r = cv.getBoundingClientRect();
+  return {x: (sx - r.width / 2 - S.view.x) / S.view.k, y: (sy - r.height / 2 - S.view.y) / S.view.k};
+}
+
+function hitNode(sx, sy) {
+  const w = worldAt(sx, sy);
+  let best = null, bestD = Infinity;
+  for (const id of S.visible) {
+    const p = S.pos.get(id), n = S.byId.get(id);
+    if (!p || !n) continue;
+    const dx = p.x - w.x, dy = p.y - w.y;
+    const d = Math.sqrt(dx * dx + dy * dy);
+    const lim = (nodeRadius(n) + 4) / S.view.k;
+    if (d < lim && d < bestD) { best = id; bestD = d; }
+  }
+  return best;
+}
+
+function loop() {
+  tick();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+/* ---------- мышь ---------- */
+cv.addEventListener("pointerdown", (ev) => {
+  const rect = cv.getBoundingClientRect();
+  const sx = ev.clientX - rect.left, sy = ev.clientY - rect.top;
+  const id = hitNode(sx, sy);
+  cv.setPointerCapture(ev.pointerId);
+  if (id) {
+    S.drag = {type: "node", id, moved: false};
+    S.pos.get(id).pinned = true;
+  } else {
+    S.drag = {type: "pan", sx, sy, vx: S.view.x, vy: S.view.y};
+    cv.classList.add("grabbing");
+  }
+});
+cv.addEventListener("pointermove", (ev) => {
+  const rect = cv.getBoundingClientRect();
+  const sx = ev.clientX - rect.left, sy = ev.clientY - rect.top;
+  if (!S.drag) {
+    const hid = hitNode(sx, sy);
+    if (hid !== S.hover) { S.hover = hid; cv.style.cursor = hid ? "pointer" : "grab"; }
+    return;
+  }
+  if (S.drag.type === "node") {
+    const w = worldAt(sx, sy);
+    const p = S.pos.get(S.drag.id);
+    p.x = w.x; p.y = w.y; p.vx = 0; p.vy = 0;
+    S.drag.moved = true;
+    S.alpha = Math.max(S.alpha, 0.15);
+  } else {
+    S.view.x = S.drag.vx + (sx - S.drag.sx);
+    S.view.y = S.drag.vy + (sy - S.drag.sy);
+  }
+});
+cv.addEventListener("pointerup", (ev) => {
+  if (S.drag && S.drag.type === "node") {
+    const id = S.drag.id;
+    if (!S.drag.moved) selectNode(id);
+    else {
+      // закрепляем позицию после перетаскивания; двойной клик снимает закрепление
+    }
+  } else if (S.drag && S.drag.type === "pan" && Math.abs(ev.clientX - (cv.getBoundingClientRect().left + S.drag.sx)) < 3) {
+    selectNode(null);
+  }
+  S.drag = null;
+  cv.classList.remove("grabbing");
+});
+cv.addEventListener("dblclick", (ev) => {
+  const rect = cv.getBoundingClientRect();
+  const id = hitNode(ev.clientX - rect.left, ev.clientY - rect.top);
+  if (id) { S.pos.get(id).pinned = false; S.alpha = Math.max(S.alpha, 0.3); }
+});
+cv.addEventListener("wheel", (ev) => {
+  ev.preventDefault();
+  const rect = cv.getBoundingClientRect();
+  const sx = ev.clientX - rect.left, sy = ev.clientY - rect.top;
+  const before = worldAt(sx, sy);
+  const f = Math.exp(-ev.deltaY * 0.0015);
+  S.view.k = Math.min(6, Math.max(0.15, S.view.k * f));
+  const after = worldAt(sx, sy);
+  // держим точку под курсором на месте
+  S.view.x += (after.x - before.x) * S.view.k;
+  S.view.y += (after.y - before.y) * S.view.k;
+}, {passive: false});
+
+function fitView() {
+  S.view = {x: 0, y: 0, k: 1};
+  let maxR = 0;
+  for (const id of S.visible) { const p = S.pos.get(id); if (p) maxR = Math.max(maxR, Math.hypot(p.x, p.y)); }
+  const r = cv.getBoundingClientRect();
+  const k = maxR > 0 ? Math.min(2, (Math.min(r.width, r.height) / 2 - 30) / maxR) : 1;
+  S.view.k = Math.max(0.15, k);
+}
+
+/* ---------- выбор и детали ---------- */
+function selectNode(id) {
+  S.selected = id;
+  rebuildNeighbours();
+  if (id) loadDetail(id); else clearDetail();
+}
+
+function clearDetail() {
+  $("#detail").innerHTML = "";
+  $("#detail").append(h("div", {class: "mono"}, "Выбери узел на графе или в списке хабов."));
+}
+
+async function loadDetail(id) {
+  let d;
+  try {
+    d = await api(API + "/object?id=" + encodeURIComponent(id));
+  } catch (e) {
+    log("не удалось загрузить узел: " + e.message, "bad");
+    return;
+  }
+  if (S.selected !== id) return;
+  renderDetail(d);
+}
+
+function renderDetail(d) {
+  const ro = S.readonly;
+  const box = $("#detail");
+  box.innerHTML = "";
+  const typeBadge = h("span", {class: "badge", style: `border-color:${TYPE_COLORS[d.type] || "#555"}`}, d.type);
+  box.append(
+    h("div", {class: "row"}, typeBadge, h("span", {class: "badge"}, d.scope), h("span", {class: "badge"}, `v${d.version}`)),
+    h("div", {class: "mono"}, d.id),
+    ro ? h("div", {class: "ro-note"}, "режим только чтение: правки отключены") : null,
+  );
+
+  // текст
+  const subj = h("textarea", {disabled: ro ? "" : null}, d.subject);
+  box.append(h("h3", {}, "Текст"), subj,
+    h("div", {class: "row"}, h("button", {class: "primary", disabled: ro ? "" : null,
+      onclick: () => edit("set_subject", {id: d.id, text: subj.value})}, "Сохранить текст")));
+
+  // предикат
+  const pred = h("input", {value: d.predicate || "", size: 30, disabled: ro ? "" : null});
+  box.append(h("h3", {}, "Предикат"), h("div", {class: "row"}, pred,
+    h("button", {disabled: ro ? "" : null, onclick: () => edit("set_predicate", {id: d.id, text: pred.value})}, "Сохранить")));
+
+  // доверие
+  const conf = h("input", {type: "range", min: "0", max: "100", value: Math.round(d.confidence * 100), disabled: ro ? "" : null});
+  const confV = h("span", {}, d.confidence.toFixed(2));
+  conf.addEventListener("input", () => { confV.textContent = (conf.value / 100).toFixed(2); });
+  box.append(h("h3", {}, "Доверие"), h("div", {class: "row"}, conf, confV,
+    h("button", {disabled: ro ? "" : null, onclick: () => edit("set_confidence", {id: d.id, value: conf.value / 100})}, "Применить")));
+
+  // сведения
+  box.append(h("h3", {}, "Сведения"), h("div", {class: "card"},
+    kv("автор", d.author), kv("создано", (d.created || "").replace("T", " ").slice(0, 19)),
+    kv("источник", d.source_type || "—"), kv("доказательств", d.evidence.length),
+    kv("эмбеддинг", d.has_embedding ? "есть" : "нет")));
+
+  // связи
+  box.append(h("h3", {}, "Связи"));
+  const edgesBox = h("div", {});
+  for (const e of d.out_edges) edgesBox.append(edgeRow(d, e.r, e.t, e.subject, true));
+  for (const e of d.in_edges) edgesBox.append(edgeRow(d, e.r, e.s, e.subject, false));
+  if (!d.out_edges.length && !d.in_edges.length) edgesBox.append(h("div", {class: "mono"}, "связей нет"));
+  box.append(edgesBox);
+
+  // добавить связь
+  const opts = [...S.visible].filter((x) => x !== d.id).map((x) => {
+    const n = S.byId.get(x);
+    return h("option", {value: x}, (n ? n.subject : x).slice(0, 60));
+  });
+  const target = h("select", {disabled: ro ? "" : null, style: "max-width:200px"}, opts);
+  const rel = h("input", {value: "RELATED_TO", size: 14, disabled: ro ? "" : null});
+  const w = h("input", {type: "number", min: "0", max: "1", step: "0.1", value: "0.5", size: 4, disabled: ro ? "" : null});
+  box.append(h("div", {class: "row"}, target),
+    h("div", {class: "row"}, rel, w,
+      h("button", {disabled: ro ? "" : null, onclick: () => edit("link", {source: d.id, target: target.value,
+        relation: rel.value.trim().toUpperCase(), weight: Number(w.value)})}, "Связать")));
+
+  // LLM-проверка
+  const proposalBox = h("div", {});
+  box.append(h("h3", {}, "Проверка LLM (только предложения)"),
+    h("div", {class: "row"}, h("button", {onclick: () => llmReview(d.id, proposalBox)}, "Проверить LLM")),
+    proposalBox);
+
+  // удаление
+  box.append(h("div", {class: "row", style: "margin-top:10px"},
+    h("button", {class: "danger", disabled: ro ? "" : null, onclick: () => {
+      if (confirm("Отозвать запись? Это действие сохраняется в истории.")) edit("retract", {id: d.id, reason: "memory_viewer"});
+    }}, "Отозвать запись")));
+
+  // история
+  box.append(h("h3", {}, `История (${d.events.length})`));
+  for (const ev of d.events.slice().reverse()) {
+    box.append(h("div", {class: "mono", style: "padding:2px 0;border-bottom:1px dashed var(--line)"},
+      `${(ev.timestamp || "").replace("T", " ").slice(0, 19)}  ${ev.type}  ${ev.actor || ""}`,
+      ev.payload && Object.keys(ev.payload).length ? h("div", {}, JSON.stringify(ev.payload).slice(0, 240)) : null));
+  }
+}
+
+function kv(a, b) { return h("div", {class: "kv"}, h("span", {}, a), h("span", {}, String(b))); }
+
+function edgeRow(d, relation, otherId, subject, outgoing) {
+  const label = outgoing ? `→ ${relation}` : `← ${relation}`;
+  const unlink = h("button", {class: "small danger", disabled: S.readonly ? "" : null,
+    title: "удалить связь",
+    onclick: () => {
+      const args = outgoing ? {source: d.id, target: otherId, relation} : {source: otherId, target: d.id, relation};
+      edit("unlink", args);
+    }}, "×");
+  return h("div", {class: "edge"},
+    h("span", {class: "rel"}, label),
+    h("span", {class: "nb", title: otherId, onclick: () => selectNode(otherId)}, subject || otherId),
+    unlink);
+}
+
+async function edit(op, args) {
+  if (S.readonly) return;
+  try {
+    await api(API + "/edit", {op, args});
+    log(`${op}: готово`, "ok");
+    await refresh(true);
+    if (op === "retract") { S.selected = null; clearDetail(); }
+    else if (S.selected) loadDetail(S.selected);
+  } catch (e) {
+    log(`${op}: ${e.message}`, "bad");
+  }
+}
+
+async function llmReview(id, box) {
+  box.innerHTML = "";
+  box.append(h("div", {class: "mono"}, "спрашиваю модель…"));
+  try {
+    const res = await api(API + "/llm/review", {id});
+    const p = res.proposal || {};
+    const cls = p.verdict === "ok" ? "verdict-ok" : (p.verdict === "unclear" ? "verdict-warn" : "verdict-bad");
+    box.innerHTML = "";
+    const card = h("div", {class: "card"},
+      h("div", {class: cls}, `вердикт: ${p.verdict || "—"}`),
+      h("div", {class: "mono"}, p.reason || "(без пояснения)"));
+    if (p.suggested_subject) {
+      card.append(h("div", {}, "предложен текст: ", h("i", {}, p.suggested_subject)),
+        h("button", {disabled: S.readonly ? "" : null, onclick: () => edit("set_subject", {id, text: p.suggested_subject})}, "применить текст"));
+    }
+    if (p.suggested_confidence !== null && p.suggested_confidence !== undefined) {
+      card.append(h("div", {}, `предложено доверие: ${p.suggested_confidence.toFixed(2)}`),
+        h("button", {disabled: S.readonly ? "" : null, onclick: () => edit("set_confidence", {id, value: p.suggested_confidence})}, "применить доверие"));
+    }
+    if (p.suggest_retract) {
+      card.append(h("div", {class: "verdict-bad"}, "модель предлагает отозвать запись"),
+        h("button", {class: "danger", disabled: S.readonly ? "" : null, onclick: () => {
+          if (confirm("Отозвать запись по предложению модели?")) edit("retract", {id, reason: "llm_review_confirmed"});
+        }}, "отозвать"));
+    }
+    card.append(h("div", {class: "mono"}, "Ничего не применяется без твоего нажатия."));
+    box.append(card);
+  } catch (e) {
+    box.innerHTML = "";
+    box.append(h("div", {class: "verdict-bad"}, "проверка не удалась: " + e.message));
+  }
+}
+
+/* ---------- метрики ---------- */
+function renderMetrics(m) {
+  rebuildContradictions();
+  rebuildNeighbours();
+  S.degreeRank = new Set((m.hubs || []).slice(0, 12).map((x) => x.id));
+  const box = $("#metrics");
+  box.innerHTML = "";
+  const big = [["объектов", m.nodes], ["рёбер", m.edges], ["компонент", m.components],
+    ["изолированных", m.isolated], ["противоречий", m.contradictions], ["событий", m.events],
+    ["эмбеддингов", m.embeddings], ["ср. доверие", m.avg_confidence], ["ср. степень", m.avg_degree],
+    ["ср. доказательств", m.avg_evidence]];
+  box.append(h("div", {class: "grid"}, big.map(([a, b]) =>
+    h("div", {class: "card", style: "padding:6px 8px"}, h("div", {class: "mono"}, a), h("div", {style: "font-size:16px"}, String(b))))));
+  box.append(h("h3", {}, "Типы"), barList(m.by_type));
+  box.append(h("h3", {}, "Области"), barList(m.by_scope));
+  box.append(h("h3", {}, "Отношения"), barList(m.relations));
+  box.append(h("h3", {}, "Распределение доверия"));
+  const max = Math.max(1, ...m.confidence_hist);
+  box.append(h("div", {class: "hist"}, m.confidence_hist.map((c) =>
+    h("div", {style: `height:${Math.max(2, Math.round((c / max) * 60))}px`, title: `${c} записей`}))),
+    h("div", {class: "hist-l"}, h("span", {}, "0"), h("span", {}, "0.5"), h("span", {}, "1")));
+  box.append(h("h3", {}, "Хабы (больше всего связей)"));
+  for (const hb of (m.hubs || [])) {
+    box.append(h("div", {class: "hub", onclick: () => selectNode(hb.id)},
+      `${hb.degree} · ${hb.subject.slice(0, 44)}`));
+  }
+  box.append(h("h3", {}, "Файл"), kv("размер", `${(m.file_bytes / 1024).toFixed(1)} КБ`),
+    kv("старейшая", (m.oldest || "—").slice(0, 10)), kv("новейшая", (m.newest || "—").slice(0, 10)));
+
+  const leg = $("#legend");
+  leg.innerHTML = "";
+  for (const [t, c] of Object.entries(TYPE_COLORS)) leg.append(h("span", {}, h("i", {style: `background:${c}`}), t));
+  leg.append(h("span", {}, h("i", {style: "background:#ff6b6b"}), "противоречие (пунктир)"));
+}
+
+function barList(obj) {
+  const entries = Object.entries(obj || {});
+  const max = Math.max(1, ...entries.map(([, v]) => v));
+  if (!entries.length) return h("div", {class: "mono"}, "нет данных");
+  return h("div", {}, entries.map(([k, v]) => h("div", {class: "bar-row"},
+    h("span", {class: "mono", style: "color:var(--text)"}, k),
+    h("div", {class: "bar", style: `width:${Math.round((v / max) * 100)}%`}),
+    h("span", {class: "mono"}, String(v)))));
+}
+
+/* ---------- события интерфейса ---------- */
+$("#layout").addEventListener("change", (e) => {
+  S.layout = e.target.value;
+  if (S.layout === "pca") {
+    if (!S.snap || !Object.keys(S.snap.pca || {}).length) {
+      log("у узлов нет эмбеддингов: проекция недоступна, оставлен граф", "bad");
+      S.layout = "graph"; e.target.value = "graph";
+    } else { applyPca(); fitView(); }
+  } else { S.alpha = 1; fitView(); }
+});
+$("#q").addEventListener("input", applyFilter);
+$("#ftype").addEventListener("change", applyFilter);
+$("#minc").addEventListener("input", applyFilter);
+$("#fit").addEventListener("click", fitView);
+$("#live").addEventListener("click", (e) => {
+  S.live = !S.live;
+  e.target.textContent = S.live ? "Live: вкл" : "Live: пауза";
+});
+window.addEventListener("resize", resize);
+
+setInterval(() => {
+  if (S.live) refresh(false).catch((err) => log("обновление: " + err.message, "bad"));
+}, 2000);
+
+resize();
+requestAnimationFrame(loop);
+init().then(() => fitView()).catch((err) => log("старт: " + err.message, "bad"));
+</script>
+</body>
+</html>
