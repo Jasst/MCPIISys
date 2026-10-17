@@ -240,6 +240,20 @@ def apply_edit(store, op, args, actor=ACTOR):
             raise ValueError("ожидается число от 0 до 1")
         return max(0.0, min(1.0, x))
 
+    if op == "create":
+        subject = text("subject")
+        try:
+            conf = unit(args.get("confidence", 0.5))
+        except ValueError:
+            raise ValueError("доверие: ожидается число от 0 до 1")
+        predicate = None
+        if isinstance(args.get("predicate"), str) and args["predicate"].strip():
+            predicate = args["predicate"].strip()[:200]
+        # штатный путь добавления факта (тот же, что у чата): дедупликация и индексы
+        oid = store.add_fact(subject, "claim", actor, confidence=conf)
+        if predicate:
+            store.update(oid, {"predicate": predicate}, actor)
+        return {"id": oid}
     if op == "set_subject":
         store.update(need("id"), {"subject": text("text")}, actor)
     elif op == "set_predicate":
