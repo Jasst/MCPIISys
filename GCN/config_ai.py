@@ -226,8 +226,8 @@ MCP_TOOL_TIMEOUT_OVERRIDES = {
 # ответ, но поле ввода заблокировано (_isSending = true), и новое сообщение
 # отправить невозможно. Теперь при превышении лимита _finalize_answer
 # переносится в фоновую задачу (без push), а [DONE] уходит немедленно.
-PLAN_CRITIC_TIMEOUT = 15.0       # сек на один вызов plan_critic + LLM-добор
-VERIFY_RESPONSE_TIMEOUT = 10.0   # сек на верификационный LLM-вызов
+PLAN_CRITIC_TIMEOUT = 45.0       # сек на один вызов plan_critic + LLM-добор
+VERIFY_RESPONSE_TIMEOUT = 45.0   # сек на верификационный LLM-вызов
 FINALIZE_ANSWER_TIMEOUT = 90.0   # увеличено с 35.0 до 90 сек — суммарный бюджет на все этапы финализации
 
 # -------------------------------
