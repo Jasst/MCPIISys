@@ -103,12 +103,12 @@ async def memory_edit(body: EditBody, uid: str = Depends(require_auth)):
     async with mem._lock:
         mem.reload_if_stale()
         try:
-            core.apply_edit(mem.store, body.op, body.args)
+            result = core.apply_edit(mem.store, body.op, body.args) or {}
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         mem._rebuild_caches_from_gcn()  # индексы фактов и кэши соответствуют новому состоянию
     await mem._save_async()
-    return {"ok": True, "version": core.store_version(mem.store)}
+    return {"ok": True, "version": core.store_version(mem.store), **result}
 
 
 @router.post("/llm/review")
