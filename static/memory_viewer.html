@@ -95,32 +95,28 @@ label{color:var(--text-muted);font-size:12px}
 .hub:hover{color:var(--accent-hover);text-decoration:underline}
 .legend{display:flex;flex-wrap:wrap;gap:6px 10px;font-size:11px;color:var(--text-muted)}
 .legend i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:4px;vertical-align:-1px}
-.ro-note{color:var(--warning-color);font-size:12px;margin:4px 0}
-a.back{color:var(--accent-color);text-decoration:none;padding:5px 2px;border-radius:var(--radius-sm);
-  transition:color var(--transition-fast)}
-a.back:hover{color:var(--accent-hover);text-decoration:underline}
+.ro-note{color:var(--warn);font-size:12px;margin:4px 0}
+a.back{color:var(--acc);text-decoration:none;padding:5px 2px}
+a.back:hover{text-decoration:underline}
 /* ---- мобильная раскладка: панель деталей как выдвижная шторка ---- */
 #zoombar{display:none;position:absolute;right:8px;bottom:8px;z-index:5;flex-direction:column;gap:6px}
-#zoombar button{width:38px;height:38px;font-size:17px;border-radius:50%;
-  background:var(--glass-bg);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
-  border:1px solid var(--glass-border);box-shadow:var(--shadow-md)}
+#zoombar button{width:38px;height:38px;font-size:17px;border-radius:9px;background:#243049d9}
 #sheet-head{display:none}
 @media (max-width:900px){
   #main{grid-template-columns:1fr;height:auto}
-  #left{order:3;border-right:none;border-top:1px solid var(--border-color)}
+  #left{order:3;border-right:none;border-top:1px solid var(--line)}
   #stage{height:58vh;min-height:340px}
   #right{position:fixed;left:0;right:0;bottom:0;z-index:20;max-height:72vh;overflow:auto;
-    border-left:none;border-top:1px solid var(--glass-border-light);border-radius:var(--radius-lg) var(--radius-lg) 0 0;
-    background:var(--bg-secondary);
-    transform:translateY(105%);transition:transform var(--transition-normal);box-shadow:var(--shadow-xl);
+    border-left:none;border-top:2px solid var(--acc);border-radius:16px 16px 0 0;
+    transform:translateY(105%);transition:transform .22s ease;box-shadow:0 -8px 30px rgba(0,0,0,.55);
     padding-bottom:max(10px, env(safe-area-inset-bottom))}
   body.sheet-open #right{transform:none}
-  #sheet-head{display:block;position:sticky;top:0;background:var(--bg-secondary);z-index:2}
+  #sheet-head{display:block;position:sticky;top:0;background:var(--panel);z-index:2}
   #top,#feed{position:static}
   #top input[type=search]{flex:1;min-width:0}
   #top label{font-size:11px}
   #zoombar{display:flex}
-  button{padding:8px 14px}
+  button{padding:7px 11px}
   input,select,textarea,button{font-size:14px}
   textarea{min-height:80px}
 }
@@ -142,8 +138,7 @@ a.back:hover{color:var(--accent-hover);text-decoration:underline}
   <label>тип <select id="ftype"><option value="">все</option></select></label>
   <label>доверие ≥ <input id="minc" type="range" min="0" max="100" value="0"><span id="minc-v">0%</span></label>
   <button id="fit" title="вписать в экран">Вписать</button>
-  <button id="add" class="primary" title="добавить запись в память">＋ Запись</button>
-  <button id="theme" title="светлая/тёмная тема — как в чате">☾ тема</button>
+  <button id="add" title="добавить запись в память">＋ Запись</button>
   <span id="counts" class="mono"></span>
 </div>
 
@@ -188,7 +183,6 @@ const S = {
   alpha: 1, layout: "graph", live: true, view: {x: 0, y: 0, k: 1},
   drag: null, hover: null, degreeRank: new Set(), dirtyDetail: false,
   pointers: new Map(), pinch: null, tap: null,
-  theme: "dark", nodeFill: "#9aa3b2", labelColor: "#eceef1", edgeColor: "#4a4f58",
 };
 
 /* ---------- тема — как в основном чате (тёмная по умолчанию, светлая по классу) ---------- */
