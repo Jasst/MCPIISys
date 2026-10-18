@@ -176,6 +176,7 @@ const TYPE_COLORS = {claim:"#8fa1bd", concept:"#7fb8a4", observation:"#c9a06a", 
 const REL_COLORS = {CONTRADICTS:"#e5544f", CONTRADICT:"#e5544f", GROUNDS_IN:"#787e89", CAUSES:"#e0a458",
   ENABLES:"#4cc38a", PREVENTS:"#e5544f", INHIBITS:"#e5544f", REQUIRES:"#a695c8"};
 const REP = 2600, SPRING = 0.03, GRAV = 0.0025, DAMP = 0.82;
+const CELL = 200;   // размер ячейки сетки для отталкивания
 
 const S = {
   memory: null, readonly: false, snap: null, version: null,
@@ -183,6 +184,7 @@ const S = {
   alpha: 1, layout: "graph", live: true, view: {x: 0, y: 0, k: 1},
   drag: null, hover: null, degreeRank: new Set(), dirtyDetail: false,
   pointers: new Map(), pinch: null, tap: null,
+  redraw: true, cw: 0, ch: 0,
 };
 
 /* ---------- тема — как в основном чате (тёмная по умолчанию, светлая по классу) ---------- */
@@ -253,10 +255,30 @@ async function init() {
   await refresh(true);
 }
 
+const edgeKey = (e) => `${e.s}|${e.r}|${e.t}`;
+
+/* применяет дельту сервера к текущему снимку; результат имеет ту же форму, что полный снимок */
+function mergeDelta(prev, d) {
+  const nodes = new Map(prev.nodes.map((n) => [n.id, n]));
+  for (const id of d.nodes_removed) nodes.delete(id);
+  for (const n of d.nodes_added) nodes.set(n.id, n);
+  for (const n of d.nodes_changed) nodes.set(n.id, n);
+  const edges = new Map(prev.edges.map((e) => [edgeKey(e), e]));
+  for (const k of d.edges_removed) edges.delete(k);
+  for (const e of d.edges_added) edges.set(edgeKey(e), e);
+  return {...d, nodes: [...nodes.values()], edges: [...edges.values()]};
+}
+
 async function refresh(force) {
   if (!S.memory) return;
-  const snap = await api(API + "/snapshot?max_nodes=800");
-  if (!force && snap.version === S.version) return;
+  // сервер отвечает "unchanged", если версия не менялась, либо присылает только дельту
+  const since = (force || S.version === null) ? "" : `&since=${encodeURIComponent(S.version)}`;
+  const pca = S.layout === "pca" ? "&pca=1" : "";
+  const resp = await api(`${API}/snapshot?max_nodes=800${pca}${since}`);
+  if (resp.unchanged) return;
+  if (resp.delta && resp.base !== S.version) return refresh(true); // рассинхрон: берём полный снимок
+  const snap = resp.delta ? mergeDelta(S.snap, resp) : resp;
+
   const prevById = S.byId;
   const nextById = new Map(snap.nodes.map((n) => [n.id, n]));
   if (S.version !== null && prevById.size) {
@@ -279,6 +301,7 @@ async function refresh(force) {
   if (S.selected && S.byId.has(S.selected)) loadDetail(S.selected);
   else if (S.selected) { S.selected = null; clearDetail(); }
   S.alpha = Math.max(S.alpha, 0.3);
+  S.redraw = true;
 }
 
 function fillTypeFilter(byType) {
@@ -325,6 +348,7 @@ function applyFilter() {
   const total = S.snap ? S.snap.total_nodes : 0, shown = S.snap ? S.snap.shown_nodes : 0;
   $("#counts").textContent = `${S.visible.size}/${shown} узлов · ${S.visibleEdges.length} рёбер · всего ${total}`;
   if (S.layout === "graph") S.alpha = Math.max(S.alpha, 0.4);
+  S.redraw = true;
 }
 
 /* ---------- физика и отрисовка ---------- */
@@ -334,15 +358,30 @@ function tick() {
   const n = ids.length;
   const a = S.alpha;
   const P = ids.map((id) => S.pos.get(id));
+  // отталкивание считаем только между соседними ячейками сетки (вместо всех пар O(n²))
+  const grid = new Map();
   for (let i = 0; i < n; i++) {
-    for (let j = i + 1; j < n; j++) {
-      const p = P[i], q = P[j];
-      let dx = p.x - q.x, dy = p.y - q.y;
-      let d2 = dx * dx + dy * dy;
-      if (d2 < 1) { dx = Math.random() - 0.5; dy = Math.random() - 0.5; d2 = 1; }
-      const f = (REP / d2) * a / Math.sqrt(d2);
-      p.vx += dx * f; p.vy += dy * f;
-      q.vx -= dx * f; q.vy -= dy * f;
+    const key = Math.floor(P[i].x / CELL) + "," + Math.floor(P[i].y / CELL);
+    let cell = grid.get(key);
+    if (!cell) grid.set(key, cell = []);
+    cell.push(i);
+  }
+  for (let i = 0; i < n; i++) {
+    const p = P[i];
+    const cx = Math.floor(p.x / CELL), cy = Math.floor(p.y / CELL);
+    for (let ox = -1; ox <= 1; ox++) for (let oy = -1; oy <= 1; oy++) {
+      const cell = grid.get((cx + ox) + "," + (cy + oy));
+      if (!cell) continue;
+      for (const j of cell) {
+        if (j <= i) continue;               // каждая пара учитывается один раз
+        const q = P[j];
+        let dx = p.x - q.x, dy = p.y - q.y;
+        let d2 = dx * dx + dy * dy;
+        if (d2 < 1) { dx = Math.random() - 0.5; dy = Math.random() - 0.5; d2 = 1; }
+        const f = (REP / d2) * a / Math.sqrt(d2);
+        p.vx += dx * f; p.vy += dy * f;
+        q.vx -= dx * f; q.vy -= dy * f;
+      }
     }
   }
   const index = new Map(ids.map((id, i) => [id, i]));
@@ -373,15 +412,16 @@ function resize() {
   cv.width = Math.max(1, Math.round(r.width * dpr));
   cv.height = Math.max(1, Math.round(r.height * dpr));
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  S.cw = r.width; S.ch = r.height; S.redraw = true;
 }
 
 function toScreen(p) {
-  const r = cv.getBoundingClientRect();
-  return [r.width / 2 + S.view.x + p.x * S.view.k, r.height / 2 + S.view.y + p.y * S.view.k];
+  return [S.cw / 2 + S.view.x + p.x * S.view.k, S.ch / 2 + S.view.y + p.y * S.view.k];
 }
 
 function draw() {
   const r = cv.getBoundingClientRect();
+  S.cw = r.width; S.ch = r.height;
   ctx.clearRect(0, 0, r.width, r.height);
   if (!S.snap) return;
   const k = S.view.k;
@@ -468,8 +508,9 @@ function hitNode(sx, sy) {
 }
 
 function loop() {
-  tick();
-  draw();
+  const hot = S.layout === "graph" && S.alpha >= 0.003;   // раскладка ещё «горячая»
+  if (hot) tick();
+  if (hot || S.redraw) { S.redraw = false; draw(); }
   requestAnimationFrame(loop);
 }
 
@@ -486,6 +527,7 @@ function zoomAt(sx, sy, f) {
   // держим точку под курсором/пальцем на месте
   S.view.x += (after.x - before.x) * S.view.k;
   S.view.y += (after.y - before.y) * S.view.k;
+  S.redraw = true;
 }
 
 function endPinch() {
@@ -592,6 +634,7 @@ function fitView() {
   const r = cv.getBoundingClientRect();
   const k = maxR > 0 ? Math.min(2, (Math.min(r.width, r.height) / 2 - 30) / maxR) : 1;
   S.view.k = Math.max(0.15, k);
+  S.redraw = true;
 }
 
 /* ---------- выбор и детали ---------- */
@@ -861,9 +904,12 @@ function barList(obj) {
 }
 
 /* ---------- события интерфейса ---------- */
-$("#layout").addEventListener("change", (e) => {
+$("#layout").addEventListener("change", async (e) => {
   S.layout = e.target.value;
   if (S.layout === "pca") {
+    if (S.snap && !Object.keys(S.snap.pca || {}).length) {
+      try { await refresh(true); } catch (err) { log("проекция: " + err.message, "bad"); }
+    }
     if (!S.snap || !Object.keys(S.snap.pca || {}).length) {
       log("у узлов нет эмбеддингов: проекция недоступна, оставлен граф", "bad");
       S.layout = "graph"; e.target.value = "graph";
@@ -882,7 +928,9 @@ $("#live").addEventListener("click", (e) => {
   S.live = !S.live;
   e.target.textContent = S.live ? "Live: вкл" : "Live: пауза";
 });
-$("#theme").addEventListener("click", () => {
+// кнопки темы в разметке нет: без проверки это исключение останавливало весь скрипт
+const themeBtn = document.getElementById("theme");
+if (themeBtn) themeBtn.addEventListener("click", () => {
   const next = S.theme === "light" ? "dark" : "light";
   applyTheme(next);
   try { localStorage.setItem("theme", next); } catch (_) { /* ignore */ }
@@ -891,6 +939,7 @@ window.addEventListener("resize", resize);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeSheet(); selectNode(null); } });
 
 setInterval(() => {
+  if (document.hidden) return;
   // не перезаписываем панель, пока пользователь что-то печатает или нажал «Отмена» в форме
   const ae = document.activeElement;
   const editing = ae && $("#right").contains(ae) &&
@@ -899,6 +948,14 @@ setInterval(() => {
     refresh(false).catch((err) => log("обновление: " + err.message, "bad"));
   }
 }, 2000);
+
+// любое взаимодействие или ввод — перерисовать кадр (иначе кадры не рисуются, когда раскладка остыла)
+for (const ev of ["pointermove", "pointerdown", "pointerup", "wheel", "keydown", "input", "change", "click"]) {
+  document.addEventListener(ev, () => { S.redraw = true; }, {passive: true, capture: true});
+}
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && S.live) refresh(false).catch((err) => log("обновление: " + err.message, "bad"));
+});
 
 initTheme();
 resize();

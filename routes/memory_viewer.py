@@ -13,6 +13,7 @@ routes/memory_viewer.py — просмотр и правка СОБСТВЕНН�
   MEMORY_VIEWER_ENABLED=1   (0 — маршруты отвечают 404)
   MEMORY_VIEWER_READONLY=0  (1 — только просмотр)
 """
+import asyncio
 import os
 from pathlib import Path
 from typing import Any, Dict
@@ -73,13 +74,30 @@ async def memory_status(uid: str = Depends(require_auth)):
 
 
 @router.get("/snapshot")
-async def memory_snapshot(max_nodes: int = 800, uid: str = Depends(require_auth)):
+async def memory_snapshot(max_nodes: int = 800, since: str = "", pca: int = 0,
+                          uid: str = Depends(require_auth)):
+    """Полный снимок или дельта относительно версии `since`, которую клиент уже знает.
+    Если версия не менялась — только {"unchanged": true}. pca=1 добавляет PCA-проекцию."""
     _enabled()
     mem = await _private_memory(uid)
     max_nodes = max(10, min(2000, int(max_nodes)))
+    since = (since or "")[:64]
     async with mem._lock:
-        mem.reload_if_stale()  # если память правил другой процесс (например, MCP-сервер)
-        return core.build_snapshot(mem.store, readonly=READONLY, max_nodes=max_nodes)
+        # reload_if_stale() делает stat(); файл читается только если его изменил другой процесс
+        await asyncio.to_thread(mem.reload_if_stale)
+        version = core.store_version(mem.store)
+        if since and since == version:
+            return {"version": version, "unchanged": True}
+
+        snap = await asyncio.to_thread(core.build_snapshot, mem.store, readonly=READONLY,
+                                       max_nodes=max_nodes, with_pca=(pca == 1))
+        # история последних снимков пользователя: дельта работает и для нескольких вкладок
+        hist = getattr(mem, "_viewer_hist", [])
+        base = next((s for s, mn in hist if since and s["version"] == since and mn == max_nodes), None)
+        mem._viewer_hist = ([(snap, max_nodes)] + hist)[:4]
+        if base is not None:
+            return core.diff_snapshots(base, snap)
+        return snap
 
 
 @router.get("/object")

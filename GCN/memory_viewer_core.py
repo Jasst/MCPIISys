@@ -31,11 +31,19 @@ def _kind(o):
 
 def store_version(store):
     """Дешёвая версия содержимого: меняется при любой правке или добавлении."""
-    objs = store._objects.values()
-    return f"{len(store._objects)}:{len(store._events)}:{sum(o.version for o in objs)}"
+    with store._lock:  # RLock: снимок может строиться в другом потоке, пока чат пишет в память
+        objs = store._objects.values()
+        return f"{len(store._objects)}:{len(store._events)}:{sum(o.version for o in objs)}"
 
 
-def build_snapshot(store, readonly=False, max_nodes=MAX_NODES_DEFAULT):
+def build_snapshot(store, readonly=False, max_nodes=MAX_NODES_DEFAULT, with_pca=True):
+    """Снимок графа. Берёт блокировку хранилища, поэтому безопасен в отдельном потоке.
+    with_pca=False пропускает SVD-проекцию (нужна только для раскладки PCA)."""
+    with store._lock:
+        return _build_snapshot_locked(store, readonly, max_nodes, with_pca)
+
+
+def _build_snapshot_locked(store, readonly, max_nodes, with_pca):
     objs = store._objects
     g = store._graph
 
@@ -84,7 +92,7 @@ def build_snapshot(store, readonly=False, max_nodes=MAX_NODES_DEFAULT):
         "shown_nodes": len(nodes),
         "nodes": nodes,
         "edges": edges,
-        "pca": _pca(store, shown_set),
+        "pca": _pca(store, shown_set) if with_pca else {},
         "metrics": _metrics(store, degree, adj),
     }
 
@@ -321,3 +329,31 @@ def sanitize_proposal(p):
     if isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c):
         out["suggested_confidence"] = max(0.0, min(1.0, float(c)))
     return out
+
+
+def edge_key(e):
+    return f"{e['s']}|{e['r']}|{e['t']}"
+
+
+def diff_snapshots(prev, cur):
+    """Дельта между двумя снимками build_snapshot. Клиент применяет её к состоянию версии base."""
+    prev_nodes = {n["id"]: n for n in prev["nodes"]}
+    cur_nodes = {n["id"]: n for n in cur["nodes"]}
+    prev_edges = {edge_key(e): e for e in prev["edges"]}
+    cur_edges = {edge_key(e): e for e in cur["edges"]}
+    return {
+        "delta": True,
+        "base": prev["version"],
+        "version": cur["version"],
+        "readonly": cur["readonly"],
+        "total_nodes": cur["total_nodes"],
+        "shown_nodes": cur["shown_nodes"],
+        "nodes_added": [n for k, n in cur_nodes.items() if k not in prev_nodes],
+        "nodes_changed": [n for k, n in cur_nodes.items()
+                          if k in prev_nodes and n != prev_nodes[k]],
+        "nodes_removed": [k for k in prev_nodes if k not in cur_nodes],
+        "edges_added": [e for k, e in cur_edges.items() if prev_edges.get(k) != e],
+        "edges_removed": [k for k in prev_edges if k not in cur_edges],
+        "pca": cur["pca"],
+        "metrics": cur["metrics"],
+    }

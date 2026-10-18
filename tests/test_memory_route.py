@@ -152,8 +152,41 @@ def test_page_served_and_auth_required():
     assert anon.post("/ai/memory/edit", json={"op": "retract", "args": {}}).status_code == 401
     print("6 ok: страница отдаётся, без входа — 401")
 
+def _apply_delta(prev, d):
+    from GCN.memory_viewer_core import edge_key
+    nodes = {n["id"]: n for n in prev["nodes"]}
+    for k in d["nodes_removed"]:
+        nodes.pop(k)
+    for n in d["nodes_added"] + d["nodes_changed"]:
+        nodes[n["id"]] = n
+    edges = {edge_key(e): e for e in prev["edges"]}
+    for k in d["edges_removed"]:
+        edges.pop(k)
+    for e in d["edges_added"]:
+        edges[edge_key(e)] = e
+    return nodes, edges
+
+def test_snapshot_unchanged_and_delta():
+    c = TestClient(build_app("u3"))
+    full = c.get("/ai/memory/snapshot").json()
+    v1 = full["version"]
+    assert c.get("/ai/memory/snapshot", params={"since": v1}).json() == {"version": v1, "unchanged": True}
+    oid = full["nodes"][0]["id"]
+    assert c.post("/ai/memory/edit", json={"op": "set_confidence", "args": {"id": oid, "value": 0.93}}).status_code == 200
+    d = c.get("/ai/memory/snapshot", params={"since": v1}).json()
+    assert d["delta"] is True and d["base"] == v1 and d["version"] != v1
+    assert [n["id"] for n in d["nodes_changed"]] == [oid]
+    assert d["nodes_added"] == [] and d["nodes_removed"] == []
+    nodes, edges = _apply_delta(full, d)
+    fresh = c.get("/ai/memory/snapshot").json()
+    assert nodes == {n["id"]: n for n in fresh["nodes"]}
+    assert edges == {f"{e['s']}|{e['r']}|{e['t']}": e for e in fresh["edges"]}
+    other = c.get("/ai/memory/snapshot", params={"since": "bogus"}).json()
+    assert other.get("delta") is None and len(other["nodes"]) == fresh["total_nodes"]
+    print("7 ok: unchanged, дельта совпадает с полным снимком, рассинхрон -> полный снимок")
+
 if __name__ == "__main__":
     for t in [test_status_snapshot_detail, test_user_isolation_and_no_memory_param, test_edit_persists_and_saves,
-              test_readonly_and_disabled, test_llm_proposal_sanitized_and_unavailable, test_page_served_and_auth_required]:
+              test_readonly_and_disabled, test_llm_proposal_sanitized_and_unavailable, test_page_served_and_auth_required, test_snapshot_unchanged_and_delta]:
         t()
     print("ALL PASSED")
