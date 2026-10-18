@@ -1500,7 +1500,8 @@ class CognitiveMemory:
         async with self._lock:
             # --- НОВОЕ: перестраиваем FAISS индекс перед сохранением ---
             # Перестройка FAISS — CPU-тяжёлая; в поток, чтобы не блокировать event loop.
-            await asyncio.to_thread(self.gcn_store.build_faiss_index, force=True)
+            # только если индекс помечен устаревшим (dirty); раньше перестраивался при каждом сохранении
+            await asyncio.to_thread(self.gcn_store.build_faiss_index, force=False)
             gcn_state_path = self.base_dir / GCN_STATE_FILENAME
             try:
                 await self.gcn_store.async_save(str(gcn_state_path))

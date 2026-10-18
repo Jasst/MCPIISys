@@ -335,6 +335,10 @@ class ResearchQueue:
 # =====================================================================
 # Движок
 # =====================================================================
+# Повторное исследование одной цели не чаще, чем раз в N секунд (иначе тот же веб-поиск и LLM каждые 10 минут)
+GOAL_RESEARCH_COOLDOWN_SECONDS = 6 * 3600
+
+
 class AutonomyEngine:
     """
     Единый фоновый движок автономности для одного пользователя.
@@ -352,14 +356,14 @@ class AutonomyEngine:
         # Инициализация SelfModel и MotivationEngine
         try:
             from GCN.cognition import SelfModel, MotivationEngine
-            
+
             # Используем SelfModel контроллера если он уже есть
             self.self_model = getattr(controller, 'self_model', None)
             if self.self_model is None:
                 self.self_model = SelfModel(controller.user_dir)
                 # Передаём обратно в контроллер
                 controller.self_model = self.self_model
-            
+
             # ВАЖНО: передаём memory_service (MemoryService, доступ ко всем
             # трём слоям), а не controller.memory (это private_memory —
             # одна CognitiveMemory). identity_core живёт в shared-слое
@@ -383,9 +387,12 @@ class AutonomyEngine:
         self._last_digest_at: float = 0.0
         self._digest_day: str = ""
         self._digest_count_today: int = 0
-        self._last_goal_decompose: float = 0.0
+        # Таймеры стартуют с текущего момента: первая декомпозиция/мотивация — через интервал,
+        # а не сразу после запуска (раньше 0.0 запускал LLM-вызовы на первом же тике).
+        self._last_goal_decompose: float = time.time()
         self._last_refresh: float = 0.0
-        self._last_motivation_tick: float = 0.0
+        self._last_motivation_tick: float = time.time()
+        self._goal_researched_at: Dict[str, float] = {}   # описание цели -> время успешного исследования
 
         # Обратная связь по проактивности.
         self._notified: List[Dict[str, Any]] = []       # {keywords, ts, source}
@@ -660,6 +667,10 @@ class AutonomyEngine:
                 continue
 
 
+            if topic.source in ("goal", "goal_subtask") and topic.related_goal \
+                    and self.goal_on_cooldown(topic.related_goal):
+                self.queue.complete(topic)  # эта цель уже исследовалась недавно — не тратим бюджет
+                continue
             if not self._consume_budget(_BUDGET_WEIGHT_RESEARCH):
                 # Бюджет исчерпан — откладываем тему на короткое время (не 30 мин),
                 # чтобы не "замораживать" очередь на весь период exhaustion.
@@ -674,6 +685,8 @@ class AutonomyEngine:
                 self.queue.fail(topic, str(e))
                 continue
             answer = (result or {}).get("answer", "")
+            if topic.related_goal:
+                self._goal_researched_at[topic.related_goal] = time.time()
             self.queue.complete(topic)
             if answer and answer.strip():
                 # Передаём topic_key для bandit feedback
@@ -685,6 +698,10 @@ class AutonomyEngine:
                 # Также пробуем удалить из SelfModel.active_goals (для целей от motivation)
                 if hasattr(self, 'self_model') and self.self_model is not None:
                     self.self_model.remove_goal(topic.related_goal)
+
+    def goal_on_cooldown(self, goal_description: str) -> bool:
+        last = self._goal_researched_at.get(goal_description)
+        return last is not None and time.time() - last < GOAL_RESEARCH_COOLDOWN_SECONDS
 
     def _bump_goal_confidence(self, goal_description: str, delta: float) -> None:
         try:

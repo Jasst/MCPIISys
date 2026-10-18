@@ -461,8 +461,9 @@ class CognitiveController:
         self._external_tools_registered = False
 
 
-        # Для отслеживания бездействия
-        self._last_activity_time = time.time()
+        # Для отслеживания бездействия. 0.0: открытие приложения не считается активностью,
+        # активность появляется только с реальным сообщением пользователя (process_input).
+        self._last_activity_time = 0.0
         self._idle_consolidation_done = False
 
         # ИСПРАВЛЕНИЕ: RESOURCE_BUDGET_LLM_CALLS был объявлен в config_ai.py,
@@ -924,7 +925,8 @@ class CognitiveController:
                 try:
                     active_goals = await self.memory_service.get_goals()
                     for goal_dict in active_goals:
-                        if goal_dict["confidence"] < CURIOSITY_UNCERTAINTY_THRESHOLD:
+                        if (goal_dict["confidence"] < CURIOSITY_UNCERTAINTY_THRESHOLD
+                                and not self.autonomy.goal_on_cooldown(goal_dict["description"])):
                             self.autonomy.enqueue_topic(
                                 goal_dict["description"], source="goal",
                                 priority=goal_dict.get("priority", 0.5),
