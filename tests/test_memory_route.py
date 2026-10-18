@@ -31,6 +31,8 @@ class FakeMem:
         self.rebuilt = 0
     def reload_if_stale(self):
         return False
+    def embed_text(self, text, is_query=False):
+        return [float(len(text)) / 100.0] + [0.0] * 7
     def _rebuild_caches_from_gcn(self):
         self.rebuilt += 1
     async def _save_async(self):
@@ -185,8 +187,62 @@ def test_snapshot_unchanged_and_delta():
     assert other.get("delta") is None and len(other["nodes"]) == fresh["total_nodes"]
     print("7 ok: unchanged, дельта совпадает с полным снимком, рассинхрон -> полный снимок")
 
+def test_snapshot_history_serves_delta_to_second_tab_and_pca_on_demand():
+    c = TestClient(build_app("u4"))
+    v1 = c.get("/ai/memory/snapshot").json()
+    assert "pca" in v1 and v1["pca"] == {}, "PCA по умолчанию не считается"
+    oid = v1["nodes"][0]["id"]
+    assert c.post("/ai/memory/edit", json={"op": "set_confidence", "args": {"id": oid, "value": 0.2}}).status_code == 200
+    v2 = c.get("/ai/memory/snapshot").json()           # вторая «вкладка» уже видит v2
+    assert v2["version"] != v1["version"]
+    # первая вкладка всё ещё на v1: из истории берётся база, отдаётся дельта, а не полный снимок
+    d = c.get("/ai/memory/snapshot", params={"since": v1["version"]}).json()
+    assert d.get("delta") is True and d["base"] == v1["version"]
+    nodes, _ = _apply_delta(v1, d)
+    assert nodes == {n["id"]: n for n in v2["nodes"]}
+    # pca=1 отдаёт проекцию
+    full_pca = c.get("/ai/memory/snapshot", params={"pca": 1}).json()
+    assert full_pca["pca"] and all(len(v) == 2 for v in full_pca["pca"].values())
+    print("8 ok: история снимков для второй вкладки, PCA только по запросу")
+
+def test_snapshot_survives_legacy_and_broken_records():
+    from datetime import datetime
+    st = make_store("legacy")[0]
+    ids = list(st._objects.keys())
+    st._objects[ids[0]].created = datetime(2025, 1, 1)      # naive-дата из старых записей
+    st._objects[ids[1]].confidence = None                    # доверие не задано
+    st._embedding_index[ids[2]] = [0.1, 0.2]                 # эмбеддинг другой размерности
+    from GCN import memory_viewer_core as core
+    snap = core.build_snapshot(st, max_nodes=800)
+    assert snap["total_nodes"] == 6 and all(n["created"].endswith(("+00:00", "Z")) or "+" in n["created"] for n in snap["nodes"])
+    assert snap["metrics"]["oldest"] is not None
+    print("9 ok: старые данные (naive-даты, пустое доверие, кривые эмбеддинги) не ломают снимок")
+
+def test_edit_text_and_retract_end_to_end():
+    c = TestClient(build_app("u6"))
+    snap = c.get("/ai/memory/snapshot").json()
+    svc, _ = stores["u6"]
+    st = svc.private_memory.store
+    a = snap["nodes"][0]["id"]
+    old_vec = st.get_embedding(a)
+    r = c.post("/ai/memory/edit", json={"op": "set_subject", "args": {"id": a, "text": "новый текст записи"}})
+    assert r.status_code == 200, r.text
+    assert st._objects[a].subject == "новый текст записи"
+    assert st.get_embedding(a) != old_vec, "эмбеддинг не пересчитан после смены текста"
+    assert st.get_embedding(a) == svc.private_memory.embed_text("новый текст записи")
+    assert c.post("/ai/memory/edit", json={"op": "set_subject", "args": {"id": a, "text": "   "}}).status_code == 400
+    d = c.get("/ai/memory/snapshot", params={"since": snap["version"]}).json()
+    assert [n["subject"] for n in d["nodes_changed"] if n["id"] == a] == ["новый текст записи"]
+    r = c.post("/ai/memory/edit", json={"op": "retract", "args": {"id": a, "reason": "тест"}})
+    assert r.status_code == 200 and a not in st._objects
+    assert c.get("/ai/memory/object", params={"id": a}).status_code == 404
+    assert c.post("/ai/memory/edit", json={"op": "retract", "args": {"id": a}}).status_code == 400
+    d2 = c.get("/ai/memory/snapshot", params={"since": d["version"]}).json()
+    assert a in d2["nodes_removed"]
+    print("10 ok: смена текста пересчитывает эмбеддинг, удаление убирает узел, повтор даёт 400")
+
 if __name__ == "__main__":
     for t in [test_status_snapshot_detail, test_user_isolation_and_no_memory_param, test_edit_persists_and_saves,
-              test_readonly_and_disabled, test_llm_proposal_sanitized_and_unavailable, test_page_served_and_auth_required, test_snapshot_unchanged_and_delta]:
+              test_readonly_and_disabled, test_llm_proposal_sanitized_and_unavailable, test_page_served_and_auth_required, test_snapshot_unchanged_and_delta, test_snapshot_history_serves_delta_to_second_tab_and_pca_on_demand, test_snapshot_survives_legacy_and_broken_records, test_edit_text_and_retract_end_to_end]:
         t()
     print("ALL PASSED")

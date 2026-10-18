@@ -112,6 +112,17 @@ async def memory_object(id: str, uid: str = Depends(require_auth)):
             raise HTTPException(status_code=404, detail="запись не найдена")
 
 
+async def _refresh_embedding(mem, oid: str, text: str):
+    """Смена текста меняет смысл записи: пересчитываем эмбеддинг тем же путём, что и чат.
+    Иначе семантический поиск продолжит находить запись по старому тексту."""
+    vec = await asyncio.to_thread(mem.embed_text, text.strip()[:1000])
+    if vec:
+        mem.store.set_embedding(oid, vec)
+    else:  # эмбеддинги выключены: старый вектор уже не соответствует тексту
+        mem.store._embedding_index.pop(oid, None)
+        mem.store._faiss_dirty = True
+
+
 @router.post("/edit")
 async def memory_edit(body: EditBody, uid: str = Depends(require_auth)):
     _enabled()
@@ -119,11 +130,13 @@ async def memory_edit(body: EditBody, uid: str = Depends(require_auth)):
         raise HTTPException(status_code=403, detail="режим только чтение")
     mem = await _private_memory(uid)
     async with mem._lock:
-        mem.reload_if_stale()
+        await asyncio.to_thread(mem.reload_if_stale)
         try:
             result = core.apply_edit(mem.store, body.op, body.args) or {}
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        if body.op == "set_subject":
+            await _refresh_embedding(mem, body.args["id"], str(body.args["text"]))
         mem._rebuild_caches_from_gcn()  # индексы фактов и кэши соответствуют новому состоянию
     await mem._save_async()
     return {"ok": True, "version": core.store_version(mem.store), **result}

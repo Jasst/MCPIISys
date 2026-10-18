@@ -960,7 +960,13 @@ document.addEventListener("visibilitychange", () => {
 initTheme();
 resize();
 requestAnimationFrame(loop);
-init().then(() => fitView()).catch((err) => log("старт: " + err.message, "bad"));
+init().then(() => fitView()).catch((err) => {
+  // ошибка старта раньше оставляла статус «…» и пустой граф: показываем причину прямо в шапке
+  log("старт: " + err.message, "bad");
+  const st = $("#status");
+  st.textContent = "ошибка: " + err.message;
+  st.style.color = "var(--danger-color, #e5544f)";
+});
 </script>
 </body>
 </html>

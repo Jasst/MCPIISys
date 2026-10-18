@@ -9,6 +9,7 @@ import json
 import math
 import re
 from collections import Counter, defaultdict, deque
+from datetime import timezone
 
 import numpy as np
 
@@ -17,6 +18,22 @@ REL_RE = re.compile(r"^[A-Z][A-Z_]{1,31}$")
 CONTRADICT_RELATIONS = ("CONTRADICTS", "CONTRADICT")
 ACTOR = "memory_viewer"
 MAX_NODES_DEFAULT = 800
+
+
+def _utc(dt):
+    """Время без часового пояса (старые записи) приводим к UTC, чтобы сравнивать с aware-датами."""
+    if dt is None:
+        return None
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+
+def _conf(o):
+    """Доверие как число: None или мусор в старых данных не должны ронять снимок."""
+    try:
+        v = float(o.confidence)
+    except (TypeError, ValueError):
+        return 0.0
+    return v if math.isfinite(v) else 0.0
 
 
 def _scope(o):
@@ -60,7 +77,7 @@ def _build_snapshot_locked(store, readonly, max_nodes, with_pca):
                 adj[src].add(tgt)
                 adj[tgt].add(src)
 
-    ranked = sorted(objs.keys(), key=lambda k: (degree[k], objs[k].confidence), reverse=True)
+    ranked = sorted(objs.keys(), key=lambda k: (degree[k], _conf(objs[k])), reverse=True)
     shown = ranked[:max_nodes]
     shown_set = set(shown)
 
@@ -73,11 +90,11 @@ def _build_snapshot_locked(store, readonly, max_nodes, with_pca):
             "type": _kind(o),
             "subject": o.subject,
             "predicate": o.predicate,
-            "confidence": round(float(o.confidence), 4),
+            "confidence": round(_conf(o), 4),
             "version": o.version,
             "scope": _scope(o),
             "author": o.author,
-            "created": o.created.isoformat(),
+            "created": _utc(o.created).isoformat(),
             "evidence": len(o.evidence or []),
             "source_type": o.source_type,
             "last_accessed": meta.get("last_accessed"),
@@ -99,6 +116,10 @@ def _build_snapshot_locked(store, readonly, max_nodes, with_pca):
 
 def _pca(store, allowed):
     emb = {k: v for k, v in store._embedding_index.items() if k in allowed}
+    # берём только основную размерность: один «кривой» вектор не должен ломать проекцию всех
+    if emb:
+        dim = Counter(len(v) for v in emb.values()).most_common(1)[0][0]
+        emb = {k: v for k, v in emb.items() if len(v) == dim}
     if len(emb) < 3:
         return {}
     ids = list(emb.keys())
@@ -119,7 +140,7 @@ def _pca(store, allowed):
 def _metrics(store, degree, adj):
     objs = store._objects
     g = store._graph
-    confs = [o.confidence for o in objs.values()]
+    confs = [_conf(o) for o in objs.values()]
     by_type = Counter(_kind(o) for o in objs.values())
     by_scope = Counter(_scope(o) for o in objs.values())
     rel_counts = Counter()
@@ -150,7 +171,7 @@ def _metrics(store, degree, adj):
                     q.append(nb)
 
     hubs = sorted(objs.keys(), key=lambda k: degree.get(k, 0), reverse=True)[:8]
-    created = sorted(o.created for o in objs.values()) if objs else []
+    created = sorted(_utc(o.created) for o in objs.values()) if objs else []
     n = len(objs)
     return {
         "nodes": n,
@@ -201,11 +222,11 @@ def object_detail(store, oid):
         "subject": o.subject,
         "predicate": o.predicate,
         "object": str(o.object)[:2000],
-        "confidence": o.confidence,
+        "confidence": _conf(o),
         "version": o.version,
         "scope": _scope(o),
         "author": o.author,
-        "created": o.created.isoformat(),
+        "created": _utc(o.created).isoformat(),
         "evidence": list(o.evidence or [])[:50],
         "source_type": o.source_type,
         "has_embedding": store.get_embedding(oid) is not None,
