@@ -11,3 +11,4 @@ __pycache__/
 /ui_state
 *.log
 /memory_viewer
+/ui_media
