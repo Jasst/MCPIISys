@@ -2482,18 +2482,42 @@ class CognitiveController:
         return messages
 
     # ===== ИССЛЕДОВАНИЕ =====
+    async def _generate_hypotheses(self, goal: str, memory_context: str) -> List[str]:
+        """Гипотезы из ответа модели. Пункт списка проходит проверку (llm_text.parse_hypotheses);
+        если ничего не прошло, один повтор с низкой температурой и жёсткой инструкцией.
+        Возвращает пустой список, а не текст рассуждений."""
+        from GCN.llm_text import parse_hypotheses
+        base = (
+            f"Сформулируй 3 чёткие, проверяемые гипотезы по вопросу: {goal}.\n\n"
+            f"{memory_context}\n\n"
+            "Каждая гипотеза — краткое утверждение (не вопрос) с конкретным "
+            "предположением. Ответь маркированным списком, без пояснений."
+        )
+        attempts = [
+            (base, 0.8, 600),
+            (base + "\nОтвет — ровно три строки, каждая начинается с «- ». Никаких рассуждений.",
+             0.3, 300),
+        ]
+        for prompt, temp, max_tok in attempts:
+            raw = await call_llm([{"role": "user", "content": prompt}], temp=temp, max_tokens=max_tok)
+            hs = parse_hypotheses(raw)
+            if hs:
+                return hs
+            logger.warning(f"[research] гипотезы не распознаны, ответ модели: {str(raw)[:120]!r}")
+        return []
+
     async def research(self, goal: str) -> Dict[str, Any]:
         # ── ШАГ 1: прочитать память (Уровень 1) ─────────────────────────
         memory_context = ""
         memory_hits: List[Dict] = []
         try:
-            memory_hits = await self.memory_service.recall(goal, top_k=7)
+            memory_hits = await self.memory_service.recall(goal, top_k=5)
             if memory_hits:
                 lines = []
                 for r in memory_hits:
                     scope = r.get("scope", "private")
                     conf = r.get("confidence", 0.5)
-                    lines.append(f"- [{scope}, conf={conf:.2f}] {r['text'][:250]}")
+                    lines.append(f"- [{scope}, conf={conf:.2f}] {r['text'][:200]}")
                 memory_context = (
                     "=== ЧТО УЖЕ ИЗВЕСТНО ИЗ МОЕЙ ПАМЯТИ ===\n"
                     + "\n".join(lines)
@@ -2506,18 +2530,10 @@ class CognitiveController:
             logger.debug(f"research: recall failed: {e}")
 
         # ── ШАГ 2: сформулировать гипотезы с учётом памяти ─────────────
-        prompt = (
-            f"Сформулируй 3 чёткие, проверяемые гипотезы по вопросу: {goal}.\n\n"
-            f"{memory_context}\n\n"
-            "Каждая гипотеза — краткое утверждение (не вопрос) с конкретным "
-            "предположением. Ответь маркированным списком, без пояснений."
-        )
-        hypotheses_text = await call_llm([{"role": "user", "content": prompt}], temp=0.8)
-        hypotheses = [h.strip("-• ").strip() for h in hypotheses_text.split('\n') if h.strip()][:3]
-        if not hypotheses:
-            hypotheses = ["Не удалось сгенерировать гипотезы"]
+        hypotheses = await self._generate_hypotheses(goal, memory_context)
 
         # ── ШАГ 3: веб-поиск ────────────────────────────────────────────
+        # по цели и по проверенным гипотезам; текст рассуждений в запросы не попадает
         all_evidence = []
         queries = [goal] + hypotheses[:2]
         for q in queries:
@@ -2541,9 +2557,10 @@ class CognitiveController:
         answer_prompt = (
             f"Ответь на вопрос: {goal}.\n\n"
             f"{memory_context}\n\n"
-            f"Гипотезы, которые нужно проверить:\n"
-            + "\n".join(f"- {h}" for h in hypotheses) + "\n\n"
-            f"Доказательства из веб-поиска:\n{evidence_text}\n\n"
+            + (("Гипотезы, которые нужно проверить:\n"
+                + "\n".join(f"- {h}" for h in hypotheses) + "\n\n") if hypotheses else
+               "Гипотезы сформулировать не удалось: ответь по самой цели и доказательствам.\n\n")
+            + f"Доказательства из веб-поиска:\n{evidence_text}\n\n"
             "Структурируй ответ: вступление, основная часть с аргументацией, "
             "заключение. Для каждого утверждения укажи уверенность 0-1. "
             "Если гипотеза подтверждается уже имеющейся памятью — сошлись на неё."
