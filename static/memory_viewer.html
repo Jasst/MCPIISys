@@ -98,6 +98,21 @@ label{color:var(--text-muted);font-size:12px}
 .ro-note{color:var(--warn);font-size:12px;margin:4px 0}
 a.back{color:var(--acc);text-decoration:none;padding:5px 2px}
 a.back:hover{text-decoration:underline}
+/* ---- вкладки левой панели и советы по улучшению памяти ---- */
+.tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px}
+.tab{background:transparent;padding:3px 10px;font-size:12px}
+.tab.on{background:var(--bg-hover);border-color:var(--border-focus)}
+.guide{font-size:12px;line-height:1.55;border-left:3px solid var(--accent-color)}
+.guide .mono{font-size:12px;color:var(--text-secondary);margin:2px 0;word-break:normal}
+.ins{background:var(--bg-tertiary);border:1px solid var(--border-color);border-left:3px solid var(--text-muted);
+  border-radius:var(--radius-md);padding:8px 10px;margin-bottom:8px;font-size:12px}
+.ins.bad{border-left-color:var(--danger-color)}
+.ins.warn{border-left-color:var(--warning-color)}
+.ins.info{border-left-color:var(--accent-color)}
+.ins .mono{margin:4px 0;word-break:normal}
+.leg-rel{display:flex;gap:8px;align-items:center;font-size:12px;margin:4px 0;color:var(--text-secondary)}
+.leg-rel i{display:inline-block;width:16px;height:3px;border-radius:2px;flex:none}
+.hint{font-size:11px;color:var(--text-muted);margin:2px 0 6px}
 /* ---- мобильная раскладка: панель деталей как выдвижная шторка ---- */
 #zoombar{display:none;position:absolute;right:8px;bottom:8px;z-index:5;flex-direction:column;gap:6px}
 #zoombar button{width:38px;height:38px;font-size:17px;border-radius:9px;background:#243049d9}
@@ -142,14 +157,21 @@ a.back:hover{text-decoration:underline}
   <span id="counts" class="mono"></span>
 </div>
 
-<div id="sheet-head" hidden></div>
-
 <div id="main">
   <aside id="left">
-    <h3>Метрики</h3>
-    <div id="metrics"></div>
-    <h3>Легенда</h3>
-    <div class="legend" id="legend"></div>
+    <div class="tabs">
+      <button class="tab on" data-tab="insights" title="что можно улучшить в памяти">Улучшить</button>
+      <button class="tab" data-tab="metrics">Метрики</button>
+      <button class="tab" data-tab="legend">Легенда</button>
+    </div>
+    <div id="tab-insights"></div>
+    <div id="tab-metrics" hidden><div id="metrics"></div></div>
+    <div id="tab-legend" hidden>
+      <h3>Типы записей</h3>
+      <div class="legend" id="legend"></div>
+      <h3>Связи</h3>
+      <div id="legend-rel"></div>
+    </div>
   </aside>
   <section id="stage"><canvas id="cv"></canvas>
     <div id="zoombar">
@@ -185,6 +207,7 @@ const S = {
   drag: null, hover: null, degreeRank: new Set(), dirtyDetail: false,
   pointers: new Map(), pinch: null, tap: null,
   redraw: true, cw: 0, ch: 0,
+  insights: [], highlight: new Set(),
 };
 
 /* ---------- тема — как в основном чате (тёмная по умолчанию, светлая по классу) ---------- */
@@ -297,7 +320,7 @@ async function refresh(force) {
   syncPositions();
   fillTypeFilter(snap.metrics.by_type);
   applyFilter();
-  renderMetrics(snap.metrics);
+  renderMetrics(snap.metrics, snap.insights);
   if (S.selected && S.byId.has(S.selected)) loadDetail(S.selected);
   else if (S.selected) { S.selected = null; clearDetail(); }
   S.alpha = Math.max(S.alpha, 0.3);
@@ -455,6 +478,11 @@ function draw() {
     ctx.globalAlpha = 1;
     if (hasContradiction(id)) {
       ctx.lineWidth = 2; ctx.strokeStyle = cssVar("--danger-color", "#e5544f"); ctx.stroke();
+    }
+    if (S.highlight.has(id) && id !== S.selected) {
+      ctx.beginPath(); ctx.arc(x, y, rad + 3, 0, Math.PI * 2);
+      ctx.setLineDash([3, 3]); ctx.lineWidth = 1.5; ctx.strokeStyle = "#f0b35a";
+      ctx.stroke(); ctx.setLineDash([]);
     }
     if (id === S.selected) {
       ctx.beginPath(); ctx.arc(x, y, rad + 5, 0, Math.PI * 2);
@@ -695,6 +723,7 @@ function renderDetail(d) {
   // текст
   const subj = h("textarea", {disabled: ro ? "" : null}, d.subject);
   box.append(h("h3", {}, "Текст"), subj,
+    h("div", {class: "hint"}, "после сохранения пересчитывается вектор для поиска по смыслу"),
     h("div", {class: "row"}, h("button", {class: "primary", disabled: ro ? "" : null,
       onclick: () => edit("set_subject", {id: d.id, text: subj.value})}, "Сохранить текст")));
 
@@ -704,11 +733,19 @@ function renderDetail(d) {
     h("button", {disabled: ro ? "" : null, onclick: () => edit("set_predicate", {id: d.id, text: pred.value})}, "Сохранить")));
 
   // доверие
-  const conf = h("input", {type: "range", min: "0", max: "100", value: Math.round(d.confidence * 100), disabled: ro ? "" : null});
+  const conf = h("input", {type: "range", min: "0", max: "100", value: Math.round(d.confidence * 100),
+    disabled: ro ? "" : null});
   const confV = h("span", {}, d.confidence.toFixed(2));
   conf.addEventListener("input", () => { confV.textContent = (conf.value / 100).toFixed(2); });
-  box.append(h("h3", {}, "Доверие"), h("div", {class: "row"}, conf, confV,
-    h("button", {disabled: ro ? "" : null, onclick: () => edit("set_confidence", {id: d.id, value: conf.value / 100})}, "Применить")));
+  box.append(h("h3", {}, "Доверие"),
+    h("div", {class: "row"}, conf, confV,
+      h("button", {disabled: ro ? "" : null, onclick: () => edit("set_confidence", {id: d.id, value: conf.value / 100})},
+        "Применить")),
+    h("div", {class: "row"},
+      h("button", {class: "small", disabled: ro ? "" : null,
+        onclick: () => edit("set_confidence", {id: d.id, value: 0.9})}, "подтверждаю · 0.9"),
+      h("button", {class: "small", disabled: ro ? "" : null,
+        onclick: () => edit("set_confidence", {id: d.id, value: 0.3})}, "сомневаюсь · 0.3")));
 
   // сведения
   box.append(h("h3", {}, "Сведения"), h("div", {class: "card"},
@@ -730,12 +767,21 @@ function renderDetail(d) {
     return h("option", {value: x}, (n ? n.subject : x).slice(0, 60));
   });
   const target = h("select", {disabled: ro ? "" : null, style: "max-width:200px"}, opts);
-  const rel = h("input", {value: "RELATED_TO", size: 14, disabled: ro ? "" : null});
-  const w = h("input", {type: "number", min: "0", max: "1", step: "0.1", value: "0.5", size: 4, disabled: ro ? "" : null});
-  box.append(h("div", {class: "row"}, target),
+  const rel = h("input", {value: "RELATED_TO", size: 14, list: "rel-list", disabled: ro ? "" : null});
+  const relHelp = h("div", {class: "hint"}, REL_HELP.RELATED_TO);
+  rel.addEventListener("input", () => {
+    relHelp.textContent = REL_HELP[rel.value.trim().toUpperCase()] || "свой тип: заглавные буквы и подчёркивания";
+  });
+  const w = h("input", {type: "number", min: "0", max: "1", step: "0.1", value: "0.5", size: 4,
+    disabled: ro ? "" : null, title: "сила связи от 0 до 1"});
+  box.append(h("h3", {}, "Добавить связь"),
+    h("datalist", {id: "rel-list"}, Object.keys(REL_HELP).map((r) => h("option", {value: r}))),
+    h("div", {class: "hint"}, "Связь соединяет эту запись с другой, которая видна на графе."),
+    h("div", {class: "row"}, target),
     h("div", {class: "row"}, rel, w,
       h("button", {disabled: ro ? "" : null, onclick: () => edit("link", {source: d.id, target: target.value,
-        relation: rel.value.trim().toUpperCase(), weight: Number(w.value)})}, "Связать")));
+        relation: rel.value.trim().toUpperCase(), weight: Number(w.value)})}, "Связать")),
+    relHelp);
 
   // LLM-проверка
   const proposalBox = h("div", {});
@@ -858,19 +904,92 @@ async function llmReview(id, box) {
   }
 }
 
+/* ---------- подсказки: связи и значки советов ---------- */
+const REL_HELP = {
+  RELATED_TO: "просто связаны по смыслу",
+  GROUNDS_IN: "опирается на: основание для вывода",
+  CAUSES: "вызывает или ведёт к",
+  ENABLES: "делает возможным",
+  REQUIRES: "требует для выполнения",
+  PREVENTS: "мешает или предотвращает",
+  PART_OF: "является частью",
+  DUPLICATE_OF: "дубликат: одна из записей лишняя",
+  CONTRADICTS: "противоречит (на графе пунктиром)",
+};
+const INSIGHT_ICON = {bad: "●", warn: "◐", info: "○"};
+
+/* ---------- советы «что улучшить» ---------- */
+function highlightOn(ids) {
+  return ids.length === S.highlight.size && ids.every((id) => S.highlight.has(id));
+}
+function toggleHighlight(ids) {
+  S.highlight = highlightOn(ids) ? new Set() : new Set(ids);
+  S.redraw = true;
+  renderInsights(S.insights);
+}
+
+function renderInsights(list) {
+  S.insights = list;
+  const box = $("#tab-insights");
+  box.innerHTML = "";
+  box.append(h("div", {class: "card guide"},
+    h("strong", {}, "Как устроена память"),
+    h("div", {class: "mono"}, "Записи — то, что ассистент знает о тебе и о мире. Связи — как записи опираются друг на друга. Доверие — насколько ассистент уверен в записи."),
+    h("strong", {style: "display:block;margin-top:6px"}, "Что можно сделать"),
+    h("div", {class: "mono"}, "1. Разреши противоречия: оставь верное, остальное отзови или понизь доверие."),
+    h("div", {class: "mono"}, "2. Объедини повторы: одна запись вместо нескольких одинаковых."),
+    h("div", {class: "mono"}, "3. Свяжи уверенные записи без связей с родственными: так ассистент найдёт цепочки."),
+    h("div", {class: "mono"}, "4. Подтверди важное (доверие ↑) и отметь сомнительное (доверие ↓)."),
+    h("div", {class: "mono"}, "5. Новые знания добавляй через «＋ Запись», а не через чат, если хочешь точно их зафиксировать.")));
+
+  if (!list.length) {
+    box.append(h("div", {class: "hint", style: "margin-top:8px"},
+      "Явных проблем не найдено. Можно добавить новые записи и связи через «＋ Запись»."));
+    return;
+  }
+  for (const ins of list) {
+    const on = highlightOn(ins.ids);
+    const card = h("div", {class: `ins ${ins.level}`});
+    card.append(
+      h("div", {class: "row", style: "justify-content:space-between;margin:0"},
+        h("strong", {}, `${INSIGHT_ICON[ins.level] || "•"} ${ins.title}`),
+        h("button", {class: "small" + (on ? " primary" : ""), onclick: () => toggleHighlight(ins.ids)},
+          on ? "скрыть" : "подсветить")),
+      h("div", {class: "mono"}, ins.hint));
+    for (const it of ins.items.slice(0, 8)) {
+      card.append(h("div", {class: "edge"},
+        h("span", {class: "nb", title: it.id, onclick: () => selectNode(it.id)}, it.subject || it.id)));
+    }
+    const rest = ins.count - Math.min(8, ins.items.length);
+    if (rest > 0) card.append(h("div", {class: "hint"}, `и ещё ${rest}…`));
+    box.append(card);
+  }
+}
+
 /* ---------- метрики ---------- */
-function renderMetrics(m) {
+function renderMetrics(m, insights) {
   rebuildContradictions();
   rebuildNeighbours();
   S.degreeRank = new Set((m.hubs || []).slice(0, 12).map((x) => x.id));
+  renderInsights(insights || []);
+
   const box = $("#metrics");
   box.innerHTML = "";
-  const big = [["объектов", m.nodes], ["рёбер", m.edges], ["компонент", m.components],
-    ["изолированных", m.isolated], ["противоречий", m.contradictions], ["событий", m.events],
-    ["эмбеддингов", m.embeddings], ["ср. доверие", m.avg_confidence], ["ср. степень", m.avg_degree],
-    ["ср. доказательств", m.avg_evidence]];
-  box.append(h("div", {class: "grid"}, big.map(([a, b]) =>
-    h("div", {class: "card", style: "padding:6px 8px"}, h("div", {class: "mono"}, a), h("div", {style: "font-size:16px"}, String(b))))));
+  const big = [
+    ["объектов", m.nodes, "всего записей в памяти"],
+    ["рёбер", m.edges, "связей между записями"],
+    ["компонент", m.components, "несвязанных групп знаний: меньше — цельнее картина"],
+    ["изолированных", m.isolated, "записи без связей: через них ассистент не рассуждает"],
+    ["противоречий", m.contradictions, "пары записей, которые спорят друг с другом"],
+    ["событий", m.events, "записей в журнале изменений"],
+    ["эмбеддингов", m.embeddings, "записей, которые находит семантический поиск"],
+    ["ср. доверие", m.avg_confidence, "средняя уверенность ассистента в записях"],
+    ["ср. степень", m.avg_degree, "среднее число связей на запись"],
+    ["ср. доказательств", m.avg_evidence, "среднее число подтверждений на запись"],
+  ];
+  box.append(h("div", {class: "grid"}, big.map(([a, b, tip]) =>
+    h("div", {class: "card", style: "padding:6px 8px", title: tip},
+      h("div", {class: "mono"}, a), h("div", {style: "font-size:16px"}, String(b))))));
   box.append(h("h3", {}, "Типы"), barList(m.by_type));
   box.append(h("h3", {}, "Области"), barList(m.by_scope));
   box.append(h("h3", {}, "Отношения"), barList(m.relations));
@@ -884,13 +1003,21 @@ function renderMetrics(m) {
     box.append(h("div", {class: "hub", onclick: () => selectNode(hb.id)},
       `${hb.degree} · ${hb.subject.slice(0, 44)}`));
   }
-  box.append(h("h3", {}, "Файл"), kv("размер", `${(m.file_bytes / 1024).toFixed(1)} КБ`),
+  box.append(h("h3", {}, "Период"),
     kv("старейшая", (m.oldest || "—").slice(0, 10)), kv("новейшая", (m.newest || "—").slice(0, 10)));
 
   const leg = $("#legend");
   leg.innerHTML = "";
   for (const [t, c] of Object.entries(TYPE_COLORS)) leg.append(h("span", {}, h("i", {style: `background:${c}`}), t));
   leg.append(h("span", {}, h("i", {style: `background:${cssVar("--danger-color", "#e5544f")}`}), "противоречие (пунктир)"));
+
+  const relBox = $("#legend-rel");
+  relBox.innerHTML = "";
+  for (const [r, text] of Object.entries(REL_HELP)) {
+    const color = REL_COLORS[r] || S.edgeColor;
+    relBox.append(h("div", {class: "leg-rel"}, h("i", {style: `background:${color}`}),
+      h("span", {class: "mono", style: "color:var(--text-primary)"}, r), h("span", {}, text)));
+  }
 }
 
 function barList(obj) {
@@ -904,6 +1031,10 @@ function barList(obj) {
 }
 
 /* ---------- события интерфейса ---------- */
+document.querySelectorAll(".tab").forEach((b) => b.addEventListener("click", () => {
+  document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("on", x === b));
+  for (const p of ["insights", "metrics", "legend"]) $("#tab-" + p).hidden = p !== b.dataset.tab;
+}));
 $("#layout").addEventListener("change", async (e) => {
   S.layout = e.target.value;
   if (S.layout === "pca") {

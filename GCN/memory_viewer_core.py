@@ -9,7 +9,7 @@ import json
 import math
 import re
 from collections import Counter, defaultdict, deque
-from datetime import timezone
+from datetime import datetime, timezone
 
 import numpy as np
 
@@ -18,6 +18,13 @@ REL_RE = re.compile(r"^[A-Z][A-Z_]{1,31}$")
 CONTRADICT_RELATIONS = ("CONTRADICTS", "CONTRADICT")
 ACTOR = "memory_viewer"
 MAX_NODES_DEFAULT = 800
+# пороги для советов «что улучшить» (см. _insights)
+INSIGHT_ITEMS = 40        # сколько записей показываем в одном совете
+STALE_DAYS = 90           # давно не использовалась...
+STALE_CONFIDENCE = 0.5    # ...и доверия меньше этого
+LOW_CONFIDENCE = 0.3      # почти не доверяемые
+ISOLATED_CONFIDENCE = 0.5 # без связей, но уверенные (такие важнее всего связать)
+HUB_DEGREE = 12           # слишком много связей: запись, возможно, слишком общая
 
 
 def _utc(dt):
@@ -111,7 +118,110 @@ def _build_snapshot_locked(store, readonly, max_nodes, with_pca):
         "edges": edges,
         "pca": _pca(store, shown_set) if with_pca else {},
         "metrics": _metrics(store, degree, adj),
+        "insights": _insights(store, degree, adj),
     }
+
+
+def _norm_text(s):
+    """Текст для поиска повторов: регистр, знаки препинания и лишние пробелы не важны."""
+    return " ".join(re.sub(r"[^\w\s]", " ", str(s or "").lower()).split())
+
+
+def _parse_dt(v):
+    if not v:
+        return None
+    try:
+        return _utc(datetime.fromisoformat(str(v).replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
+def _insights(store, degree, adj):
+    """Советы, что улучшить в памяти. Только читает данные: ничего не меняет и не применяет.
+
+    Каждый совет: kind, level (bad / warn / info), title, hint (что делать человеку),
+    count (всего записей), items (до INSIGHT_ITEMS записей с текстом для списка)."""
+    objs = store._objects
+    now = datetime.now(timezone.utc)
+    out = []
+
+    def add(kind, level, title, hint, ids):
+        uniq = list(dict.fromkeys(i for i in ids if i in objs))
+        if not uniq:
+            return
+        out.append({
+            "kind": kind,
+            "level": level,
+            "title": title,
+            "hint": hint,
+            "count": len(uniq),
+            "ids": uniq[:INSIGHT_ITEMS],
+            "items": [{"id": i, "subject": str(objs[i].subject or "")[:160]}
+                      for i in uniq[:INSIGHT_ITEMS]],
+        })
+
+    # 1. противоречия: пары записей, соединённых CONTRADICT*
+    pairs = set()
+    for src_id, lst in store._graph._edges.items():
+        for rel, tgt in lst:
+            if rel in CONTRADICT_RELATIONS and src_id in objs and tgt in objs:
+                pairs.add(tuple(sorted((src_id, tgt))))
+    add("contradiction", "bad", f"Противоречия: {len(pairs)}",
+        "Два утверждения спорят друг с другом. Оставь верное: второе отзови "
+        "или понизь его доверие. Ассистент рассуждает хуже, пока противоречие не решено.",
+        [i for p in sorted(pairs) for i in p])
+
+    # 2. повторы: одинаковый текст у разных записей
+    groups = defaultdict(list)
+    for oid, o in objs.items():
+        key = _norm_text(o.subject)
+        if key:
+            groups[key].append(oid)
+    dups = [g for g in groups.values() if len(g) > 1]
+    add("duplicate", "warn", f"Повторы текста: {len(dups)} групп",
+        "Один и тот же факт записан несколько раз. Оставь одну запись, остальные отзови "
+        "или свяжи их связью DUPLICATE_OF.",
+        [i for g in dups for i in g])
+
+    # 3. уверенные, но без связей: ассистент не может провести через них цепочку рассуждений
+    add("isolated", "warn", "Уверенные, но без связей",
+        "Такие записи не связаны ни с чем. Свяжи их с родственной записью в карточке "
+        "(блок «Добавить связь»), тогда ассистент найдёт цепочки рассуждений.",
+        [k for k, o in objs.items()
+         if degree.get(k, 0) == 0 and _conf(o) >= ISOLATED_CONFIDENCE])
+
+    # 4. почти не доверяемые
+    add("low_confidence", "info", "Почти не доверяемые",
+        "Ассистент сам в них сомневается. Подтверди, если верно, или отзови, если устарело.",
+        [k for k, o in objs.items() if _conf(o) < LOW_CONFIDENCE])
+
+    # 5. давно не использовались и сомнительны
+    stale = []
+    for k, o in objs.items():
+        base = _utc(o.created)
+        if base is None:
+            continue
+        meta = o.object if isinstance(o.object, dict) else {}
+        last = _parse_dt(meta.get("last_accessed")) or base
+        if _conf(o) < STALE_CONFIDENCE and (now - last).days >= STALE_DAYS:
+            stale.append(k)
+    add("stale", "info", "Давно не использовались и сомнительны",
+        f"Не использовались больше {STALE_DAYS} дней и доверия мало. "
+        "Кандидаты на очистку: проверь и отзови, если они больше не нужны.",
+        stale)
+
+    # 6. без вектора: семантический поиск их не находит (только если векторы вообще используются)
+    if store._embedding_index:
+        add("no_embedding", "info", "Без вектора поиска",
+            "Семантический поиск не находит такие записи по смыслу. Сохрани текст "
+            "в карточке: вектор пересчитается.",
+            [k for k in objs if k not in store._embedding_index])
+
+    # 7. слишком много связей
+    add("hub", "info", "Очень много связей",
+        "Такая запись, возможно, слишком общая. Лучше разбить её на несколько конкретных.",
+        [k for k in objs if degree.get(k, 0) >= HUB_DEGREE])
+    return out
 
 
 def _pca(store, allowed):
@@ -376,5 +486,6 @@ def diff_snapshots(prev, cur):
         "edges_added": [e for k, e in cur_edges.items() if prev_edges.get(k) != e],
         "edges_removed": [k for k in prev_edges if k not in cur_edges],
         "pca": cur["pca"],
+        "insights": cur.get("insights", []),
         "metrics": cur["metrics"],
     }
