@@ -104,16 +104,26 @@ body[data-fs="l"] { --chat-fs: 17px; }
 .messages { flex: 1; overflow-y: auto; padding: 22px 16px 10px; position: relative; }
 .msgs-inner { max-width: 780px; min-height: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
 
-/* Кнопка «к концу переписки» — появляется, когда пользователь ушёл вверх от низа */
-.scroll-bottom {
-  position: sticky; bottom: 8px; left: 50%; z-index: 5;
-  width: 34px; height: 34px; border-radius: 50%;
-  display: grid; place-items: center; cursor: pointer; padding: 0;
-  background: var(--bg-surface); color: var(--text-muted);
-  border: 1px solid var(--border-color); box-shadow: var(--shadow-md);
-  transition: color var(--transition-fast), background var(--transition-fast);
+/* Кнопка «к концу переписки» — видна, пока пользователь ушёл вверх от низа.
+   Атрибут hidden должен побеждать display, поэтому правило [hidden] явное. */
+.messages > .scroll-bottom {
+  position: sticky; bottom: 14px; left: 50%; z-index: 5;
+  width: 46px; height: 46px; min-width: 46px; min-height: 46px; border-radius: 50%; padding: 0;
+  display: grid; place-items: center; cursor: pointer;
+  transform: translateX(-50%);
+  background: var(--text-main, #eceef1); color: var(--bg-primary, #0d0e11);
+  border: 1px solid var(--border-color);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .45);
+  transition: filter var(--transition-fast), box-shadow var(--transition-fast);
 }
-@media (hover: hover) { .scroll-bottom:hover { color: var(--text-main); background: var(--bg-hover); } }
+.messages > .scroll-bottom[hidden] { display: none; }
+.messages > .scroll-bottom:not([hidden]) {
+  animation: sb-in .3s ease-out, sb-bob 1.6s ease-in-out .3s infinite;
+}
+.messages > .scroll-bottom svg { width: 22px; height: 22px; }
+@media (hover: hover) { .messages > .scroll-bottom:hover { filter: brightness(.92); box-shadow: 0 8px 26px rgba(0, 0, 0, .55); } }
+@keyframes sb-in { from { opacity: 0; transform: translate(-50%, 14px); } to { opacity: 1; transform: translate(-50%, 0); } }
+@keyframes sb-bob { 0%, 100% { transform: translate(-50%, 0); } 50% { transform: translate(-50%, 6px); } }
 
 /* Pull-to-refresh — «потянуть диалог вниз, чтобы обновить чаты» (мобильные).
    Индикатор живёт над списком сообщений; JS сдвигает msgs-inner transform'ом

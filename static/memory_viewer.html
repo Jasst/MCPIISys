@@ -1,0 +1,1103 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d0e11">
+<meta name="color-scheme" content="dark light">
+<link rel="icon" href="/static/favicon.ico" type="image/x-icon">
+<title>Моя память — GCN</title>
+
+<!-- стили основного чата: та же палитра, шрифты, скроллбары -->
+<link rel="stylesheet" href="/static/style.css">
+
+<style>
+/* ==== тема наследуется из style.css (как в основном чате) ====
+   локальные алиасы только для удобства этого просмотрщика;
+   light-theme переключается классом на body и подхватывает значения автоматически */
+:root{
+  --bg:var(--bg-primary);--panel:var(--bg-secondary);--panel2:var(--bg-tertiary);
+  --line:var(--border-color);--text:var(--text-primary);--muted:var(--text-muted);
+  --acc:var(--accent-color);--bad:var(--danger-color);--ok:var(--success-color);--warn:var(--warning-color);
+  --radius-sm:8px;
+}
+html{background:var(--bg-primary);height:100%}
+body{min-height:100%;margin:0;color:var(--text-primary);font-size:13px;line-height:1.5;overflow-x:hidden;
+  font-family:var(--font-sans);
+  /* фон — как в основном чате: мягкий радиальный блик поверх --bg-primary */
+  background:radial-gradient(ellipse 90% 60% at 50% -20%, rgba(255,255,255,.05), transparent 70%), var(--bg-primary);
+  background-attachment:fixed;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+body.light-theme{background:radial-gradient(ellipse 90% 60% at 50% -20%, rgba(86,93,104,.06), transparent 70%), var(--bg-primary);
+  background-attachment:fixed}
+#top{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px 10px;
+  background:var(--glass-bg);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  border-bottom:1px solid var(--glass-border)}
+#top .title{font-weight:600;margin-right:6px}
+#main{display:grid;grid-template-columns:270px 1fr 360px;height:calc(100% - 120px)}
+#left,#right{overflow:auto;background:var(--bg-secondary);padding:10px}
+#left{border-right:1px solid var(--border-color)}
+#right{border-left:1px solid var(--border-color)}
+#stage{position:relative;overflow:hidden}
+#cv{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:grab;touch-action:none}
+#cv.grabbing{cursor:grabbing}
+#feed{height:120px;overflow:auto;border-top:1px solid var(--border-color);background:var(--bg-secondary);
+  padding:6px 10px;font:12px/1.5 var(--font-mono);color:var(--text-muted)}
+#feed .bad{color:var(--danger-color)} #feed .ok{color:var(--success-color)} #feed .info{color:var(--text-muted)}
+h3{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin:12px 0 6px}
+h3:first-child{margin-top:0}
+.card{background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:var(--radius-md);
+  padding:8px 10px;margin-bottom:8px;box-shadow:var(--shadow-sm)}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.kv{display:flex;justify-content:space-between;gap:8px;font-size:12px}
+.kv span:first-child{color:var(--text-muted)}
+.bar-row{display:grid;grid-template-columns:110px 1fr 40px;gap:6px;align-items:center;font-size:12px;margin:3px 0}
+.bar{height:8px;background:var(--accent-gradient);border-radius:var(--radius-full);min-width:2px}
+.hist{display:flex;align-items:flex-end;gap:3px;height:60px}
+.hist div{flex:1;background:var(--accent-color);opacity:.85;border-radius:2px 2px 0 0;min-height:1px}
+.hist-l{display:flex;justify-content:space-between;color:var(--text-muted);font-size:10px}
+/* кнопки — как в чате: овальные, мягкие микровзаимодействия */
+button{display:inline-flex;align-items:center;justify-content:center;gap:6px;
+  background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-color);
+  border-radius:60px;padding:6px 14px;cursor:pointer;font:inherit;font-weight:500;
+  transition:all var(--transition-fast);-webkit-tap-highlight-color:transparent}
+button:hover:not(:disabled){background:var(--bg-hover);transform:translateY(-1px);box-shadow:var(--shadow-md)}
+button:active:not(:disabled){transform:scale(.96)}
+button:focus-visible{outline:none;border-color:var(--border-focus);box-shadow:0 0 0 3px var(--accent-glow)}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.danger{border-color:var(--danger-color);color:var(--danger-color);background:transparent}
+button.danger:hover:not(:disabled){background:var(--danger-color);color:#fff}
+button.primary{background:var(--accent-gradient-strong);color:#fff;border-color:transparent;
+  box-shadow:0 4px 15px var(--accent-glow)}
+button.primary:hover:not(:disabled){filter:brightness(1.1);transform:translateY(-1px);
+  box-shadow:0 6px 20px var(--accent-glow)}
+button.small{padding:3px 10px;font-size:12px;border-radius:60px}
+input,select,textarea{background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-color);
+  border-radius:var(--radius-sm);padding:6px 10px;font:inherit;max-width:100%;
+  transition:border-color var(--transition-fast),box-shadow var(--transition-fast)}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--border-focus);
+  box-shadow:0 0 0 3px var(--accent-glow)}
+::placeholder{color:var(--text-muted)}
+textarea{width:100%;min-height:58px;resize:vertical}
+input[type=range]{padding:0;border:none;background:transparent;width:110px;accent-color:var(--accent-color);
+  box-shadow:none}
+input[type=range]:focus{box-shadow:none}
+label{color:var(--text-muted);font-size:12px}
+.row{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:6px 0}
+.badge{display:inline-block;padding:1px 8px;border-radius:var(--radius-full);font-size:11px;
+  border:1px solid var(--glass-border-light);background:var(--accent-light);color:var(--text-secondary)}
+.mono{font-family:var(--font-mono);font-size:11px;color:var(--text-muted);word-break:break-all}
+.edge{display:flex;gap:6px;align-items:center;font-size:12px;padding:3px 0;border-bottom:1px dashed var(--border-color)}
+.edge .rel{color:var(--accent-color);min-width:110px}
+.edge .nb{flex:1;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.edge .nb:hover{text-decoration:underline}
+.verdict-ok{color:var(--success-color)} .verdict-bad{color:var(--danger-color)} .verdict-warn{color:var(--warning-color)}
+.hub{cursor:pointer;padding:2px 0;font-size:12px;border-radius:var(--radius-sm)}
+.hub:hover{color:var(--accent-hover);text-decoration:underline}
+.legend{display:flex;flex-wrap:wrap;gap:6px 10px;font-size:11px;color:var(--text-muted)}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:4px;vertical-align:-1px}
+.ro-note{color:var(--warn);font-size:12px;margin:4px 0}
+a.back{color:var(--acc);text-decoration:none;padding:5px 2px}
+a.back:hover{text-decoration:underline}
+/* ---- вкладки левой панели и советы по улучшению памяти ---- */
+.tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px}
+.tab{background:transparent;padding:3px 10px;font-size:12px}
+.tab.on{background:var(--bg-hover);border-color:var(--border-focus)}
+.guide{font-size:12px;line-height:1.55;border-left:3px solid var(--accent-color)}
+.guide .mono{font-size:12px;color:var(--text-secondary);margin:2px 0;word-break:normal}
+.ins{background:var(--bg-tertiary);border:1px solid var(--border-color);border-left:3px solid var(--text-muted);
+  border-radius:var(--radius-md);padding:8px 10px;margin-bottom:8px;font-size:12px}
+.ins.bad{border-left-color:var(--danger-color)}
+.ins.warn{border-left-color:var(--warning-color)}
+.ins.info{border-left-color:var(--accent-color)}
+.ins .mono{margin:4px 0;word-break:normal}
+.leg-rel{display:flex;gap:8px;align-items:center;font-size:12px;margin:4px 0;color:var(--text-secondary)}
+.leg-rel i{display:inline-block;width:16px;height:3px;border-radius:2px;flex:none}
+.hint{font-size:11px;color:var(--text-muted);margin:2px 0 6px}
+/* ---- мобильная раскладка: панель деталей как выдвижная шторка ---- */
+#zoombar{display:none;position:absolute;right:8px;bottom:8px;z-index:5;flex-direction:column;gap:6px}
+#zoombar button{width:38px;height:38px;font-size:17px;border-radius:9px;background:#243049d9}
+#sheet-head{display:none}
+@media (max-width:900px){
+  #main{grid-template-columns:1fr;height:auto}
+  #left{order:3;border-right:none;border-top:1px solid var(--line)}
+  #stage{height:58vh;min-height:340px}
+  #right{position:fixed;left:0;right:0;bottom:0;z-index:20;max-height:72vh;overflow:auto;
+    border-left:none;border-top:2px solid var(--acc);border-radius:16px 16px 0 0;
+    transform:translateY(105%);transition:transform .22s ease;box-shadow:0 -8px 30px rgba(0,0,0,.55);
+    padding-bottom:max(10px, env(safe-area-inset-bottom))}
+  body.sheet-open #right{transform:none}
+  #sheet-head{display:block;position:sticky;top:0;background:var(--panel);z-index:2}
+  #top,#feed{position:static}
+  #top input[type=search]{flex:1;min-width:0}
+  #top label{font-size:11px}
+  #zoombar{display:flex}
+  button{padding:7px 11px}
+  input,select,textarea,button{font-size:14px}
+  textarea{min-height:80px}
+}
+</style>
+</head>
+<body>
+<div id="top">
+  <a class="back" href="/">← к чату</a>
+  <span class="title">Моя память</span>
+  <span id="status" class="badge">…</span>
+  <button id="live" title="обновлять каждые 2 секунды">Live: вкл</button>
+  <label>вид
+    <select id="layout">
+      <option value="graph">граф связей</option>
+      <option value="pca">векторы (2D проекция)</option>
+    </select>
+  </label>
+  <input id="q" type="search" placeholder="поиск по тексту…" size="22">
+  <label>тип <select id="ftype"><option value="">все</option></select></label>
+  <label>доверие ≥ <input id="minc" type="range" min="0" max="100" value="0"><span id="minc-v">0%</span></label>
+  <button id="fit" title="вписать в экран">Вписать</button>
+  <button id="add" title="добавить запись в память">＋ Запись</button>
+  <span id="counts" class="mono"></span>
+</div>
+
+<div id="main">
+  <aside id="left">
+    <div class="tabs">
+      <button class="tab on" data-tab="insights" title="что можно улучшить в памяти">Улучшить</button>
+      <button class="tab" data-tab="metrics">Метрики</button>
+      <button class="tab" data-tab="legend">Легенда</button>
+    </div>
+    <div id="tab-insights"></div>
+    <div id="tab-metrics" hidden><div id="metrics"></div></div>
+    <div id="tab-legend" hidden>
+      <h3>Типы записей</h3>
+      <div class="legend" id="legend"></div>
+      <h3>Связи</h3>
+      <div id="legend-rel"></div>
+    </div>
+  </aside>
+  <section id="stage"><canvas id="cv"></canvas>
+    <div id="zoombar">
+      <button id="zin" title="приблизить">＋</button>
+      <button id="zout" title="отдалить">－</button>
+      <button id="zfit" title="вписать в экран" style="font-size:13px">⤢</button>
+    </div>
+  </section>
+  <aside id="right">
+    <div id="sheet-head"></div>
+    <div id="detail"><div class="mono">Выбери узел на графе или в списке хабов.</div></div>
+  </aside>
+</div>
+
+<div id="feed"></div>
+
+<script>
+"use strict";
+const API = "/ai/memory";
+/* палитра графа в приглушённых «графитовых» тонах основного чата */
+const TYPE_COLORS = {claim:"#8fa1bd", concept:"#7fb8a4", observation:"#c9a06a", goal:"#a695c8",
+  evidence:"#86b6ac", hypothesis:"#c2b478", episode:"#93a8d0", notification:"#cf9276",
+  identity_core:"#c77f8e", entity:"#a7afbc", procedure:"#bda3d6", relationship:"#9dbdd6"};
+const REL_COLORS = {CONTRADICTS:"#e5544f", CONTRADICT:"#e5544f", GROUNDS_IN:"#787e89", CAUSES:"#e0a458",
+  ENABLES:"#4cc38a", PREVENTS:"#e5544f", INHIBITS:"#e5544f", REQUIRES:"#a695c8"};
+const REP = 2600, SPRING = 0.03, GRAV = 0.0025, DAMP = 0.82;
+const CELL = 200;   // размер ячейки сетки для отталкивания
+
+const S = {
+  memory: null, readonly: false, snap: null, version: null,
+  byId: new Map(), pos: new Map(), selected: null, visible: new Set(), visibleEdges: [],
+  alpha: 1, layout: "graph", live: true, view: {x: 0, y: 0, k: 1},
+  drag: null, hover: null, degreeRank: new Set(), dirtyDetail: false,
+  pointers: new Map(), pinch: null, tap: null,
+  redraw: true, cw: 0, ch: 0,
+  insights: [], highlight: new Set(),
+};
+
+/* ---------- тема — как в основном чате (тёмная по умолчанию, светлая по классу) ---------- */
+function cssVar(name, fallback) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+function applyTheme(t) {
+  S.theme = t;
+  document.body.classList.toggle("light-theme", t === "light");
+  // canvas-цвета читаем из CSS-переменных текущей темы
+  S.nodeFill = cssVar("--text-secondary", "#a6abb5");
+  S.labelColor = cssVar("--text-primary", "#eceef1");
+  S.edgeColor = t === "light" ? "#9aa0ab" : "#4a4f58";
+}
+function initTheme() {
+  let t = null;
+  try { t = localStorage.getItem("theme") || localStorage.getItem("gcn_theme"); } catch (_) { /* ignore */ }
+  if (!t) t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  applyTheme(t);
+}
+
+const $ = (s) => document.querySelector(s);
+const cv = $("#cv"), ctx = cv.getContext("2d");
+
+function h(tag, props, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (v === undefined || v === null || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k === "value") el.value = v;
+    else if (k === "checked") el.checked = !!v;
+    else el.setAttribute(k, v === true ? "" : String(v));
+  }
+  for (const c of kids.flat()) {
+    if (c === null || c === undefined || c === false) continue;
+    el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  }
+  return el;
+}
+
+function log(msg, cls = "info") {
+  const t = new Date().toLocaleTimeString("ru-RU");
+  const feed = $("#feed");
+  feed.prepend(h("div", {class: cls}, `${t}  ${msg}`));
+  while (feed.childNodes.length > 200) feed.lastChild.remove();
+}
+
+async function api(path, body) {
+  const opt = body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body)};
+  const r = await fetch(path, opt);
+  let data = {};
+  try { data = await r.json(); } catch (_) { /* пустой ответ */ }
+  if (r.status === 401) { location.href = "/login"; throw new Error("нужен вход"); }
+  if (!r.ok) throw new Error(data.detail || data.error || ("HTTP " + r.status));
+  return data;
+}
+
+/* ---------- загрузка ---------- */
+async function init() {
+  const st = await api(API + "/status");
+  S.readonly = !!st.readonly;
+  S.memory = "me";
+  $("#status").textContent = st.readonly ? "только чтение" : "чтение и запись";
+  $("#status").style.color = st.readonly ? "var(--warn)" : "var(--ok)";
+  await refresh(true);
+}
+
+const edgeKey = (e) => `${e.s}|${e.r}|${e.t}`;
+
+/* применяет дельту сервера к текущему снимку; результат имеет ту же форму, что полный снимок */
+function mergeDelta(prev, d) {
+  const nodes = new Map(prev.nodes.map((n) => [n.id, n]));
+  for (const id of d.nodes_removed) nodes.delete(id);
+  for (const n of d.nodes_added) nodes.set(n.id, n);
+  for (const n of d.nodes_changed) nodes.set(n.id, n);
+  const edges = new Map(prev.edges.map((e) => [edgeKey(e), e]));
+  for (const k of d.edges_removed) edges.delete(k);
+  for (const e of d.edges_added) edges.set(edgeKey(e), e);
+  return {...d, nodes: [...nodes.values()], edges: [...edges.values()]};
+}
+
+async function refresh(force) {
+  if (!S.memory) return;
+  // сервер отвечает "unchanged", если версия не менялась, либо присылает только дельту
+  const since = (force || S.version === null) ? "" : `&since=${encodeURIComponent(S.version)}`;
+  const pca = S.layout === "pca" ? "&pca=1" : "";
+  const resp = await api(`${API}/snapshot?max_nodes=800${pca}${since}`);
+  if (resp.unchanged) return;
+  if (resp.delta && resp.base !== S.version) return refresh(true); // рассинхрон: берём полный снимок
+  const snap = resp.delta ? mergeDelta(S.snap, resp) : resp;
+
+  const prevById = S.byId;
+  const nextById = new Map(snap.nodes.map((n) => [n.id, n]));
+  if (S.version !== null && prevById.size) {
+    let added = 0, removed = 0, changed = 0;
+    for (const id of nextById.keys()) if (!prevById.has(id)) added++;
+    for (const [id, p] of prevById) {
+      const n = nextById.get(id);
+      if (!n) removed++;
+      else if (n.version !== p.version || n.subject !== p.subject || n.confidence !== p.confidence) changed++;
+    }
+    if (added + removed + changed) log(`изменения памяти: +${added}  −${removed}  ~${changed}`, "ok");
+  }
+  S.snap = snap;
+  S.version = snap.version;
+  S.byId = nextById;
+  syncPositions();
+  fillTypeFilter(snap.metrics.by_type);
+  applyFilter();
+  renderMetrics(snap.metrics, snap.insights);
+  if (S.selected && S.byId.has(S.selected)) loadDetail(S.selected);
+  else if (S.selected) { S.selected = null; clearDetail(); }
+  S.alpha = Math.max(S.alpha, 0.3);
+  S.redraw = true;
+}
+
+function fillTypeFilter(byType) {
+  const sel = $("#ftype"), cur = sel.value;
+  sel.innerHTML = "";
+  sel.append(h("option", {value: ""}, "все"));
+  for (const t of Object.keys(byType || {})) sel.append(h("option", {value: t}, `${t} (${byType[t]})`));
+  sel.value = cur;
+}
+
+function syncPositions() {
+  const keep = new Set(S.byId.keys());
+  for (const id of [...S.pos.keys()]) if (!keep.has(id)) S.pos.delete(id);
+  for (const id of keep) {
+    if (!S.pos.has(id)) {
+      S.pos.set(id, {x: (Math.random() - 0.5) * 320, y: (Math.random() - 0.5) * 320, vx: 0, vy: 0, pinned: false});
+    }
+  }
+  if (S.layout === "pca") applyPca();
+}
+
+function applyPca() {
+  const pca = (S.snap && S.snap.pca) || {};
+  for (const [id, p] of S.pos) {
+    const c = pca[id];
+    if (c) { p.x = c[0] * 380; p.y = c[1] * 380; p.vx = 0; p.vy = 0; }
+  }
+  S.alpha = 0;
+}
+
+function applyFilter() {
+  const q = $("#q").value.trim().toLowerCase();
+  const t = $("#ftype").value;
+  const minc = Number($("#minc").value) / 100;
+  $("#minc-v").textContent = Math.round(minc * 100) + "%";
+  S.visible = new Set();
+  for (const n of (S.snap ? S.snap.nodes : [])) {
+    if (t && n.type !== t) continue;
+    if (n.confidence < minc) continue;
+    if (q && !(n.subject.toLowerCase().includes(q) || (n.predicate || "").toLowerCase().includes(q))) continue;
+    S.visible.add(n.id);
+  }
+  S.visibleEdges = (S.snap ? S.snap.edges : []).filter((e) => S.visible.has(e.s) && S.visible.has(e.t));
+  const total = S.snap ? S.snap.total_nodes : 0, shown = S.snap ? S.snap.shown_nodes : 0;
+  $("#counts").textContent = `${S.visible.size}/${shown} узлов · ${S.visibleEdges.length} рёбер · всего ${total}`;
+  if (S.layout === "graph") S.alpha = Math.max(S.alpha, 0.4);
+  S.redraw = true;
+}
+
+/* ---------- физика и отрисовка ---------- */
+function tick() {
+  if (S.layout !== "graph" || S.alpha < 0.003) return;
+  const ids = [...S.visible].filter((id) => S.pos.has(id));
+  const n = ids.length;
+  const a = S.alpha;
+  const P = ids.map((id) => S.pos.get(id));
+  // отталкивание считаем только между соседними ячейками сетки (вместо всех пар O(n²))
+  const grid = new Map();
+  for (let i = 0; i < n; i++) {
+    const key = Math.floor(P[i].x / CELL) + "," + Math.floor(P[i].y / CELL);
+    let cell = grid.get(key);
+    if (!cell) grid.set(key, cell = []);
+    cell.push(i);
+  }
+  for (let i = 0; i < n; i++) {
+    const p = P[i];
+    const cx = Math.floor(p.x / CELL), cy = Math.floor(p.y / CELL);
+    for (let ox = -1; ox <= 1; ox++) for (let oy = -1; oy <= 1; oy++) {
+      const cell = grid.get((cx + ox) + "," + (cy + oy));
+      if (!cell) continue;
+      for (const j of cell) {
+        if (j <= i) continue;               // каждая пара учитывается один раз
+        const q = P[j];
+        let dx = p.x - q.x, dy = p.y - q.y;
+        let d2 = dx * dx + dy * dy;
+        if (d2 < 1) { dx = Math.random() - 0.5; dy = Math.random() - 0.5; d2 = 1; }
+        const f = (REP / d2) * a / Math.sqrt(d2);
+        p.vx += dx * f; p.vy += dy * f;
+        q.vx -= dx * f; q.vy -= dy * f;
+      }
+    }
+  }
+  const index = new Map(ids.map((id, i) => [id, i]));
+  for (const e of S.visibleEdges) {
+    const i = index.get(e.s), j = index.get(e.t);
+    if (i === undefined || j === undefined) continue;
+    const p = P[i], q = P[j];
+    const dx = q.x - p.x, dy = q.y - p.y;
+    const d = Math.sqrt(dx * dx + dy * dy) || 1;
+    const target = 70 + (1 - Math.min(1, e.w)) * 60;
+    const f = (d - target) * SPRING * a;
+    p.vx += (dx / d) * f; p.vy += (dy / d) * f;
+    q.vx -= (dx / d) * f; q.vy -= (dy / d) * f;
+  }
+  for (const p of P) {
+    p.vx -= p.x * GRAV * a; p.vy -= p.y * GRAV * a;
+    if (!p.pinned) { p.x += p.vx; p.y += p.vy; }
+    p.vx *= DAMP; p.vy *= DAMP;
+  }
+  S.alpha *= 0.985;
+}
+
+function nodeRadius(n) { return 4 + Math.min(11, Math.sqrt(n.degree || 0) * 2.3); }
+
+function resize() {
+  const r = cv.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = Math.max(1, Math.round(r.width * dpr));
+  cv.height = Math.max(1, Math.round(r.height * dpr));
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  S.cw = r.width; S.ch = r.height; S.redraw = true;
+}
+
+function toScreen(p) {
+  return [S.cw / 2 + S.view.x + p.x * S.view.k, S.ch / 2 + S.view.y + p.y * S.view.k];
+}
+
+function draw() {
+  const r = cv.getBoundingClientRect();
+  S.cw = r.width; S.ch = r.height;
+  ctx.clearRect(0, 0, r.width, r.height);
+  if (!S.snap) return;
+  const k = S.view.k;
+  // рёбра
+  for (const e of S.visibleEdges) {
+    const p = S.pos.get(e.s), q = S.pos.get(e.t);
+    if (!p || !q) continue;
+    const [x1, y1] = toScreen(p), [x2, y2] = toScreen(q);
+    const involved = S.selected && (e.s === S.selected || e.t === S.selected);
+    ctx.beginPath();
+    ctx.strokeStyle = REL_COLORS[e.r] || S.edgeColor;
+    ctx.globalAlpha = S.selected ? (involved ? 0.95 : 0.12) : 0.5;
+    ctx.lineWidth = (involved ? 2 : 1) + Math.min(2, e.w);
+    ctx.setLineDash(e.r.startsWith("CONTRADICT") ? [5, 4] : []);
+    ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  // узлы
+  const showLabels = k > 1.3;
+  for (const id of S.visible) {
+    const n = S.byId.get(id), p = S.pos.get(id);
+    if (!n || !p) continue;
+    const [x, y] = toScreen(p);
+    const rad = nodeRadius(n) * Math.min(1.6, Math.max(0.7, k));
+    const dim = S.selected && id !== S.selected && !isNeighbour(id);
+    ctx.globalAlpha = dim ? 0.18 : (0.45 + 0.55 * Math.min(1, n.confidence));
+    ctx.beginPath();
+    ctx.fillStyle = TYPE_COLORS[n.type] || S.nodeFill;
+    ctx.arc(x, y, rad, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    if (hasContradiction(id)) {
+      ctx.lineWidth = 2; ctx.strokeStyle = cssVar("--danger-color", "#e5544f"); ctx.stroke();
+    }
+    if (S.highlight.has(id) && id !== S.selected) {
+      ctx.beginPath(); ctx.arc(x, y, rad + 3, 0, Math.PI * 2);
+      ctx.setLineDash([3, 3]); ctx.lineWidth = 1.5; ctx.strokeStyle = "#f0b35a";
+      ctx.stroke(); ctx.setLineDash([]);
+    }
+    if (id === S.selected) {
+      ctx.beginPath(); ctx.arc(x, y, rad + 5, 0, Math.PI * 2);
+      ctx.lineWidth = 2; ctx.strokeStyle = cssVar("--border-focus", "#b6bec9"); ctx.stroke();
+    }
+    if (showLabels || id === S.selected || id === S.hover || S.degreeRank.has(id)) {
+      ctx.globalAlpha = dim ? 0.25 : 0.95;
+      ctx.fillStyle = S.labelColor;
+      ctx.font = "11px Inter, system-ui, sans-serif";
+      const label = n.subject.length > 40 ? n.subject.slice(0, 38) + "…" : n.subject;
+      ctx.fillText(label, x + rad + 4, y + 3);
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+const contradicting = new Set();
+function hasContradiction(id) { return contradicting.has(id); }
+function rebuildContradictions() {
+  contradicting.clear();
+  for (const e of (S.snap ? S.snap.edges : [])) if (e.r.startsWith("CONTRADICT")) { contradicting.add(e.s); contradicting.add(e.t); }
+}
+let neighSet = new Set();
+function rebuildNeighbours() {
+  neighSet = new Set();
+  if (!S.selected || !S.snap) return;
+  for (const e of S.snap.edges) {
+    if (e.s === S.selected) neighSet.add(e.t);
+    else if (e.t === S.selected) neighSet.add(e.s);
+  }
+}
+function isNeighbour(id) { return neighSet.has(id); }
+
+function worldAt(sx, sy) {
+  const r = cv.getBoundingClientRect();
+  return {x: (sx - r.width / 2 - S.view.x) / S.view.k, y: (sy - r.height / 2 - S.view.y) / S.view.k};
+}
+
+function hitNode(sx, sy) {
+  const w = worldAt(sx, sy);
+  let best = null, bestD = Infinity;
+  for (const id of S.visible) {
+    const p = S.pos.get(id), n = S.byId.get(id);
+    if (!p || !n) continue;
+    const dx = p.x - w.x, dy = p.y - w.y;
+    const d = Math.sqrt(dx * dx + dy * dy);
+    const lim = (nodeRadius(n) + 4) / S.view.k;
+    if (d < lim && d < bestD) { best = id; bestD = d; }
+  }
+  return best;
+}
+
+function loop() {
+  const hot = S.layout === "graph" && S.alpha >= 0.003;   // раскладка ещё «горячая»
+  if (hot) tick();
+  if (hot || S.redraw) { S.redraw = false; draw(); }
+  requestAnimationFrame(loop);
+}
+
+/* ---------- указатели: мышь, касание, щипок (pinch-zoom) ---------- */
+function localPos(ev) {
+  const rect = cv.getBoundingClientRect();
+  return [ev.clientX - rect.left, ev.clientY - rect.top];
+}
+
+function zoomAt(sx, sy, f) {
+  const before = worldAt(sx, sy);
+  S.view.k = Math.min(6, Math.max(0.15, S.view.k * f));
+  const after = worldAt(sx, sy);
+  // держим точку под курсором/пальцем на месте
+  S.view.x += (after.x - before.x) * S.view.k;
+  S.view.y += (after.y - before.y) * S.view.k;
+  S.redraw = true;
+}
+
+function endPinch() {
+  S.pinch = null;
+  S.drag = null;
+  cv.classList.remove("grabbing");
+}
+
+cv.addEventListener("pointerdown", (ev) => {
+  const [sx, sy] = localPos(ev);
+  S.pointers.set(ev.pointerId, [sx, sy]);
+  cv.setPointerCapture(ev.pointerId);
+  if (S.pointers.size === 2) {
+    const pts = [...S.pointers.values()];
+    S.pinch = {d: Math.hypot(pts[0][0] - pts[1][0], pts[0][1] - pts[1][1]) || 1};
+    S.drag = null; // узел, схваченный первым пальцем, остаётся закреплённым
+    return;
+  }
+  if (S.pointers.size > 2) return;
+  const id = hitNode(sx, sy);
+  if (id) {
+    S.drag = {type: "node", id, moved: false, sx, sy};
+    S.pos.get(id).pinned = true;
+  } else {
+    S.drag = {type: "pan", sx, sy, vx: S.view.x, vy: S.view.y};
+    cv.classList.add("grabbing");
+  }
+});
+cv.addEventListener("pointermove", (ev) => {
+  const [sx, sy] = localPos(ev);
+  if (S.pointers.has(ev.pointerId)) S.pointers.set(ev.pointerId, [sx, sy]);
+  if (S.pinch && S.pointers.size >= 2) {
+    const pts = [...S.pointers.values()];
+    const d = Math.hypot(pts[0][0] - pts[1][0], pts[0][1] - pts[1][1]) || 1;
+    const cx = (pts[0][0] + pts[1][0]) / 2, cy = (pts[0][1] + pts[1][1]) / 2;
+    zoomAt(cx, cy, d / S.pinch.d);
+    S.pinch.d = d;
+    return;
+  }
+  if (!S.drag) {
+    if (ev.pointerType !== "touch") {
+      const hid = hitNode(sx, sy);
+      if (hid !== S.hover) { S.hover = hid; cv.style.cursor = hid ? "pointer" : "grab"; }
+    }
+    return;
+  }
+  if (Math.hypot(sx - S.drag.sx, sy - S.drag.sy) > 6) S.drag.moved = true;
+  if (S.drag.type === "node") {
+    const w = worldAt(sx, sy);
+    const p = S.pos.get(S.drag.id);
+    p.x = w.x; p.y = w.y; p.vx = 0; p.vy = 0;
+    S.alpha = Math.max(S.alpha, 0.15);
+  } else {
+    S.view.x = S.drag.vx + (sx - S.drag.sx);
+    S.view.y = S.drag.vy + (sy - S.drag.sy);
+  }
+});
+cv.addEventListener("pointerup", (ev) => {
+  S.pointers.delete(ev.pointerId);
+  if (S.pinch) {
+    if (S.pointers.size < 2) endPinch();
+    return;
+  }
+  if (S.drag && S.drag.type === "node") {
+    if (!S.drag.moved) selectNode(S.drag.id);
+  } else if (S.drag && S.drag.type === "pan" && !S.drag.moved) {
+    selectNode(null);
+  }
+  S.drag = null;
+  cv.classList.remove("grabbing");
+});
+cv.addEventListener("pointercancel", (ev) => {
+  S.pointers.delete(ev.pointerId);
+  if (S.pinch && S.pointers.size < 2) endPinch();
+  if (!S.pinch) { S.drag = null; cv.classList.remove("grabbing"); }
+});
+cv.addEventListener("dblclick", (ev) => {
+  const [sx, sy] = localPos(ev);
+  const id = hitNode(sx, sy);
+  if (id) { S.pos.get(id).pinned = false; S.alpha = Math.max(S.alpha, 0.3); }
+});
+cv.addEventListener("wheel", (ev) => {
+  ev.preventDefault();
+  const [sx, sy] = localPos(ev);
+  zoomAt(sx, sy, Math.exp(-ev.deltaY * 0.0015));
+}, {passive: false});
+// двойное касание — приблизить (на мобильных нет колеса мыши)
+cv.addEventListener("touchend", (ev) => {
+  const now = Date.now();
+  const t = ev.changedTouches[0];
+  if (S.tap && now - S.tap.t < 320 && Math.hypot(t.clientX - S.tap.x, t.clientY - S.tap.y) < 30) {
+    const rect = cv.getBoundingClientRect();
+    zoomAt(t.clientX - rect.left, t.clientY - rect.top, 1.7);
+    S.tap = null;
+  } else {
+    S.tap = {t: now, x: t.clientX, y: t.clientY};
+  }
+});
+
+function fitView() {
+  S.view = {x: 0, y: 0, k: 1};
+  let maxR = 0;
+  for (const id of S.visible) { const p = S.pos.get(id); if (p) maxR = Math.max(maxR, Math.hypot(p.x, p.y)); }
+  const r = cv.getBoundingClientRect();
+  const k = maxR > 0 ? Math.min(2, (Math.min(r.width, r.height) / 2 - 30) / maxR) : 1;
+  S.view.k = Math.max(0.15, k);
+  S.redraw = true;
+}
+
+/* ---------- выбор и детали ---------- */
+const TOUCH_MODE = () => matchMedia("(max-width: 900px)").matches;
+function openSheet() { document.body.classList.add("sheet-open"); }
+function closeSheet() { document.body.classList.remove("sheet-open"); }
+
+function renderSheetHead() {
+  const head = $("#sheet-head");
+  head.innerHTML = "";
+  head.append(h("div", {class: "row", style: "justify-content:space-between;margin:0"},
+    h("strong", {}, "Объект памяти"),
+    h("div", {class: "row", style: "margin:0"},
+      h("button", {id: "sheet-new", class: "primary small", onclick: startCreate}, "＋ новая"),
+      h("button", {class: "small", onclick: closeSheet}, "✕ закрыть"))));
+  const b = $("#sheet-new");
+  if (b) b.disabled = S.readonly;
+}
+
+function selectNode(id) {
+  S.selected = id;
+  rebuildNeighbours();
+  if (id) {
+    loadDetail(id);
+    if (TOUCH_MODE()) openSheet();
+  } else { clearDetail(); closeSheet(); }
+}
+
+function clearDetail() {
+  $("#detail").innerHTML = "";
+  $("#detail").append(h("div", {class: "mono"}, "Выбери узел на графе или в списке хабов."));
+}
+
+async function loadDetail(id) {
+  let d;
+  try {
+    d = await api(API + "/object?id=" + encodeURIComponent(id));
+  } catch (e) {
+    log("не удалось загрузить узел: " + e.message, "bad");
+    return;
+  }
+  if (S.selected !== id) return;
+  renderDetail(d);
+}
+
+function renderDetail(d) {
+  const ro = S.readonly;
+  const box = $("#detail");
+  box.innerHTML = "";
+  renderSheetHead();
+  const typeBadge = h("span", {class: "badge", style: `border-color:${TYPE_COLORS[d.type] || "#555"}`}, d.type);
+  box.append(
+    h("div", {class: "row"}, typeBadge, h("span", {class: "badge"}, d.scope), h("span", {class: "badge"}, `v${d.version}`)),
+    h("div", {class: "mono"}, d.id),
+    ro ? h("div", {class: "ro-note"}, "режим только чтение: правки отключены") : null,
+  );
+
+  // текст
+  const subj = h("textarea", {disabled: ro ? "" : null}, d.subject);
+  box.append(h("h3", {}, "Текст"), subj,
+    h("div", {class: "hint"}, "после сохранения пересчитывается вектор для поиска по смыслу"),
+    h("div", {class: "row"}, h("button", {class: "primary", disabled: ro ? "" : null,
+      onclick: () => edit("set_subject", {id: d.id, text: subj.value})}, "Сохранить текст")));
+
+  // предикат
+  const pred = h("input", {value: d.predicate || "", size: 30, disabled: ro ? "" : null});
+  box.append(h("h3", {}, "Предикат"), h("div", {class: "row"}, pred,
+    h("button", {disabled: ro ? "" : null, onclick: () => edit("set_predicate", {id: d.id, text: pred.value})}, "Сохранить")));
+
+  // доверие
+  const conf = h("input", {type: "range", min: "0", max: "100", value: Math.round(d.confidence * 100),
+    disabled: ro ? "" : null});
+  const confV = h("span", {}, d.confidence.toFixed(2));
+  conf.addEventListener("input", () => { confV.textContent = (conf.value / 100).toFixed(2); });
+  box.append(h("h3", {}, "Доверие"),
+    h("div", {class: "row"}, conf, confV,
+      h("button", {disabled: ro ? "" : null, onclick: () => edit("set_confidence", {id: d.id, value: conf.value / 100})},
+        "Применить")),
+    h("div", {class: "row"},
+      h("button", {class: "small", disabled: ro ? "" : null,
+        onclick: () => edit("set_confidence", {id: d.id, value: 0.9})}, "подтверждаю · 0.9"),
+      h("button", {class: "small", disabled: ro ? "" : null,
+        onclick: () => edit("set_confidence", {id: d.id, value: 0.3})}, "сомневаюсь · 0.3")));
+
+  // сведения
+  box.append(h("h3", {}, "Сведения"), h("div", {class: "card"},
+    kv("автор", d.author), kv("создано", (d.created || "").replace("T", " ").slice(0, 19)),
+    kv("источник", d.source_type || "—"), kv("доказательств", d.evidence.length),
+    kv("эмбеддинг", d.has_embedding ? "есть" : "нет")));
+
+  // связи
+  box.append(h("h3", {}, "Связи"));
+  const edgesBox = h("div", {});
+  for (const e of d.out_edges) edgesBox.append(edgeRow(d, e.r, e.t, e.subject, true));
+  for (const e of d.in_edges) edgesBox.append(edgeRow(d, e.r, e.s, e.subject, false));
+  if (!d.out_edges.length && !d.in_edges.length) edgesBox.append(h("div", {class: "mono"}, "связей нет"));
+  box.append(edgesBox);
+
+  // добавить связь
+  const opts = [...S.visible].filter((x) => x !== d.id).map((x) => {
+    const n = S.byId.get(x);
+    return h("option", {value: x}, (n ? n.subject : x).slice(0, 60));
+  });
+  const target = h("select", {disabled: ro ? "" : null, style: "max-width:200px"}, opts);
+  const rel = h("input", {value: "RELATED_TO", size: 14, list: "rel-list", disabled: ro ? "" : null});
+  const relHelp = h("div", {class: "hint"}, REL_HELP.RELATED_TO);
+  rel.addEventListener("input", () => {
+    relHelp.textContent = REL_HELP[rel.value.trim().toUpperCase()] || "свой тип: заглавные буквы и подчёркивания";
+  });
+  const w = h("input", {type: "number", min: "0", max: "1", step: "0.1", value: "0.5", size: 4,
+    disabled: ro ? "" : null, title: "сила связи от 0 до 1"});
+  box.append(h("h3", {}, "Добавить связь"),
+    h("datalist", {id: "rel-list"}, Object.keys(REL_HELP).map((r) => h("option", {value: r}))),
+    h("div", {class: "hint"}, "Связь соединяет эту запись с другой, которая видна на графе."),
+    h("div", {class: "row"}, target),
+    h("div", {class: "row"}, rel, w,
+      h("button", {disabled: ro ? "" : null, onclick: () => edit("link", {source: d.id, target: target.value,
+        relation: rel.value.trim().toUpperCase(), weight: Number(w.value)})}, "Связать")),
+    relHelp);
+
+  // LLM-проверка
+  const proposalBox = h("div", {});
+  box.append(h("h3", {}, "Проверка LLM (только предложения)"),
+    h("div", {class: "row"}, h("button", {onclick: () => llmReview(d.id, proposalBox)}, "Проверить LLM")),
+    proposalBox);
+
+  // удаление
+  box.append(h("div", {class: "row", style: "margin-top:10px"},
+    h("button", {class: "danger", disabled: ro ? "" : null, onclick: () => {
+      if (confirm("Отозвать запись? Это действие сохраняется в истории.")) edit("retract", {id: d.id, reason: "memory_viewer"});
+    }}, "Отозвать запись")));
+
+  // история
+  box.append(h("h3", {}, `История (${d.events.length})`));
+  for (const ev of d.events.slice().reverse()) {
+    box.append(h("div", {class: "mono", style: "padding:2px 0;border-bottom:1px dashed var(--border-color)"},
+      `${(ev.timestamp || "").replace("T", " ").slice(0, 19)}  ${ev.type}  ${ev.actor || ""}`,
+      ev.payload && Object.keys(ev.payload).length ? h("div", {}, JSON.stringify(ev.payload).slice(0, 240)) : null));
+  }
+}
+
+function kv(a, b) { return h("div", {class: "kv"}, h("span", {}, a), h("span", {}, String(b))); }
+
+function edgeRow(d, relation, otherId, subject, outgoing) {
+  const label = outgoing ? `→ ${relation}` : `← ${relation}`;
+  const unlink = h("button", {class: "small danger", disabled: S.readonly ? "" : null,
+    title: "удалить связь",
+    onclick: () => {
+      const args = outgoing ? {source: d.id, target: otherId, relation} : {source: otherId, target: d.id, relation};
+      edit("unlink", args);
+    }}, "×");
+  return h("div", {class: "edge"},
+    h("span", {class: "rel"}, label),
+    h("span", {class: "nb", title: otherId, onclick: () => selectNode(otherId)}, subject || otherId),
+    unlink);
+}
+
+async function edit(op, args) {
+  if (S.readonly) return;
+  try {
+    const res = await api(API + "/edit", {op, args});
+    log(`${op}: готово`, "ok");
+    await refresh(true);
+    if (op === "retract") { S.selected = null; clearDetail(); closeSheet(); }
+    else if (op === "create" && res.id) selectNode(res.id);
+    else if (S.selected) loadDetail(S.selected);
+    return res;
+  } catch (e) {
+    log(`${op}: ${e.message}`, "bad");
+  }
+}
+
+/* ---------- создание новой записи ---------- */
+function startCreate() {
+  if (S.readonly) { log("режим только чтение: создание отключено", "bad"); return; }
+  const box = $("#detail");
+  box.innerHTML = "";
+  renderSheetHead();
+  const subj = h("textarea", {placeholder: "О чём эта запись? Например: «Люблю утренние пробежки»"});
+  const pred = h("input", {value: "is_fact", size: 20});
+  const conf = h("input", {type: "range", min: "0", max: "100", value: "70"});
+  const confV = h("span", {}, "0.70");
+  conf.addEventListener("input", () => { confV.textContent = (conf.value / 100).toFixed(2); });
+  const err = h("div", {class: "verdict-bad"});
+  const saveBtn = h("button", {class: "primary"}, "Сохранить в память");
+  saveBtn.addEventListener("click", async () => {
+    err.textContent = "";
+    if (!subj.value.trim()) { err.textContent = "текст не может быть пустым"; return; }
+    saveBtn.disabled = true;
+    const res = await edit("create", {subject: subj.value.trim(),
+      predicate: pred.value.trim() || undefined, confidence: conf.value / 100});
+    saveBtn.disabled = false;
+    if (!res) err.textContent = "не удалось сохранить (см. журнал внизу)";
+  });
+  box.append(
+    h("h3", {}, "Новая запись"),
+    h("div", {class: "mono"}, "появится как claim; после сохранения её можно править и связывать"),
+    h("div", {class: "row"}, subj),
+    h("div", {class: "row"}, h("label", {}, "предикат"), pred),
+    h("div", {class: "row"}, h("label", {}, "доверие"), conf, confV),
+    h("div", {class: "row"}, saveBtn, h("button", {onclick: () => {
+      if (S.selected) loadDetail(S.selected); else clearDetail();
+    }}, "Отмена")),
+    err);
+  if (TOUCH_MODE()) openSheet();
+  setTimeout(() => subj.focus(), 50);
+}
+
+async function llmReview(id, box) {
+  box.innerHTML = "";
+  box.append(h("div", {class: "mono"}, "спрашиваю модель…"));
+  try {
+    const res = await api(API + "/llm/review", {id});
+    const p = res.proposal || {};
+    const cls = p.verdict === "ok" ? "verdict-ok" : (p.verdict === "unclear" ? "verdict-warn" : "verdict-bad");
+    box.innerHTML = "";
+    const card = h("div", {class: "card"},
+      h("div", {class: cls}, `вердикт: ${p.verdict || "—"}`),
+      h("div", {class: "mono"}, p.reason || "(без пояснения)"));
+    if (p.suggested_subject) {
+      card.append(h("div", {}, "предложен текст: ", h("i", {}, p.suggested_subject)),
+        h("button", {disabled: S.readonly ? "" : null, onclick: () => edit("set_subject", {id, text: p.suggested_subject})}, "применить текст"));
+    }
+    if (p.suggested_confidence !== null && p.suggested_confidence !== undefined) {
+      card.append(h("div", {}, `предложено доверие: ${p.suggested_confidence.toFixed(2)}`),
+        h("button", {disabled: S.readonly ? "" : null, onclick: () => edit("set_confidence", {id, value: p.suggested_confidence})}, "применить доверие"));
+    }
+    if (p.suggest_retract) {
+      card.append(h("div", {class: "verdict-bad"}, "модель предлагает отозвать запись"),
+        h("button", {class: "danger", disabled: S.readonly ? "" : null, onclick: () => {
+          if (confirm("Отозвать запись по предложению модели?")) edit("retract", {id, reason: "llm_review_confirmed"});
+        }}, "отозвать"));
+    }
+    card.append(h("div", {class: "mono"}, "Ничего не применяется без твоего нажатия."));
+    box.append(card);
+  } catch (e) {
+    box.innerHTML = "";
+    box.append(h("div", {class: "verdict-bad"}, "проверка не удалась: " + e.message));
+  }
+}
+
+/* ---------- подсказки: связи и значки советов ---------- */
+const REL_HELP = {
+  RELATED_TO: "просто связаны по смыслу",
+  GROUNDS_IN: "опирается на: основание для вывода",
+  CAUSES: "вызывает или ведёт к",
+  ENABLES: "делает возможным",
+  REQUIRES: "требует для выполнения",
+  PREVENTS: "мешает или предотвращает",
+  PART_OF: "является частью",
+  DUPLICATE_OF: "дубликат: одна из записей лишняя",
+  CONTRADICTS: "противоречит (на графе пунктиром)",
+};
+const INSIGHT_ICON = {bad: "●", warn: "◐", info: "○"};
+
+/* ---------- советы «что улучшить» ---------- */
+function highlightOn(ids) {
+  return ids.length === S.highlight.size && ids.every((id) => S.highlight.has(id));
+}
+function toggleHighlight(ids) {
+  S.highlight = highlightOn(ids) ? new Set() : new Set(ids);
+  S.redraw = true;
+  renderInsights(S.insights);
+}
+
+function renderInsights(list) {
+  S.insights = list;
+  const box = $("#tab-insights");
+  box.innerHTML = "";
+  box.append(h("div", {class: "card guide"},
+    h("strong", {}, "Как устроена память"),
+    h("div", {class: "mono"}, "Записи — то, что ассистент знает о тебе и о мире. Связи — как записи опираются друг на друга. Доверие — насколько ассистент уверен в записи."),
+    h("strong", {style: "display:block;margin-top:6px"}, "Что можно сделать"),
+    h("div", {class: "mono"}, "1. Разреши противоречия: оставь верное, остальное отзови или понизь доверие."),
+    h("div", {class: "mono"}, "2. Объедини повторы: одна запись вместо нескольких одинаковых."),
+    h("div", {class: "mono"}, "3. Свяжи уверенные записи без связей с родственными: так ассистент найдёт цепочки."),
+    h("div", {class: "mono"}, "4. Подтверди важное (доверие ↑) и отметь сомнительное (доверие ↓)."),
+    h("div", {class: "mono"}, "5. Новые знания добавляй через «＋ Запись», а не через чат, если хочешь точно их зафиксировать.")));
+
+  if (!list.length) {
+    box.append(h("div", {class: "hint", style: "margin-top:8px"},
+      "Явных проблем не найдено. Можно добавить новые записи и связи через «＋ Запись»."));
+    return;
+  }
+  for (const ins of list) {
+    const on = highlightOn(ins.ids);
+    const card = h("div", {class: `ins ${ins.level}`});
+    card.append(
+      h("div", {class: "row", style: "justify-content:space-between;margin:0"},
+        h("strong", {}, `${INSIGHT_ICON[ins.level] || "•"} ${ins.title}`),
+        h("button", {class: "small" + (on ? " primary" : ""), onclick: () => toggleHighlight(ins.ids)},
+          on ? "скрыть" : "подсветить")),
+      h("div", {class: "mono"}, ins.hint));
+    for (const it of ins.items.slice(0, 8)) {
+      card.append(h("div", {class: "edge"},
+        h("span", {class: "nb", title: it.id, onclick: () => selectNode(it.id)}, it.subject || it.id)));
+    }
+    const rest = ins.count - Math.min(8, ins.items.length);
+    if (rest > 0) card.append(h("div", {class: "hint"}, `и ещё ${rest}…`));
+    box.append(card);
+  }
+}
+
+/* ---------- метрики ---------- */
+function renderMetrics(m, insights) {
+  rebuildContradictions();
+  rebuildNeighbours();
+  S.degreeRank = new Set((m.hubs || []).slice(0, 12).map((x) => x.id));
+  renderInsights(insights || []);
+
+  const box = $("#metrics");
+  box.innerHTML = "";
+  const big = [
+    ["объектов", m.nodes, "всего записей в памяти"],
+    ["рёбер", m.edges, "связей между записями"],
+    ["компонент", m.components, "несвязанных групп знаний: меньше — цельнее картина"],
+    ["изолированных", m.isolated, "записи без связей: через них ассистент не рассуждает"],
+    ["противоречий", m.contradictions, "пары записей, которые спорят друг с другом"],
+    ["событий", m.events, "записей в журнале изменений"],
+    ["эмбеддингов", m.embeddings, "записей, которые находит семантический поиск"],
+    ["ср. доверие", m.avg_confidence, "средняя уверенность ассистента в записях"],
+    ["ср. степень", m.avg_degree, "среднее число связей на запись"],
+    ["ср. доказательств", m.avg_evidence, "среднее число подтверждений на запись"],
+  ];
+  box.append(h("div", {class: "grid"}, big.map(([a, b, tip]) =>
+    h("div", {class: "card", style: "padding:6px 8px", title: tip},
+      h("div", {class: "mono"}, a), h("div", {style: "font-size:16px"}, String(b))))));
+  box.append(h("h3", {}, "Типы"), barList(m.by_type));
+  box.append(h("h3", {}, "Области"), barList(m.by_scope));
+  box.append(h("h3", {}, "Отношения"), barList(m.relations));
+  box.append(h("h3", {}, "Распределение доверия"));
+  const max = Math.max(1, ...m.confidence_hist);
+  box.append(h("div", {class: "hist"}, m.confidence_hist.map((c) =>
+    h("div", {style: `height:${Math.max(2, Math.round((c / max) * 60))}px`, title: `${c} записей`}))),
+    h("div", {class: "hist-l"}, h("span", {}, "0"), h("span", {}, "0.5"), h("span", {}, "1")));
+  box.append(h("h3", {}, "Хабы (больше всего связей)"));
+  for (const hb of (m.hubs || [])) {
+    box.append(h("div", {class: "hub", onclick: () => selectNode(hb.id)},
+      `${hb.degree} · ${hb.subject.slice(0, 44)}`));
+  }
+  box.append(h("h3", {}, "Период"),
+    kv("старейшая", (m.oldest || "—").slice(0, 10)), kv("новейшая", (m.newest || "—").slice(0, 10)));
+
+  const leg = $("#legend");
+  leg.innerHTML = "";
+  for (const [t, c] of Object.entries(TYPE_COLORS)) leg.append(h("span", {}, h("i", {style: `background:${c}`}), t));
+  leg.append(h("span", {}, h("i", {style: `background:${cssVar("--danger-color", "#e5544f")}`}), "противоречие (пунктир)"));
+
+  const relBox = $("#legend-rel");
+  relBox.innerHTML = "";
+  for (const [r, text] of Object.entries(REL_HELP)) {
+    const color = REL_COLORS[r] || S.edgeColor;
+    relBox.append(h("div", {class: "leg-rel"}, h("i", {style: `background:${color}`}),
+      h("span", {class: "mono", style: "color:var(--text-primary)"}, r), h("span", {}, text)));
+  }
+}
+
+function barList(obj) {
+  const entries = Object.entries(obj || {});
+  const max = Math.max(1, ...entries.map(([, v]) => v));
+  if (!entries.length) return h("div", {class: "mono"}, "нет данных");
+  return h("div", {}, entries.map(([k, v]) => h("div", {class: "bar-row"},
+    h("span", {class: "mono", style: "color:var(--text-primary)"}, k),
+    h("div", {class: "bar", style: `width:${Math.round((v / max) * 100)}%`}),
+    h("span", {class: "mono"}, String(v)))));
+}
+
+/* ---------- события интерфейса ---------- */
+document.querySelectorAll(".tab").forEach((b) => b.addEventListener("click", () => {
+  document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("on", x === b));
+  for (const p of ["insights", "metrics", "legend"]) $("#tab-" + p).hidden = p !== b.dataset.tab;
+}));
+$("#layout").addEventListener("change", async (e) => {
+  S.layout = e.target.value;
+  if (S.layout === "pca") {
+    if (S.snap && !Object.keys(S.snap.pca || {}).length) {
+      try { await refresh(true); } catch (err) { log("проекция: " + err.message, "bad"); }
+    }
+    if (!S.snap || !Object.keys(S.snap.pca || {}).length) {
+      log("у узлов нет эмбеддингов: проекция недоступна, оставлен граф", "bad");
+      S.layout = "graph"; e.target.value = "graph";
+    } else { applyPca(); fitView(); }
+  } else { S.alpha = 1; fitView(); }
+});
+$("#q").addEventListener("input", applyFilter);
+$("#ftype").addEventListener("change", applyFilter);
+$("#minc").addEventListener("input", applyFilter);
+$("#fit").addEventListener("click", fitView);
+$("#add").addEventListener("click", startCreate);
+$("#zin").addEventListener("click", () => { const r = cv.getBoundingClientRect(); zoomAt(r.width / 2, r.height / 2, 1.4); });
+$("#zout").addEventListener("click", () => { const r = cv.getBoundingClientRect(); zoomAt(r.width / 2, r.height / 2, 1 / 1.4); });
+$("#zfit").addEventListener("click", fitView);
+$("#live").addEventListener("click", (e) => {
+  S.live = !S.live;
+  e.target.textContent = S.live ? "Live: вкл" : "Live: пауза";
+});
+// кнопки темы в разметке нет: без проверки это исключение останавливало весь скрипт
+const themeBtn = document.getElementById("theme");
+if (themeBtn) themeBtn.addEventListener("click", () => {
+  const next = S.theme === "light" ? "dark" : "light";
+  applyTheme(next);
+  try { localStorage.setItem("theme", next); } catch (_) { /* ignore */ }
+});
+window.addEventListener("resize", resize);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeSheet(); selectNode(null); } });
+
+setInterval(() => {
+  if (document.hidden) return;
+  // не перезаписываем панель, пока пользователь что-то печатает или нажал «Отмена» в форме
+  const ae = document.activeElement;
+  const editing = ae && $("#right").contains(ae) &&
+    (ae.tagName === "TEXTAREA" || ae.tagName === "INPUT" || ae.tagName === "SELECT");
+  if (S.live && !editing && !S.dirtyDetail) {
+    refresh(false).catch((err) => log("обновление: " + err.message, "bad"));
+  }
+}, 2000);
+
+// любое взаимодействие или ввод — перерисовать кадр (иначе кадры не рисуются, когда раскладка остыла)
+for (const ev of ["pointermove", "pointerdown", "pointerup", "wheel", "keydown", "input", "change", "click"]) {
+  document.addEventListener(ev, () => { S.redraw = true; }, {passive: true, capture: true});
+}
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && S.live) refresh(false).catch((err) => log("обновление: " + err.message, "bad"));
+});
+
+initTheme();
+resize();
+requestAnimationFrame(loop);
+init().then(() => fitView()).catch((err) => {
+  // ошибка старта раньше оставляла статус «…» и пустой граф: показываем причину прямо в шапке
+  log("старт: " + err.message, "bad");
+  const st = $("#status");
+  st.textContent = "ошибка: " + err.message;
+  st.style.color = "var(--danger-color, #e5544f)";
+});
+</script>
+</body>
+</html>

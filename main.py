@@ -35,6 +35,7 @@ from routes.ai_assistant import (
 )
 from routes.auth import router as auth_router
 from routes.ui_state import router as ui_state_router
+from routes.memory_viewer import router as memory_viewer_router
 from mcp_server_blockcoin import mcp
 
 setup_logging()
@@ -122,6 +123,7 @@ app.mount('/mcp', mcp.streamable_http_app())
 app.include_router(ai_router)
 app.include_router(auth_router)
 app.include_router(ui_state_router)
+app.include_router(memory_viewer_router)
 
 
 def _page(name: str):
