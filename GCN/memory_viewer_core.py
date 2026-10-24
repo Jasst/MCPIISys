@@ -48,6 +48,16 @@ def _conf(o):
     return v if math.isfinite(v) else 0.0
 
 
+def _importance(o):
+    """Важность записи (meta.importance из add_fact). Мусор и старые данные без поля → 1.0."""
+    meta = o.object if isinstance(o.object, dict) else {}
+    try:
+        v = float(meta.get("importance", 1.0))
+    except (TypeError, ValueError):
+        return 1.0
+    return v if math.isfinite(v) else 1.0
+
+
 def _scope(o):
     return getattr(o.scope, "value", str(o.scope))
 
@@ -89,7 +99,7 @@ def _build_snapshot_locked(store, readonly, max_nodes, with_pca):
                 adj[src].add(tgt)
                 adj[tgt].add(src)
 
-    ranked = sorted(objs.keys(), key=lambda k: (degree[k], _conf(objs[k])), reverse=True)
+    ranked = sorted(objs.keys(), key=lambda k: (degree[k], _conf(objs[k]), _importance(objs[k])), reverse=True)
     shown = ranked[:max_nodes]
     shown_set = set(shown)
 
@@ -97,12 +107,19 @@ def _build_snapshot_locked(store, readonly, max_nodes, with_pca):
     for oid in shown:
         o = objs[oid]
         meta = o.object if isinstance(o.object, dict) else {}
+        imp = _importance(o)
+        # «важность для графа»: доверие + важность + частота обращений — по ней рисуются размер и яркость узла
+        salience = round(min(1.0, 0.5 * _conf(o) + 0.3 * min(1.0, imp / 2.0)
+                             + 0.2 * min(1.0, int(meta.get("access_count") or 0) / 10.0)), 4)
         nodes.append({
             "id": oid,
             "type": _kind(o),
             "subject": o.subject,
             "predicate": o.predicate,
             "confidence": round(_conf(o), 4),
+            "importance": round(imp, 4),
+            "salience": salience,
+            "access_count": int(meta.get("access_count") or 0),
             "version": o.version,
             "scope": _scope(o),
             "author": o.author,
@@ -331,6 +348,7 @@ def object_detail(store, oid):
             "timestamp": e.timestamp.isoformat() if hasattr(e, "timestamp") else None,
             "payload": payload,
         })
+    meta = o.object if isinstance(o.object, dict) else {}
     return {
         "id": oid,
         "type": _kind(o),
@@ -338,6 +356,9 @@ def object_detail(store, oid):
         "predicate": o.predicate,
         "object": str(o.object)[:2000],
         "confidence": _conf(o),
+        "importance": _importance(o),
+        "access_count": int(meta.get("access_count") or 0),
+        "last_accessed": meta.get("last_accessed"),
         "version": o.version,
         "scope": _scope(o),
         "author": o.author,
@@ -384,6 +405,16 @@ def apply_edit(store, op, args, actor=ACTOR):
             raise ValueError("ожидается число от 0 до 1")
         return max(0.0, min(1.0, x))
 
+    def importance_value(v):
+        """Важность вне диапазона доверия: разумный потолок 5.0."""
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            raise ValueError("важность: ожидается число")
+        if not math.isfinite(x):
+            raise ValueError("важность: ожидается число")
+        return max(0.0, min(5.0, x))
+
     if op == "create":
         subject = text("subject")
         try:
@@ -394,7 +425,8 @@ def apply_edit(store, op, args, actor=ACTOR):
         if isinstance(args.get("predicate"), str) and args["predicate"].strip():
             predicate = args["predicate"].strip()[:200]
         # штатный путь добавления факта (тот же, что у чата): дедупликация и индексы
-        oid = store.add_fact(subject, "claim", actor, confidence=conf)
+        oid = store.add_fact(subject, "claim", actor, confidence=conf,
+                             importance=importance_value(args.get("importance", 1.0)))
         if predicate:
             store.update(oid, {"predicate": predicate}, actor)
         return {"id": oid}
@@ -404,8 +436,50 @@ def apply_edit(store, op, args, actor=ACTOR):
         store.update(need("id"), {"predicate": text("text", 200)}, actor)
     elif op == "set_confidence":
         store.update(need("id"), {"confidence": unit(args.get("value"))}, actor)
+    elif op == "set_importance":
+        # важность живёт в метаданных записи; update() принимает только поля объекта целиком,
+        # поэтому меняем meta через сам объект так, чтобы история события осталась полной
+        oid = need("id")
+        o = store._objects[oid]
+        meta = o.object if isinstance(o.object, dict) else {}
+        new_meta = dict(meta)
+        new_meta["importance"] = importance_value(args.get("value"))
+        store.update(oid, {"object": new_meta}, actor)
     elif op == "retract":
         store.retract(need("id"), actor, reason=str(args.get("reason") or "memory_viewer")[:200])
+    elif op == "merge_into":
+        # безопасное слияние повторов: «шум» (from_id) отзывается, его связи переводятся на «канон» (into_id).
+        # между записями группы остаётся DUPLICATE_OF — так история слияния читается в журнале.
+        src, dst = need("from_id"), need("into_id")
+        if src == dst:
+            raise ValueError("нельзя слить запись саму с собой")
+        g = store._graph
+        moved = 0
+
+        def relink(s, r, t):
+            """Переносит связь s→t так, чтобы одним концом стал dst; дубликаты не создаёт."""
+            nonlocal moved
+            w = g.get_relation_weight(s, r, t) or 1.0
+            store.unlink(s, t, r, actor)
+            if r in CONTRADICT_RELATIONS:
+                store.unlink(t, s, r, actor)
+            ns, nt = (dst, t) if s == src else (s, dst)
+            if ns == nt:
+                return  # связь внутри группы повторов — после слияния она не нужна
+            if g.get_relation_weight(ns, r, nt) is not None:
+                return  # у канона уже есть такая связь
+            store.link(ns, nt, r, actor, weight=w)
+            moved += 1
+
+        for r, t in list(g.get_neighbors(src)):
+            if t != src:
+                relink(src, r, t)
+        for r, s in list(g.get_incoming(src)):
+            if s != src:
+                relink(s, r, src)
+        store.link(src, dst, "DUPLICATE_OF", actor, weight=1.0)
+        store.retract(src, actor, reason=f"merged_into:{dst}"[:200])
+        return {"merged_into": dst, "moved_edges": moved}
     elif op == "link":
         r = rel()
         if r in CONTRADICT_RELATIONS:
@@ -587,6 +661,206 @@ def sanitize_proposal(p):
     c = p.get("suggested_confidence")
     if isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c):
         out["suggested_confidence"] = max(0.0, min(1.0, float(c)))
+    return out
+
+
+# ---------- автокоррекция всей памяти: ИИ предлагает, пользователь подтверждает ----------
+
+AUTO_CANDIDATES = 30   # максимум записей в одном запросе к LLM (ответ должен уместиться в лимит токенов)
+AUTO_ACTIONS = ("keep", "retract", "merge_into", "set_confidence", "add_link", "rewrite")
+
+
+def _cosine(a, b):
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    va = np.asarray(a, dtype=float)
+    vb = np.asarray(b, dtype=float)
+    na, nb = float(np.linalg.norm(va)), float(np.linalg.norm(vb))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return float(np.dot(va, vb) / (na * nb))
+
+
+def auto_candidates(store, limit=AUTO_CANDIDATES):
+    """Кандидаты на автокоррекцию: шум (мало доверия / давно не использовались), повторы и изолированные.
+
+    Возвращает список кратких карточек {id, subject, confidence, importance, degree}.
+    """
+    objs = store._objects
+    now = datetime.now(timezone.utc)
+    degree = defaultdict(int)
+    for src, lst in store._graph._edges.items():
+        for _rel, tgt in lst:
+            if src in objs and tgt in objs:
+                degree[src] += 1
+                degree[tgt] += 1
+
+    groups = defaultdict(list)
+    for oid, o in objs.items():
+        key = _norm_text(o.subject)
+        if key:
+            groups[key].append(oid)
+
+    picked, seen_groups = [], set()
+    ranked = sorted(objs.keys(), key=lambda k: (_conf(objs[k]), -degree[k]))
+    # 1. сначала подозрительное: низкое доверие или застарелое
+    for oid in ranked:
+        o = objs[oid]
+        meta = o.object if isinstance(o.object, dict) else {}
+        base = _utc(o.created)
+        last = _parse_dt(meta.get("last_accessed")) or base
+        stale = base is not None and _conf(o) < STALE_CONFIDENCE and (now - last).days >= STALE_DAYS
+        if _conf(o) >= LOW_CONFIDENCE and not stale:
+            continue
+        dup_of = groups.get(_norm_text(o.subject)) or []
+        gkey = tuple(sorted(dup_of)) if len(dup_of) > 1 else None
+        if gkey and gkey in seen_groups:
+            continue
+        if gkey:
+            seen_groups.add(gkey)
+        picked.append({"id": oid, "subject": str(o.subject or "")[:200],
+                       "confidence": round(_conf(o), 3), "importance": round(_importance(o), 3),
+                       "degree": degree.get(oid, 0)})
+        if len(picked) >= limit:
+            return picked
+    # 2. группы повторов (по одному представителю группы сюда не берём — их видно в dups)
+    # 3. изолированные уверенные: их стоит связать
+    for oid in ranked:
+        o = objs[oid]
+        if degree.get(oid, 0) or _conf(o) < ISOLATED_CONFIDENCE:
+            continue
+        picked.append({"id": oid, "subject": str(o.subject or "")[:200],
+                       "confidence": round(_conf(o), 3), "importance": round(_importance(o), 3),
+                       "degree": 0})
+        if len(picked) >= limit:
+            break
+    return picked
+
+
+def auto_dups(store):
+    """Группы текстовых повторов: [id1, id2, ...] — кандидаты на слияние (без LLM)."""
+    groups = defaultdict(list)
+    for oid, o in store._objects.items():
+        key = _norm_text(o.subject)
+        if key:
+            groups[key].append(oid)
+    return [g for g in groups.values() if len(g) > 1]
+
+
+def auto_suggest_links(store, candidates_ids, threshold=0.82, max_links=15):
+    """Эвристические предложения связей для изолированных записей по косинусу эмбеддингов.
+
+    Работает без LLM; каждое предложение всё равно применяется только после подтверждения
+    пользователем. Возвращает [{source, target, relation:"RELATED_TO", weight, similarity}].
+    """
+    emb = store._embedding_index
+    objs = store._objects
+    linked = set()
+    for src, lst in store._graph._edges.items():
+        for _rel, tgt in lst:
+            linked.add(frozenset((src, tgt)))
+    cand = [i for i in candidates_ids if i in objs and i in emb]
+    out = []
+    all_ids = list(objs.keys())
+
+    def has_edges(node):
+        return bool(store._graph.get_neighbors(node)) or bool(store._graph.get_incoming(node))
+
+    for cid in cand:
+        if has_edges(cid):
+            continue  # связываем только полностью изолированные записи
+        best, best_sim = None, threshold
+        for other in all_ids:
+            if other == cid or other not in emb or frozenset((cid, other)) in linked:
+                continue
+            sim = _cosine(emb[cid], emb[other])
+            if sim > best_sim:
+                best, best_sim = other, sim
+        if best:
+            out.append({"source": cid, "target": best, "relation": "RELATED_TO",
+                        "weight": round(best_sim, 3), "similarity": round(best_sim, 3)})
+            linked.add(frozenset((cid, best)))
+        if len(out) >= max_links:
+            break
+    return out
+
+
+def auto_scan_messages(candidates):
+    """Промпт пакетной проверки: модель отвечает списком действий строго по id из кандидатов."""
+    lines = [f"- id={c['id']} | доверие {c['confidence']} | связей {c['degree']} | «{c['subject']}»"
+             for c in candidates]
+    prompt = (
+        "Это фрагмент долговременной памяти ассистента. Найди шум и мусор: записи неверные, "
+        "устаревшие, бессмысленные или дублирующие другие. Оценивай важность, а не длину текста.\n"
+        "Записи:\n" + "\n".join(lines) + "\n\n"
+        "Для каждой проблемной записи предложи одно действие. Возможные действия:\n"
+        '  {"id": "...", "action": "keep"} — запись важна, трогать не нужно (для keep пиши только если сомневался);\n'
+        '  {"id": "...", "action": "retract", "reason": "кратко"} — удалить как шум/устаревшее;\n'
+        '  {"id": "...", "action": "merge_into", "target_id": "...", "reason": "кратко"} — эта запись дубликат другой, слить в неё;\n'
+        '  {"id": "...", "action": "set_confidence", "value": 0.0-1.0, "reason": "кратко"} — изменить доверие;\n'
+        '  {"id": "...", "action": "add_link", "target_id": "...", "relation": "RELATED_TO|GROUNDS_IN|CAUSES|ENABLES|REQUIRES|PART_OF", "reason": "кратко"} — добавить связь;\n'
+        '  {"id": "...", "action": "rewrite", "subject": "новый текст", "reason": "кратко"} — переписать мутный текст.\n'
+        "Используй ТОЛЬКО id из списка выше. relations — только из разрешённых. Не выдумывай записи.\n"
+        "Ответь ТОЛЬКО JSON без пояснений и без markdown:\n"
+        '{"actions": [ ... ]}'
+    )
+    return [
+        {"role": "system", "content": "Ты аудитор памяти. Отвечаешь строго JSON со списком actions."},
+        {"role": "user", "content": prompt},
+    ]
+
+
+def sanitize_auto_actions(p, candidates):
+    """Белый список для пакетного ответа: пропускаем только известные id и безопасные поля.
+
+    Ничего не применяем — это только предложения, которые пользователь подтверждает по одному.
+    """
+    if not isinstance(p, dict):
+        p = {}
+    valid_ids = {c["id"] for c in candidates}
+    raw = p.get("actions")
+    if not isinstance(raw, list):
+        raw = []
+    out, seen = [], set()
+    for a in raw[:60]:
+        if not isinstance(a, dict):
+            continue
+        aid = a.get("id")
+        action = a.get("action")
+        if not isinstance(aid, str) or aid not in valid_ids:
+            continue
+        if action not in AUTO_ACTIONS:
+            continue
+        item = {"id": aid, "action": action, "reason": str(a.get("reason") or "")[:400]}
+        if action == "keep":
+            continue  # «всё хорошо» показывать не нужно
+        tgt = a.get("target_id")
+        if action in ("merge_into", "add_link"):
+            if not isinstance(tgt, str) or tgt not in valid_ids or tgt == aid:
+                continue
+            item["target_id"] = tgt
+        if action == "add_link":
+            r = str(a.get("relation") or "").strip().upper()
+            if r not in RELATIONS_ALLOWED or r in CONTRADICT_RELATIONS:
+                r = "RELATED_TO"
+            item["relation"] = r
+        if action == "set_confidence":
+            v = a.get("value")
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+                item["value"] = max(0.0, min(1.0, float(v)))
+            else:
+                continue
+        if action == "rewrite":
+            s = a.get("subject")
+            if isinstance(s, str) and s.strip():
+                item["subject"] = s.strip()[:1000]
+            else:
+                continue
+        key = (aid, action, item.get("target_id"), item.get("relation"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
     return out
 
 
