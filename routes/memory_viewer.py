@@ -50,6 +50,10 @@ class EdgeReviewBody(BaseModel):
     target: str = Field(..., max_length=128)
 
 
+class AutoScanBody(BaseModel):
+    limit: int = Field(default=core.AUTO_CANDIDATES, ge=5, le=60)
+
+
 def _enabled():
     if not ENABLED:
         raise HTTPException(status_code=404, detail="not found")
