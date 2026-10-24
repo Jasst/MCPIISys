@@ -10,8 +10,14 @@ import os
 import re
 import secrets
 import sqlite3
+import base64
+import logging
 import threading
 import time
+from pathlib import Path
+from typing import Optional
+
+from cryptography.fernet import Fernet, InvalidToken
 
 from config import AUTH_DB_PATH, SECRET_KEY
 
@@ -47,6 +53,17 @@ CREATE TABLE IF NOT EXISTS codes (
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_codes_email ON codes(email, purpose);
+CREATE TABLE IF NOT EXISTS mcp_codes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid TEXT NOT NULL,
+    code_hash TEXT NOT NULL UNIQUE,
+    code_enc TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    last_used_at REAL,
+    last_used_ip TEXT,
+    revoked_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_mcp_codes_uid ON mcp_codes(uid);
 """
 
 
@@ -217,3 +234,89 @@ def check_code(email: str, purpose: str, code: str) -> bool:
         drop_codes(email, purpose)
         return True
     return False
+
+
+# ---------------------------------------------------------------- постоянные MCP-коды
+# Код входа для внешнего ИИ живёт до ручного отзыва и переживает перезапуск.
+# В БД лежат только HMAC-хеш (для проверки) и шифротекст (чтобы показать код
+# в профиле на любом устройстве). Ключ — отдельный файл рядом с auth.db, а не
+# SECRET_KEY: тот без .env генерируется заново при каждом запуске.
+
+_mcp_log = logging.getLogger("auth_store.mcp")
+_MCP_KEY_PATH = Path(os.getenv("MCP_CODE_KEY_PATH", str(Path(AUTH_DB_PATH).parent / "mcp_code.key")))
+_mcp_secret_cache: Optional[bytes] = None
+
+
+def _mcp_secret() -> bytes:
+    global _mcp_secret_cache
+    if _mcp_secret_cache is None:
+        env = os.getenv("MCP_CODE_SECRET", "").strip()
+        if env:
+            _mcp_secret_cache = env.encode("utf-8")
+        else:
+            with _lock:
+                if not _MCP_KEY_PATH.exists():
+                    _MCP_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        fd = os.open(_MCP_KEY_PATH, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                        with os.fdopen(fd, "w") as f:
+                            f.write(secrets.token_hex(32))
+                    except FileExistsError:
+                        pass
+                _mcp_secret_cache = _MCP_KEY_PATH.read_text(encoding="utf-8").strip().encode("utf-8")
+    return _mcp_secret_cache
+
+
+def _mcp_hash(code: str) -> str:
+    return hmac.new(_mcp_secret(), code.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _mcp_fernet() -> Fernet:
+    key = base64.urlsafe_b64encode(hashlib.sha256(_mcp_secret() + b"|enc").digest())
+    return Fernet(key)
+
+
+def mcp_code_store(uid: str, code: str) -> None:
+    """Сохраняет новый постоянный код. Прежние активные коды uid отзываются."""
+    now = time.time()
+    _run("UPDATE mcp_codes SET revoked_at=? WHERE uid=? AND revoked_at IS NULL",
+         (now, uid), commit=True)
+    enc = _mcp_fernet().encrypt(code.encode("utf-8")).decode("ascii")
+    _run("INSERT INTO mcp_codes (uid, code_hash, code_enc, created_at) VALUES (?,?,?,?)",
+         (uid, _mcp_hash(code), enc, now), commit=True)
+
+
+def mcp_code_get(uid: str) -> Optional[str]:
+    """Текущий активный код uid (расшифрованный) или None."""
+    row, _ = _run(
+        "SELECT code_enc FROM mcp_codes WHERE uid=? AND revoked_at IS NULL "
+        "ORDER BY id DESC LIMIT 1", (uid,), one=True)
+    if row is None:
+        return None
+    try:
+        return _mcp_fernet().decrypt(row["code_enc"].encode("ascii")).decode("utf-8")
+    except InvalidToken:
+        _mcp_log.error("Не удалось расшифровать MCP-код: ключ изменён. Выпустите новый код.")
+        return None
+
+
+def mcp_code_consume(code: str, ip: str = "") -> Optional[str]:
+    """Проверяет код (уже нормализованный). Возвращает uid или None. Код не расходуется."""
+    row, _ = _run(
+        "SELECT id, uid FROM mcp_codes WHERE code_hash=? AND revoked_at IS NULL",
+        (_mcp_hash(code),), one=True)
+    if row is None:
+        return None
+    _run("UPDATE mcp_codes SET last_used_at=?, last_used_ip=? WHERE id=?",
+         (time.time(), ip or None, row["id"]), commit=True)
+    return row["uid"]
+
+
+def mcp_code_revoke(uid: str) -> int:
+    """Отзывает все активные коды uid. Возвращает количество отозванных."""
+    rows, _ = _run("SELECT id FROM mcp_codes WHERE uid=? AND revoked_at IS NULL", (uid,))
+    if not rows:
+        return 0
+    _run("UPDATE mcp_codes SET revoked_at=? WHERE uid=? AND revoked_at IS NULL",
+         (time.time(), uid), commit=True)
+    return len(rows)

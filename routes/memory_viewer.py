@@ -44,6 +44,12 @@ class ReviewBody(BaseModel):
     id: str = Field(..., max_length=128)
 
 
+class EdgeReviewBody(BaseModel):
+    source: str = Field(..., max_length=128)
+    relation: str = Field(..., max_length=40)
+    target: str = Field(..., max_length=128)
+
+
 def _enabled():
     if not ENABLED:
         raise HTTPException(status_code=404, detail="not found")
@@ -158,3 +164,56 @@ async def memory_llm_review(body: ReviewBody, uid: str = Depends(require_auth)):
         raise HTTPException(status_code=503, detail="LM Studio недоступна")
     raw = raw or ""
     return {"proposal": core.sanitize_proposal(core.extract_json(raw)), "raw": raw[:1500]}
+
+
+@router.get("/impact")
+async def memory_impact(id: str, uid: str = Depends(require_auth)):
+    """Что затронет отзыв записи: от чего она зависит и на чём держатся другие записи."""
+    _enabled()
+    _check_id(id)
+    mem = await _private_memory(uid)
+    async with mem._lock:
+        try:
+            return core.impact(mem.store, id)
+        except LookupError:
+            raise HTTPException(status_code=404, detail="запись не найдена")
+
+
+@router.post("/llm/check-edge")
+async def memory_llm_check_edge(body: EdgeReviewBody, uid: str = Depends(require_auth)):
+    """ИИ оценивает одну связь: оставить, удалить или сменить тип. Ничего не применяет."""
+    _enabled()
+    _check_id(body.source)
+    _check_id(body.target)
+    if not core.REL_RE.match(body.relation):
+        raise HTTPException(status_code=400, detail="некорректный тип связи")
+    mem = await _private_memory(uid)
+    async with mem._lock:
+        if body.source not in mem.store._objects or body.target not in mem.store._objects:
+            raise HTTPException(status_code=404, detail="запись не найдена")
+        messages = core.edge_review_messages(mem.store, body.source, body.relation, body.target)
+    try:
+        raw = await call_llm(messages, temp=0.0, max_tokens=300)
+    except Exception:
+        raise HTTPException(status_code=503, detail="LM Studio недоступна")
+    raw = raw or ""
+    return {"proposal": core.sanitize_edge(core.extract_json(raw), body.relation), "raw": raw[:1000]}
+
+
+@router.post("/llm/regenerate")
+async def memory_llm_regenerate(body: ReviewBody, uid: str = Depends(require_auth)):
+    """ИИ переписывает текст записи, сохраняя смысл. Ничего не применяет."""
+    _enabled()
+    _check_id(body.id)
+    mem = await _private_memory(uid)
+    async with mem._lock:
+        try:
+            detail = core.object_detail(mem.store, body.id)
+        except LookupError:
+            raise HTTPException(status_code=404, detail="запись не найдена")
+    try:
+        raw = await call_llm(core.regenerate_messages(detail), temp=0.0, max_tokens=400)
+    except Exception:
+        raise HTTPException(status_code=503, detail="LM Studio недоступна")
+    raw = raw or ""
+    return {"proposal": core.sanitize_regen(core.extract_json(raw), detail["subject"]), "raw": raw[:1000]}

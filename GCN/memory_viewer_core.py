@@ -25,6 +25,11 @@ STALE_CONFIDENCE = 0.5    # ...и доверия меньше этого
 LOW_CONFIDENCE = 0.3      # почти не доверяемые
 ISOLATED_CONFIDENCE = 0.5 # без связей, но уверенные (такие важнее всего связать)
 HUB_DEGREE = 12           # слишком много связей: запись, возможно, слишком общая
+# связи, по которым одна запись опирается на другую (см. impact)
+SUPPORT_RELS = ("GROUNDS_IN", "REQUIRES", "ENABLES", "CAUSES")
+# допустимые типы связей; ИИ может предложить только их
+RELATIONS_ALLOWED = ("RELATED_TO", "GROUNDS_IN", "CAUSES", "ENABLES", "REQUIRES",
+                     "PREVENTS", "PART_OF", "DUPLICATE_OF", "CONTRADICTS")
 
 
 def _utc(dt):
@@ -402,9 +407,37 @@ def apply_edit(store, op, args, actor=ACTOR):
     elif op == "retract":
         store.retract(need("id"), actor, reason=str(args.get("reason") or "memory_viewer")[:200])
     elif op == "link":
-        store.link(need("source"), need("target"), rel(), actor, weight=unit(args.get("weight", 1.0)))
+        r = rel()
+        if r in CONTRADICT_RELATIONS:
+            # противоречие хранится в двух направлениях: ставим обе стороны сразу
+            store.register_contradiction(need("source"), need("target"), actor)
+        else:
+            store.link(need("source"), need("target"), r, actor, weight=unit(args.get("weight", 1.0)))
     elif op == "unlink":
-        store.unlink(need("source"), need("target"), rel(), actor)
+        r = rel()
+        s, t = need("source"), need("target")
+        store.unlink(s, t, r, actor)
+        if r in CONTRADICT_RELATIONS:
+            store.unlink(t, s, r, actor)   # вторая сторона противоречия
+    elif op == "edge_replace":
+        # смена типа связи одной операцией: старая связь снимается, новая ставится
+        s, t = need("source"), need("target")
+        old = args.get("old_relation")
+        new = args.get("new_relation")
+        if not isinstance(old, str) or not REL_RE.match(old):
+            raise ValueError("старый тип связи некорректен")
+        if not isinstance(new, str) or new not in RELATIONS_ALLOWED:
+            raise ValueError("новый тип связи не из списка допустимых")
+        if new == old:
+            raise ValueError("тип связи не изменился")
+        weight = store._graph.get_relation_weight(s, old, t) or 1.0
+        store.unlink(s, t, old, actor)
+        if old in CONTRADICT_RELATIONS:
+            store.unlink(t, s, old, actor)
+        if new in CONTRADICT_RELATIONS:
+            store.register_contradiction(s, t, actor)
+        else:
+            store.link(s, t, new, actor, weight=weight)
     elif op == "set_weight":
         store.set_relation_weight(need("source"), need("target"), rel(), unit(args.get("weight")), actor)
     else:
@@ -429,6 +462,101 @@ def review_messages(detail):
         {"role": "system", "content": "Ты аудитор памяти. Отвечаешь строго JSON."},
         {"role": "user", "content": prompt},
     ]
+
+
+def impact(store, oid):
+    """Что изменится, если запись отозвать: от чего она зависит и что держится на ней."""
+    o = store._objects.get(oid)
+    if o is None:
+        raise LookupError("объект не найден")
+    g = store._graph
+
+    def subj(x):
+        obj = store._objects.get(x)
+        return str(obj.subject or "")[:160] if obj else x
+
+    out_e = g.get_neighbors(oid)
+    in_e = g.get_incoming(oid)
+    return {
+        "id": oid,
+        "relation_count": len(out_e) + len(in_e),
+        "relies_on": sorted({subj(t) for r, t in out_e if r in SUPPORT_RELS}),
+        "relied_by": sorted({subj(s) for r, s in in_e if r in SUPPORT_RELS}),
+        "contradicts": sorted({subj(t) for r, t in out_e if r in CONTRADICT_RELATIONS}),
+    }
+
+
+def edge_review_messages(store, source, relation, target):
+    a = str(store._objects[source].subject or "")[:500]
+    b = str(store._objects[target].subject or "")[:500]
+    prompt = (
+        "Проверь одну связь в долговременной памяти ассистента.\n"
+        f"Запись A: «{a}»\n"
+        f"Связь: {relation}\n"
+        f"Запись B: «{b}»\n\n"
+        "Смысл связей: GROUNDS_IN — A опирается на B; CAUSES — A вызывает B; "
+        "ENABLES — A делает возможным B; REQUIRES — A требует B; PREVENTS — A мешает B; "
+        "PART_OF — A часть B; RELATED_TO — связаны по смыслу; DUPLICATE_OF — A и B об одном и том же; "
+        "CONTRADICTS — A и B спорят.\n"
+        "Реши: связь верна (keep), её нужно удалить (remove) или нужен другой тип (change).\n"
+        "Если change, выбери new_relation из списка: " + ", ".join(RELATIONS_ALLOWED) + ".\n\n"
+        "Ответь ТОЛЬКО JSON без пояснений и без markdown:\n"
+        '{"verdict": "keep|remove|change", "new_relation": null или тип из списка, "reason": "кратко"}'
+    )
+    return [
+        {"role": "system", "content": "Ты аудитор памяти. Отвечаешь строго JSON."},
+        {"role": "user", "content": prompt},
+    ]
+
+
+def sanitize_edge(p, relation):
+    """Белый список: вердикт и тип связи проверяются, лишнее отбрасывается."""
+    if not isinstance(p, dict):
+        p = {}
+    v = p.get("verdict")
+    if v not in ("keep", "remove", "change"):
+        v = "unclear"
+    new = None
+    if v == "change":
+        cand = p.get("new_relation")
+        if isinstance(cand, str) and cand.strip().upper() in RELATIONS_ALLOWED \
+                and cand.strip().upper() != relation:
+            new = cand.strip().upper()
+        else:
+            v = "unclear"
+    return {"verdict": v, "new_relation": new, "reason": str(p.get("reason") or "")[:400]}
+
+
+def regenerate_messages(detail):
+    neighbours = [f"- {n.get('subject')!s}" for n in (detail["out_edges"] + detail["in_edges"])[:8]]
+    prompt = (
+        "Перепиши текст записи памяти так, чтобы он был ясным и понятным без контекста, "
+        "одной-двумя фразами. Сохрани смысл. Новых фактов не добавляй. "
+        "Если текст уже ясен, верни его без изменений.\n"
+        f"Текст: «{detail['subject']}»\n"
+        "Связанные записи (только для контекста):\n" + ("\n".join(neighbours) or "- нет") + "\n\n"
+        "Ответь ТОЛЬКО JSON без пояснений и без markdown:\n"
+        '{"subject": "новый текст", "confidence": null или число от 0 до 1, "reason": "что исправлено"}'
+    )
+    return [
+        {"role": "system", "content": "Ты редактор памяти. Отвечаешь строго JSON."},
+        {"role": "user", "content": prompt},
+    ]
+
+
+def sanitize_regen(p, old_subject):
+    if not isinstance(p, dict):
+        p = {}
+    subj = p.get("subject")
+    subj = subj.strip()[:1000] if isinstance(subj, str) and subj.strip() else None
+    if subj == (old_subject or "").strip():
+        subj = None
+    conf = p.get("confidence")
+    if isinstance(conf, (int, float)) and not isinstance(conf, bool) and math.isfinite(conf):
+        conf = max(0.0, min(1.0, float(conf)))
+    else:
+        conf = None
+    return {"subject": subj, "confidence": conf, "reason": str(p.get("reason") or "")[:400]}
 
 
 def extract_json(text):

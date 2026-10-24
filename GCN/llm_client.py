@@ -133,7 +133,14 @@ async def call_llm(
                              tools=None, retries=retries, think=include_reasoning)
     content = msg.get("content", "") or ""
     if not include_reasoning:
-        return content
+        # служебный вызов: рассуждения, которые модель вывела в content, не должны
+        # попадать в гипотезы, JSON-парсеры и поисковые запросы
+        from GCN.llm_text import strip_thinking
+        cleaned = strip_thinking(content)
+        if cleaned != content.strip():
+            logger.info("call_llm: вырезаны рассуждения из ответа (%d -> %d символов)",
+                        len(content), len(cleaned))
+        return cleaned
 
     reasoning = (
         msg.get("reasoning_content")

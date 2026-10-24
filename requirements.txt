@@ -5,6 +5,7 @@ starlette
 pydantic
 python-dotenv
 itsdangerous               # подписи сессий (SessionMiddleware), без него вход не работает
+cryptography               # шифрование постоянных MCP-кодов в auth.db (auth_store.py)
 
 # ---------- HTTP, поиск и документы ----------
 aiohttp                    # LLM, EasyDiffusion, веб-поиск

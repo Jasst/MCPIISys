@@ -113,6 +113,19 @@ a.back:hover{text-decoration:underline}
 .leg-rel{display:flex;gap:8px;align-items:center;font-size:12px;margin:4px 0;color:var(--text-secondary)}
 .leg-rel i{display:inline-block;width:16px;height:3px;border-radius:2px;flex:none}
 .hint{font-size:11px;color:var(--text-muted);margin:2px 0 6px}
+.edge-block{border-bottom:1px dashed var(--border-color);padding:8px 0}
+.edge-sent{font-size:13px;margin-bottom:2px;color:var(--text-primary)}
+.prop{border-left:3px solid var(--accent-color);font-size:12px}
+.prop .mono{margin:3px 0;word-break:normal}
+.old{color:var(--text-muted);text-decoration:line-through;font-size:12px;margin:2px 0}
+.new{color:var(--text-primary);font-size:13px;margin:2px 0}
+/* на десктопе экран занимает ровно высоту окна: граф не уезжает вниз из-за длинной панели записи */
+@media (min-width:901px){
+  body{height:100vh;height:100dvh;display:flex;flex-direction:column;overflow:hidden}
+  #top{flex:none}
+  #main{flex:1;min-height:0;height:auto}
+  #feed{flex:none}
+}
 /* ---- мобильная раскладка: панель деталей как выдвижная шторка ---- */
 #zoombar{display:none;position:absolute;right:8px;bottom:8px;z-index:5;flex-direction:column;gap:6px}
 #zoombar button{width:38px;height:38px;font-size:17px;border-radius:9px;background:#243049d9}
@@ -301,6 +314,8 @@ async function refresh(force) {
   if (resp.unchanged) return;
   if (resp.delta && resp.base !== S.version) return refresh(true); // рассинхрон: берём полный снимок
   const snap = resp.delta ? mergeDelta(S.snap, resp) : resp;
+  // версия не изменилась: не перерисовываем панель, иначе сотрутся предложения ИИ
+  if (!force && S.snap && snap.version === S.version) return;
 
   const prevById = S.byId;
   const nextById = new Map(snap.nodes.map((n) => [n.id, n]));
@@ -670,16 +685,28 @@ const TOUCH_MODE = () => matchMedia("(max-width: 900px)").matches;
 function openSheet() { document.body.classList.add("sheet-open"); }
 function closeSheet() { document.body.classList.remove("sheet-open"); }
 
+// короткие русские формулировки связей: читаются как фраза «эта запись … другая»
+const REL_RU = {
+  RELATED_TO: "связана с", GROUNDS_IN: "опирается на", CAUSES: "вызывает",
+  ENABLES: "делает возможным", REQUIRES: "требует", PREVENTS: "мешает",
+  PART_OF: "часть", DUPLICATE_OF: "дубликат", CONTRADICTS: "противоречит",
+};
+const VERDICT_RU = {ok: "верно", dubious: "сомнительно", wrong: "неверно", duplicate: "дубликат", unclear: "неясно"};
+const EDGE_VERDICT_RU = {keep: "связь верна", remove: "связь лишняя", change: "нужен другой тип связи", unclear: "неясно"};
+
+function short(t, n = 70) {
+  const s = String(t || "");
+  return s.length > n ? s.slice(0, n - 1) + "…" : s;
+}
+
 function renderSheetHead() {
   const head = $("#sheet-head");
   head.innerHTML = "";
   head.append(h("div", {class: "row", style: "justify-content:space-between;margin:0"},
-    h("strong", {}, "Объект памяти"),
+    h("strong", {}, "Запись памяти"),
     h("div", {class: "row", style: "margin:0"},
-      h("button", {id: "sheet-new", class: "primary small", onclick: startCreate}, "＋ новая"),
+      h("button", {class: "primary small", disabled: S.readonly ? "" : null, onclick: startCreate}, "＋ новая"),
       h("button", {class: "small", onclick: closeSheet}, "✕ закрыть"))));
-  const b = $("#sheet-new");
-  if (b) b.disabled = S.readonly;
 }
 
 function selectNode(id) {
@@ -693,7 +720,7 @@ function selectNode(id) {
 
 function clearDetail() {
   $("#detail").innerHTML = "";
-  $("#detail").append(h("div", {class: "mono"}, "Выбери узел на графе или в списке хабов."));
+  $("#detail").append(h("div", {class: "mono"}, "Выбери запись на графе или в списке советов."));
 }
 
 async function loadDetail(id) {
@@ -701,11 +728,53 @@ async function loadDetail(id) {
   try {
     d = await api(API + "/object?id=" + encodeURIComponent(id));
   } catch (e) {
-    log("не удалось загрузить узел: " + e.message, "bad");
+    log("не удалось загрузить запись: " + e.message, "bad");
     return;
   }
   if (S.selected !== id) return;
   renderDetail(d);
+}
+
+function kv(a, b) { return h("div", {class: "kv"}, h("span", {}, a), h("span", {}, String(b))); }
+
+/* карточка предложения ИИ: ничего не меняется, пока пользователь не нажмёт кнопку */
+function proposalCard(lines, actions) {
+  const card = h("div", {class: "card prop"});
+  for (const l of lines) card.append(l instanceof Node ? l : h("div", {class: "mono"}, l));
+  const row = h("div", {class: "row"});
+  for (const a of actions) {
+    row.append(h("button", {class: (a.primary ? "primary " : "") + (a.danger ? "danger " : "") + "small",
+      disabled: S.readonly ? "" : null,
+      onclick: async () => { const ok = await a.run(); if (ok) card.remove(); }}, a.label));
+  }
+  row.append(h("button", {class: "small", onclick: () => card.remove()}, "отклонить"));
+  card.append(row);
+  return card;
+}
+
+/* одна связь: фраза + тип + действия (проверка ИИ, смена типа, удаление) */
+function edgeBlock(d, rel, otherId, subject, outgoing) {
+  const who = `«${short(subject || otherId)}»`;
+  const phrase = outgoing ? `Эта запись ${REL_RU[rel] || rel} ${who}`
+                          : `${who} ${REL_RU[rel] || rel} эту запись`;
+  const ro = S.readonly ? "" : null;
+  const newRel = h("input", {value: rel, size: 14, list: "rel-list", disabled: ro, title: "новый тип связи"});
+  const slot = h("div", {});
+  const src = outgoing ? d.id : otherId, tgt = outgoing ? otherId : d.id;
+  return h("div", {class: "edge-block"},
+    h("div", {class: "edge-sent"}, phrase),
+    h("div", {class: "hint"}, `тип ${rel}: ${REL_HELP[rel] || "свой тип"}`),
+    h("div", {class: "row"},
+      h("button", {class: "small", onclick: () => llmCheckEdge(src, rel, tgt, slot)}, "ИИ проверит"),
+      h("button", {class: "small", onclick: () => selectNode(otherId)}, "открыть"),
+      h("button", {class: "small danger", disabled: ro, title: "удалить эту связь", onclick: () =>
+        edit("unlink", {source: src, target: tgt, relation: rel})}, "удалить связь")),
+    h("div", {class: "row"}, newRel,
+      h("button", {class: "small", disabled: ro, onclick: () => {
+        const nr = newRel.value.trim().toUpperCase();
+        if (nr && nr !== rel) edit("edge_replace", {source: src, target: tgt, old_relation: rel, new_relation: nr});
+      }}, "сменить тип")),
+    slot);
 }
 
 function renderDetail(d) {
@@ -713,26 +782,20 @@ function renderDetail(d) {
   const box = $("#detail");
   box.innerHTML = "";
   renderSheetHead();
-  const typeBadge = h("span", {class: "badge", style: `border-color:${TYPE_COLORS[d.type] || "#555"}`}, d.type);
   box.append(
-    h("div", {class: "row"}, typeBadge, h("span", {class: "badge"}, d.scope), h("span", {class: "badge"}, `v${d.version}`)),
+    h("div", {class: "row"}, h("span", {class: "badge"}, d.type), h("span", {class: "badge"}, d.scope),
+      h("span", {class: "badge"}, `v${d.version}`)),
     h("div", {class: "mono"}, d.id),
-    ro ? h("div", {class: "ro-note"}, "режим только чтение: правки отключены") : null,
-  );
+    ...(ro ? [h("div", {class: "ro-note"}, "режим только чтение: правки отключены")] : []));
 
-  // текст
+  // 1. текст
   const subj = h("textarea", {disabled: ro ? "" : null}, d.subject);
-  box.append(h("h3", {}, "Текст"), subj,
-    h("div", {class: "hint"}, "после сохранения пересчитывается вектор для поиска по смыслу"),
+  box.append(h("h3", {}, "Текст записи"), subj,
+    h("div", {class: "hint"}, "После сохранения пересчитывается вектор для поиска по смыслу."),
     h("div", {class: "row"}, h("button", {class: "primary", disabled: ro ? "" : null,
       onclick: () => edit("set_subject", {id: d.id, text: subj.value})}, "Сохранить текст")));
 
-  // предикат
-  const pred = h("input", {value: d.predicate || "", size: 30, disabled: ro ? "" : null});
-  box.append(h("h3", {}, "Предикат"), h("div", {class: "row"}, pred,
-    h("button", {disabled: ro ? "" : null, onclick: () => edit("set_predicate", {id: d.id, text: pred.value})}, "Сохранить")));
-
-  // доверие
+  // 2. доверие
   const conf = h("input", {type: "range", min: "0", max: "100", value: Math.round(d.confidence * 100),
     disabled: ro ? "" : null});
   const confV = h("span", {}, d.confidence.toFixed(2));
@@ -747,26 +810,34 @@ function renderDetail(d) {
       h("button", {class: "small", disabled: ro ? "" : null,
         onclick: () => edit("set_confidence", {id: d.id, value: 0.3})}, "сомневаюсь · 0.3")));
 
-  // сведения
-  box.append(h("h3", {}, "Сведения"), h("div", {class: "card"},
-    kv("автор", d.author), kv("создано", (d.created || "").replace("T", " ").slice(0, 19)),
-    kv("источник", d.source_type || "—"), kv("доказательств", d.evidence.length),
-    kv("эмбеддинг", d.has_embedding ? "есть" : "нет")));
+  // 3. ИИ: только предложения
+  const aiSlot = h("div", {});
+  box.append(h("h3", {}, "ИИ-помощь"),
+    h("div", {class: "hint"}, "ИИ только предлагает изменения. Без твоего нажатия ничего не меняется."),
+    h("div", {class: "row"},
+      h("button", {onclick: () => llmReview(d.id, aiSlot)}, "Проверить запись"),
+      h("button", {disabled: ro ? "" : null, onclick: () => llmRegenerate(d, aiSlot)}, "Переписать текст")),
+    aiSlot);
 
-  // связи
-  box.append(h("h3", {}, "Связи"));
-  const edgesBox = h("div", {});
-  for (const e of d.out_edges) edgesBox.append(edgeRow(d, e.r, e.t, e.subject, true));
-  for (const e of d.in_edges) edgesBox.append(edgeRow(d, e.r, e.s, e.subject, false));
-  if (!d.out_edges.length && !d.in_edges.length) edgesBox.append(h("div", {class: "mono"}, "связей нет"));
-  box.append(edgesBox);
+  // 4. связи
+  const total = d.out_edges.length + d.in_edges.length;
+  box.append(h("h3", {}, `Связи (${total})`));
+  if (!total) {
+    box.append(h("div", {class: "hint"}, "Связей нет. Добавь связь ниже: ИИ потом поможет проверить её."));
+  } else {
+    box.append(h("div", {class: "hint"}, "Читается как фраза: «эта запись — тип — другая запись»."));
+    const allSlot = h("div", {});
+    box.append(h("div", {class: "row"},
+      h("button", {class: "small", onclick: () => llmCheckAll(d, allSlot)}, "ИИ проверит все связи")), allSlot);
+  }
+  for (const e of d.out_edges) box.append(edgeBlock(d, e.r, e.t, e.subject, true));
+  for (const e of d.in_edges) box.append(edgeBlock(d, e.r, e.s, e.subject, false));
 
-  // добавить связь
-  const opts = [...S.visible].filter((x) => x !== d.id).map((x) => {
-    const n = S.byId.get(x);
-    return h("option", {value: x}, (n ? n.subject : x).slice(0, 60));
-  });
-  const target = h("select", {disabled: ro ? "" : null, style: "max-width:200px"}, opts);
+  // 5. добавить связь: цели берутся из всей памяти, не из отфильтрованного графа
+  const targets = [...S.byId.values()].filter((n) => n.id !== d.id)
+    .sort((a, b) => a.subject.localeCompare(b.subject, "ru"));
+  const target = h("select", {disabled: ro ? "" : null, style: "max-width:100%"},
+    targets.map((n) => h("option", {value: n.id}, short(n.subject, 60))));
   const rel = h("input", {value: "RELATED_TO", size: 14, list: "rel-list", disabled: ro ? "" : null});
   const relHelp = h("div", {class: "hint"}, REL_HELP.RELATED_TO);
   rel.addEventListener("input", () => {
@@ -776,26 +847,32 @@ function renderDetail(d) {
     disabled: ro ? "" : null, title: "сила связи от 0 до 1"});
   box.append(h("h3", {}, "Добавить связь"),
     h("datalist", {id: "rel-list"}, Object.keys(REL_HELP).map((r) => h("option", {value: r}))),
-    h("div", {class: "hint"}, "Связь соединяет эту запись с другой, которая видна на графе."),
-    h("div", {class: "row"}, target),
+    h("div", {class: "hint"}, "Выбери вторую запись и тип связи. Противоречие ставится в обе стороны."),
+    target,
     h("div", {class: "row"}, rel, w,
-      h("button", {disabled: ro ? "" : null, onclick: () => edit("link", {source: d.id, target: target.value,
-        relation: rel.value.trim().toUpperCase(), weight: Number(w.value)})}, "Связать")),
+      h("button", {disabled: ro ? "" : null, onclick: () => {
+        if (!target.value) return;
+        edit("link", {source: d.id, target: target.value, relation: rel.value.trim().toUpperCase(),
+          weight: Number(w.value)});
+      }}, "Связать")),
     relHelp);
 
-  // LLM-проверка
-  const proposalBox = h("div", {});
-  box.append(h("h3", {}, "Проверка LLM (только предложения)"),
-    h("div", {class: "row"}, h("button", {onclick: () => llmReview(d.id, proposalBox)}, "Проверить LLM")),
-    proposalBox);
+  // 6. удаление: сначала последствия, потом подтверждение
+  const impactBox = h("div", {class: "card"}, h("div", {class: "mono"}, "считаю последствия…"));
+  const delBtn = h("button", {class: "danger", disabled: ro ? "" : null, onclick: () => {
+    const im = box.dataset.impact ? JSON.parse(box.dataset.impact) : null;
+    let msg = "Отозвать запись? Это сохранится в истории.";
+    if (im) {
+      msg += `\n\nСвязей будет удалено: ${im.relation_count}.`;
+      if (im.relied_by.length) msg += `\nЗаписи, которые на ней держатся, потеряют опору: ${im.relied_by.length}.`;
+      if (im.contradicts.length) msg += `\nПротиворечия исчезнут: ${im.contradicts.length}.`;
+    }
+    if (confirm(msg)) edit("retract", {id: d.id, reason: "memory_viewer"});
+  }}, "Отозвать запись");
+  box.append(h("h3", {}, "Удаление"), impactBox, h("div", {class: "row"}, delBtn));
+  loadImpact(d.id, impactBox, box);
 
-  // удаление
-  box.append(h("div", {class: "row", style: "margin-top:10px"},
-    h("button", {class: "danger", disabled: ro ? "" : null, onclick: () => {
-      if (confirm("Отозвать запись? Это действие сохраняется в истории.")) edit("retract", {id: d.id, reason: "memory_viewer"});
-    }}, "Отозвать запись")));
-
-  // история
+  // 7. история
   box.append(h("h3", {}, `История (${d.events.length})`));
   for (const ev of d.events.slice().reverse()) {
     box.append(h("div", {class: "mono", style: "padding:2px 0;border-bottom:1px dashed var(--border-color)"},
@@ -804,20 +881,24 @@ function renderDetail(d) {
   }
 }
 
-function kv(a, b) { return h("div", {class: "kv"}, h("span", {}, a), h("span", {}, String(b))); }
-
-function edgeRow(d, relation, otherId, subject, outgoing) {
-  const label = outgoing ? `→ ${relation}` : `← ${relation}`;
-  const unlink = h("button", {class: "small danger", disabled: S.readonly ? "" : null,
-    title: "удалить связь",
-    onclick: () => {
-      const args = outgoing ? {source: d.id, target: otherId, relation} : {source: otherId, target: d.id, relation};
-      edit("unlink", args);
-    }}, "×");
-  return h("div", {class: "edge"},
-    h("span", {class: "rel"}, label),
-    h("span", {class: "nb", title: otherId, onclick: () => selectNode(otherId)}, subject || otherId),
-    unlink);
+async function loadImpact(id, impactBox, box) {
+  try {
+    const im = await api(`${API}/impact?id=${encodeURIComponent(id)}`);
+    if (S.selected !== id) return;
+    box.dataset.impact = JSON.stringify(im);
+    impactBox.innerHTML = "";
+    const line = (label, list) => h("div", {class: "kv"}, h("span", {}, label),
+      h("span", {style: "text-align:right"}, list.length ? list.map((x) => short(x, 40)).join(", ") : "нет"));
+    impactBox.append(
+      h("div", {class: "mono"}, "Если отозвать эту запись:"),
+      kv("связей удалится", im.relation_count),
+      line("от неё зависят (опираются на неё)", im.relied_by),
+      line("она опирается на", im.relies_on),
+      line("противоречит", im.contradicts));
+  } catch (e) {
+    impactBox.innerHTML = "";
+    impactBox.append(h("div", {class: "verdict-bad"}, "не удалось посчитать: " + e.message));
+  }
 }
 
 async function edit(op, args) {
@@ -859,7 +940,7 @@ function startCreate() {
   });
   box.append(
     h("h3", {}, "Новая запись"),
-    h("div", {class: "mono"}, "появится как claim; после сохранения её можно править и связывать"),
+    h("div", {class: "hint"}, "Запись появится как утверждение. После сохранения её можно править и связывать."),
     h("div", {class: "row"}, subj),
     h("div", {class: "row"}, h("label", {}, "предикат"), pred),
     h("div", {class: "row"}, h("label", {}, "доверие"), conf, confV),
@@ -871,37 +952,113 @@ function startCreate() {
   setTimeout(() => subj.focus(), 50);
 }
 
-async function llmReview(id, box) {
-  box.innerHTML = "";
-  box.append(h("div", {class: "mono"}, "спрашиваю модель…"));
+/* ---------- предложения ИИ ---------- */
+async function llmReview(id, slot) {
+  slot.innerHTML = "";
+  slot.append(h("div", {class: "mono"}, "спрашиваю ИИ…"));
   try {
     const res = await api(API + "/llm/review", {id});
     const p = res.proposal || {};
-    const cls = p.verdict === "ok" ? "verdict-ok" : (p.verdict === "unclear" ? "verdict-warn" : "verdict-bad");
-    box.innerHTML = "";
-    const card = h("div", {class: "card"},
-      h("div", {class: cls}, `вердикт: ${p.verdict || "—"}`),
-      h("div", {class: "mono"}, p.reason || "(без пояснения)"));
+    slot.innerHTML = "";
+    const lines = [`вердикт: ${VERDICT_RU[p.verdict] || p.verdict}`, p.reason || "(без пояснения)"];
+    const actions = [];
     if (p.suggested_subject) {
-      card.append(h("div", {}, "предложен текст: ", h("i", {}, p.suggested_subject)),
-        h("button", {disabled: S.readonly ? "" : null, onclick: () => edit("set_subject", {id, text: p.suggested_subject})}, "применить текст"));
+      lines.push(`предложен текст: «${p.suggested_subject}»`);
+      actions.push({label: "применить текст", primary: true, run: () => edit("set_subject", {id, text: p.suggested_subject})});
     }
     if (p.suggested_confidence !== null && p.suggested_confidence !== undefined) {
-      card.append(h("div", {}, `предложено доверие: ${p.suggested_confidence.toFixed(2)}`),
-        h("button", {disabled: S.readonly ? "" : null, onclick: () => edit("set_confidence", {id, value: p.suggested_confidence})}, "применить доверие"));
+      lines.push(`предложено доверие: ${p.suggested_confidence.toFixed(2)}`);
+      actions.push({label: "применить доверие", run: () => edit("set_confidence", {id, value: p.suggested_confidence})});
     }
     if (p.suggest_retract) {
-      card.append(h("div", {class: "verdict-bad"}, "модель предлагает отозвать запись"),
-        h("button", {class: "danger", disabled: S.readonly ? "" : null, onclick: () => {
-          if (confirm("Отозвать запись по предложению модели?")) edit("retract", {id, reason: "llm_review_confirmed"});
-        }}, "отозвать"));
+      lines.push("ИИ предлагает отозвать запись");
+      actions.push({label: "отозвать", danger: true, run: () =>
+        confirm("Отозвать запись по предложению ИИ?") ? edit("retract", {id, reason: "llm_review_confirmed"}) : null});
     }
-    card.append(h("div", {class: "mono"}, "Ничего не применяется без твоего нажатия."));
-    box.append(card);
+    if (!actions.length) lines.push("Менять нечего.");
+    slot.append(proposalCard(lines, actions));
   } catch (e) {
-    box.innerHTML = "";
-    box.append(h("div", {class: "verdict-bad"}, "проверка не удалась: " + e.message));
+    slot.innerHTML = "";
+    slot.append(h("div", {class: "verdict-bad"}, "проверка не удалась: " + e.message));
   }
+}
+
+async function llmRegenerate(d, slot) {
+  slot.innerHTML = "";
+  slot.append(h("div", {class: "mono"}, "переписываю текст…"));
+  try {
+    const res = await api(API + "/llm/regenerate", {id: d.id});
+    const p = res.proposal || {};
+    slot.innerHTML = "";
+    if (!p.subject && p.confidence === null) {
+      slot.append(proposalCard([p.reason || "ИИ считает, что текст уже ясен.", "Менять нечего."], []));
+      return;
+    }
+    const lines = [h("div", {class: "mono"}, "было:"), h("div", {class: "old"}, d.subject)];
+    if (p.subject) lines.push(h("div", {class: "mono"}, "станет:"), h("div", {class: "new"}, p.subject));
+    if (p.confidence !== null) lines.push(`доверие станет: ${p.confidence.toFixed(2)}`);
+    if (p.reason) lines.push(p.reason);
+    slot.append(proposalCard(lines, [{label: "применить", primary: true, run: async () => {
+      let r = true;
+      if (p.subject) r = await edit("set_subject", {id: d.id, text: p.subject});
+      if (r && p.confidence !== null) r = await edit("set_confidence", {id: d.id, value: p.confidence});
+      return r;
+    }}]));
+  } catch (e) {
+    slot.innerHTML = "";
+    slot.append(h("div", {class: "verdict-bad"}, "не удалось переписать: " + e.message));
+  }
+}
+
+function edgeProposalCard(src, rel, tgt, p) {
+  const lines = [`вердикт: ${EDGE_VERDICT_RU[p.verdict] || p.verdict}`, p.reason || "(без пояснения)"];
+  const actions = [];
+  if (p.verdict === "remove") {
+    actions.push({label: "удалить связь", danger: true, run: () => edit("unlink", {source: src, target: tgt, relation: rel})});
+  } else if (p.verdict === "change" && p.new_relation) {
+    lines.push(`предложен тип: ${p.new_relation} (${REL_HELP[p.new_relation] || ""})`);
+    actions.push({label: `сменить на ${p.new_relation}`, primary: true, run: () =>
+      edit("edge_replace", {source: src, target: tgt, old_relation: rel, new_relation: p.new_relation})});
+  } else if (p.verdict === "keep") {
+    lines.push("Связь оставляем.");
+  }
+  return proposalCard(lines, actions);
+}
+
+async function llmCheckEdge(src, rel, tgt, slot) {
+  slot.innerHTML = "";
+  slot.append(h("div", {class: "mono"}, "проверяю связь…"));
+  try {
+    const res = await api(API + "/llm/check-edge", {source: src, relation: rel, target: tgt});
+    slot.innerHTML = "";
+    slot.append(edgeProposalCard(src, rel, tgt, res.proposal));
+  } catch (e) {
+    slot.innerHTML = "";
+    slot.append(h("div", {class: "verdict-bad"}, "проверка не удалась: " + e.message));
+  }
+}
+
+async function llmCheckAll(d, slot) {
+  const items = [
+    ...d.out_edges.map((e) => ({rel: e.r, src: d.id, tgt: e.t, label: e.subject})),
+    ...d.in_edges.map((e) => ({rel: e.r, src: e.s, tgt: d.id, label: e.subject})),
+  ].slice(0, 12);
+  slot.innerHTML = "";
+  const status = h("div", {class: "mono"}, `проверяю ${items.length} связей…`);
+  slot.append(status);
+  let keep = 0, problems = 0;
+  for (const it of items) {
+    try {
+      const res = await api(API + "/llm/check-edge", {source: it.src, relation: it.rel, target: it.tgt});
+      if (res.proposal.verdict === "keep") { keep++; continue; }
+      problems++;
+      slot.append(h("div", {class: "mono"}, `«${short(it.label, 40)}» · ${it.rel}`));
+      slot.append(edgeProposalCard(it.src, it.rel, it.tgt, res.proposal));
+    } catch (e) {
+      slot.append(h("div", {class: "verdict-bad"}, `${it.rel}: ${e.message}`));
+    }
+  }
+  status.textContent = `готово: верных связей ${keep}, с вопросами ${problems}`;
 }
 
 /* ---------- подсказки: связи и значки советов ---------- */
@@ -1067,6 +1224,8 @@ if (themeBtn) themeBtn.addEventListener("click", () => {
   try { localStorage.setItem("theme", next); } catch (_) { /* ignore */ }
 });
 window.addEventListener("resize", resize);
+// блок графа может менять размер после загрузки (раскладка, панели): следим за ним
+if (window.ResizeObserver) new ResizeObserver(() => resize()).observe($("#stage"));
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeSheet(); selectNode(null); } });
 
 setInterval(() => {

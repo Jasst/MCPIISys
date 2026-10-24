@@ -810,7 +810,9 @@ class AutonomyEngine:
             get_latest_head, get_heads, append_snapshot, merge_heads,
         )
 
-        store = self.ctl.memory_service.shared_memory.gcn_store
+        # Личная цепочка: её содержимое строится из диалогов ЭТОГО пользователя,
+        # поэтому не должна попадать в общее ядро, которое читают все.
+        store = self.ctl.memory_service.private_memory.gcn_store
         head = get_latest_head(store)
         heads = get_heads(store)
         is_merge = len(heads) > 1
@@ -905,6 +907,7 @@ class AutonomyEngine:
                     contributor_model=f"autonomous:{self.user_id[:12]}",
                     session_id=None,
                     open_question=None,
+                    layer="private",
                 )
             else:
                 result = await append_snapshot(
@@ -914,6 +917,7 @@ class AutonomyEngine:
                     session_id=None,
                     open_question=None,
                     parent_id=None,  # возьмёт текущую валидную голову
+                    layer="private",
                 )
             logger.info(
                 f"[Autonomy] identity auto-{'merge' if is_merge else 'continue'} для "
