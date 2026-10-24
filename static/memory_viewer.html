@@ -174,10 +174,12 @@ a.back:hover{text-decoration:underline}
   <aside id="left">
     <div class="tabs">
       <button class="tab on" data-tab="insights" title="что можно улучшить в памяти">Улучшить</button>
+      <button class="tab" data-tab="auto" title="автокоррекция, чистка шума и автосвязи с подтверждением">Авто-ИИ</button>
       <button class="tab" data-tab="metrics">Метрики</button>
       <button class="tab" data-tab="legend">Легенда</button>
     </div>
     <div id="tab-insights"></div>
+    <div id="tab-auto" hidden></div>
     <div id="tab-metrics" hidden><div id="metrics"></div></div>
     <div id="tab-legend" hidden>
       <h3>Типы записей</h3>
@@ -442,7 +444,11 @@ function tick() {
   S.alpha *= 0.985;
 }
 
-function nodeRadius(n) { return 4 + Math.min(11, Math.sqrt(n.degree || 0) * 2.3); }
+/* размер узла = связи + важность; яркость (globalAlpha в draw) = доверие; см. также salience на сервере */
+function nodeRadius(n) {
+  const s = Number.isFinite(n.salience) ? n.salience : 0.5;
+  return 4 + Math.min(8, Math.sqrt(n.degree || 0) * 2.0) + Math.min(6, s * 6);
+}
 
 function resize() {
   const r = cv.getBoundingClientRect();
@@ -485,7 +491,7 @@ function draw() {
     const [x, y] = toScreen(p);
     const rad = nodeRadius(n) * Math.min(1.6, Math.max(0.7, k));
     const dim = S.selected && id !== S.selected && !isNeighbour(id);
-    ctx.globalAlpha = dim ? 0.18 : (0.45 + 0.55 * Math.min(1, n.confidence));
+    ctx.globalAlpha = dim ? 0.18 : (0.45 + 0.55 * Math.min(1, n.confidence)); // яркость = доверие
     ctx.beginPath();
     ctx.fillStyle = TYPE_COLORS[n.type] || S.nodeFill;
     ctx.arc(x, y, rad, 0, Math.PI * 2);
@@ -810,6 +816,18 @@ function renderDetail(d) {
       h("button", {class: "small", disabled: ro ? "" : null,
         onclick: () => edit("set_confidence", {id: d.id, value: 0.3})}, "сомневаюсь · 0.3")));
 
+  // 2b. важность — влияет на размер узла в графе
+  const impVal = Number.isFinite(d.importance) ? d.importance : 1.0;
+  const imp = h("input", {type: "range", min: "0", max: "500", value: Math.round(impVal * 100),
+    disabled: ro ? "" : null});
+  const impV = h("span", {}, impVal.toFixed(2));
+  imp.addEventListener("input", () => { impV.textContent = (imp.value / 100).toFixed(2); });
+  box.append(h("h3", {}, "Важность"),
+    h("div", {class: "row"}, imp, impV,
+      h("button", {disabled: ro ? "" : null, onclick: () => edit("set_importance", {id: d.id, value: imp.value / 100})},
+        "Применить")),
+    h("div", {class: "hint"}, "От 0 до 5. Чем выше — тем крупнее узел на графе. Не путать с доверием."));
+
   // 3. ИИ: только предложения
   const aiSlot = h("div", {});
   box.append(h("h3", {}, "ИИ-помощь"),
@@ -1123,6 +1141,110 @@ function renderInsights(list) {
   }
 }
 
+/* ---------- автокоррекция (вкладка «Авто-ИИ») ---------- */
+const AUTO_ACTION_RU = {
+  retract: "Удалить как шум", merge_into: "Слить дубликат", set_confidence: "Изменить доверие",
+  add_link: "Добавить связь", rewrite: "Переписать текст",
+};
+
+function autoSubject(id) {
+  const n = S.byId.get(id);
+  return n ? short(n.subject, 60) : id;
+}
+
+async function autoScan() {
+  const box = $("#tab-auto");
+  if (S.autoBusy) return;
+  S.autoBusy = true;
+  box.innerHTML = "";
+  box.append(h("div", {class: "hint"}, "ИИ сканирует подозрительные записи… Ничего не меняется без твоих кнопок."));
+  try {
+    const res = await api(API + "/llm/auto-scan", {limit: 30});
+    renderAutoResults(res);
+  } catch (e) {
+    box.innerHTML = "";
+    box.append(h("div", {class: "verdict-bad"}, "сканирование не удалось: " + e.message),
+      h("button", {class: "primary", onclick: autoScan}, "Повторить"));
+  } finally {
+    S.autoBusy = false;
+  }
+}
+
+function autoProposalCard(title, lines, runFn, danger) {
+  const acts = [{label: "Применить", primary: !danger, danger: !!danger, run: async () => {
+    const ok = !!(await edit(runFn.op, runFn.args));
+    if (ok) log(title + ": применено", "ok");
+    return ok;
+  }}];
+  return proposalCard([h("strong", {}, title), ...lines.map((l) => l instanceof Node ? l : h("div", {class: "mono"}, l))], acts);
+}
+
+function renderAutoResults(res) {
+  const box = $("#tab-auto");
+  box.innerHTML = "";
+  box.append(h("div", {class: "row"},
+    h("button", {class: "primary small", onclick: autoScan}, "↻ Сканировать заново")));
+  box.append(h("div", {class: "hint"}, `просмотрено кандидатов: ${res.candidates ?? 0}. Каждое изменение применяется только по твоей кнопке.`));
+
+  // 1. предложения ИИ
+  const props = res.proposals || [];
+  box.append(h("h3", {}, `Предложения ИИ (${props.length})`));
+  if (!props.length) box.append(h("div", {class: "hint"}, "ИИ не нашёл того, что стоит исправить, или LM Studio недоступна."));
+  for (const p of props) {
+    let card = null;
+    if (p.action === "retract") {
+      card = autoProposalCard(`Удалить: «${autoSubject(p.id)}»`, [`причина: ${p.reason}`],
+        {op: "retract", args: {id: p.id, reason: "auto_scan"}}, true);
+    } else if (p.action === "merge_into") {
+      card = autoProposalCard(`Слить «${autoSubject(p.id)}» → «${autoSubject(p.target_id)}»`,
+        [`причина: ${p.reason}`, "связи удаляемой записи переедут к целевой"],
+        {op: "merge_into", args: {from_id: p.id, into_id: p.target_id}});
+    } else if (p.action === "set_confidence") {
+      card = autoProposalCard(`Доверие «${autoSubject(p.id)}» → ${p.value}`, [`причина: ${p.reason}`],
+        {op: "set_confidence", args: {id: p.id, value: p.value}});
+    } else if (p.action === "add_link") {
+      card = autoProposalCard(`Связать «${autoSubject(p.id)}» —${p.relation}→ «${autoSubject(p.target_id)}»`,
+        [`причина: ${p.reason}`],
+        {op: "link", args: {source: p.id, target: p.target_id, relation: p.relation, weight: 0.7}});
+    } else if (p.action === "rewrite") {
+      card = autoProposalCard(`Переписать «${autoSubject(p.id)}»`,
+        [h("div", {class: "mono"}, "новый текст: " + p.subject), `причина: ${p.reason}`],
+        {op: "set_subject", args: {id: p.id, text: p.subject}});
+    }
+    if (!card) continue;
+    card.prepend(h("div", {class: "row", style: "margin:0 0 4px"},
+      h("button", {class: "small", onclick: () => selectNode(p.id)}, "открыть запись"),
+      h("button", {class: "small", onclick: () => toggleHighlight([p.id])}, "подсветить")));
+    box.append(card);
+  }
+
+  // 2. группы повторов (без LLM)
+  const dups = res.dups || [];
+  box.append(h("h3", {}, `Повторы текстов (${dups.length})`));
+  if (!dups.length) box.append(h("div", {class: "hint"}, "одинаковых текстов не найдено."));
+  for (const g of dups.slice(0, 10)) {
+    const keeper = h("select", {style: "max-width:100%"},
+      g.map((id) => h("option", {value: id}, autoSubject(id))));
+    box.append(h("div", {class: "card"},
+      h("div", {class: "mono"}, `группа из ${g.length} одинаковых записей`),
+      h("div", {class: "row"}, keeper,
+        h("button", {class: "small", disabled: S.readonly ? "" : null, onclick: async () => {
+          const dst = keeper.value;
+          for (const id of g) if (id !== dst) await edit("merge_into", {from_id: id, into_id: dst});
+        }}, "слить в выбранную"))));
+  }
+
+  // 3. эвристические предложения связей для изолированных
+  const links = res.link_suggestions || [];
+  box.append(h("h3", {}, `Предложения связей для изолированных (${links.length})`));
+  if (!links.length) box.append(h("div", {class: "hint"}, "нет очевидных пар: все кандидаты уже связаны или слишком далеки по смыслу."));
+  for (const s of links) {
+    box.append(autoProposalCard(`«${autoSubject(s.source)}» ↔ RELATED_TO «${autoSubject(s.target)}»`,
+      [`сходство по смыслу: ${s.similarity}`],
+      {op: "link", args: {source: s.source, target: s.target, relation: "RELATED_TO", weight: s.weight}}));
+  }
+}
+
 /* ---------- метрики ---------- */
 function renderMetrics(m, insights) {
   rebuildContradictions();
@@ -1190,7 +1312,8 @@ function barList(obj) {
 /* ---------- события интерфейса ---------- */
 document.querySelectorAll(".tab").forEach((b) => b.addEventListener("click", () => {
   document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("on", x === b));
-  for (const p of ["insights", "metrics", "legend"]) $("#tab-" + p).hidden = p !== b.dataset.tab;
+  for (const p of ["insights", "auto", "metrics", "legend"]) $("#tab-" + p).hidden = p !== b.dataset.tab;
+  if (b.dataset.tab === "auto" && !$("#tab-auto").childNodes.length) autoScan();
 }));
 $("#layout").addEventListener("change", async (e) => {
   S.layout = e.target.value;
