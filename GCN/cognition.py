@@ -744,7 +744,7 @@ class MotivationEngine:
             return None
         try:
             from GCN.GCN import needs_consolidation
-            info = needs_consolidation(self.memory)
+            info = needs_consolidation(self.memory, layer="private")
         except Exception as e:
             logger.warning(f"[Motivation] identity-проверка не удалась: {e}")
             return None
@@ -859,26 +859,26 @@ async def metacognitive_check(
 ) -> Tuple[bool, float, str]:
     """
     Проверяет уверенность системы в выполнении задачи.
-    
+
     Возвращает кортеж:
       - can_proceed: можно ли выполнять задачу (True/False)
       - confidence: уровень уверенности (0.0..1.0)
       - reason: обоснование решения
-    
+
     Если уверенность ниже порога — задача блокируется.
     """
     if not METACOGNITION_ENABLED or not self_model:
         return True, 0.5, "Метакогниция отключена"
-    
+
     # Получаем оценку уверенности из SelfModel
     base_confidence = self_model.get_confidence_for_action(action_type)
-    
+
     # Если уверенность очень низкая — блокируем без LLM
     if base_confidence < METACOGNITION_CONFIDENCE_THRESHOLD:
         reason = f"Низкая уверенность системы ({base_confidence:.2f}) в области {action_type}"
         logger.info(f"[Metacognition] блокировка действия '{task[:50]}': {reason}")
         return False, base_confidence, reason
-    
+
     # Для пограничных случаев используем LLM-оценку
     reason = ""
     final_confidence = base_confidence
@@ -895,31 +895,31 @@ async def metacognitive_check(
                 temp=0.0,
                 max_tokens=100
             )
-            
+
             # Парсим ответ
             m = re.search(r'\{.*\}', response, re.DOTALL)
             if m:
                 data = json.loads(m.group(0))
                 llm_confidence = float(data.get("confidence", 0.5))
                 reason = data.get("reason", "Нет обоснования")
-                
+
                 # Комбинируем оценки
                 final_confidence = (base_confidence * 0.4 + llm_confidence * 0.6)
-                
+
                 if final_confidence < METACOGNITION_CONFIDENCE_THRESHOLD:
                     logger.info(
                         f"[Metacognition] блокировка после LLM-оценки: "
                         f"{reason} (уверенность: {final_confidence:.2f})"
                     )
                     return False, final_confidence, reason
-            
+
             return True, final_confidence, reason or "LLM-оценка пройдена"
-            
+
         except Exception as e:
             logger.warning(f"[Metacognition] ошибка LLM-оценки: {e}")
             # При ошибке полагаемся на базовую оценку
             return base_confidence >= METACOGNITION_CONFIDENCE_THRESHOLD, base_confidence, "Ошибка LLM-оценки, используем базовую уверенность"
-    
+
     return True, base_confidence, "Уверенность достаточна"
 
 
@@ -1052,7 +1052,9 @@ def sanitize_search_facts(
         if trust == "высокая":
             out.append((text, "global", 0.8))
         elif trust == "средняя":
-            out.append((text, "shared", 0.65))
+            # Веб-факты средней надёжности — только в личную память: общий слой
+            # читают все пользователи, а содержимое страницы можно отравить.
+            out.append((text, "private", 0.65))
         else:
             out.append((text, "private", 0.55))
 

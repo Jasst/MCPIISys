@@ -2043,7 +2043,24 @@
     if (btn.dataset.act === 'regen') regenerate(idx);
   });
 
-  els.openSettings.addEventListener('click', () => els.dialog.showModal());
+  // Показывает уже выданный код (не выпускает новый, поэтому не отключает другие устройства).
+  async function loadMcpCode() {
+    const out = $('#mcpCodeOut');
+    try {
+      const r = await fetch('/ai/mcp_code', { method: 'GET', credentials: 'same-origin' });
+      if (r.status === 401) { location.href = '/login'; return; }
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
+      out.textContent = j.code || 'Кода ещё нет — нажмите «Выпустить новый код».';
+    } catch (e) {
+      out.textContent = 'Не удалось загрузить код: ' + e.message;
+    }
+  }
+
+  els.openSettings.addEventListener('click', () => {
+    els.dialog.showModal();
+    loadMcpCode();
+  });
 
   // Выход только после подтверждения: случайное нажатие не разлогинивает
   const logoutDialog = $('#logoutDialog');
@@ -2059,14 +2076,16 @@
     location.href = '/login';
   });
 
+  // Выпуск нового кода: старый код и все MCP-сессии отключаются — просим подтверждение.
   $('#mcpCodeBtn').addEventListener('click', async () => {
+    if (!confirm('Выпустить новый код? Старый код перестанет работать, все подключённые внешние ИИ отключатся.')) return;
     try {
       const r = await fetch('/ai/mcp_code', { method: 'POST', credentials: 'same-origin' });
       if (r.status === 401) { location.href = '/login'; return; }
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const j = await r.json();
       $('#mcpCodeOut').textContent = j.code;
-      toast('Код выдан. Прежние подключения отключены.');
+      toast('Новый код выдан. Прежние подключения отключены.');
     } catch (e) {
       toast('Не удалось получить код: ' + e.message);
     }
@@ -2685,7 +2704,7 @@
   // SYNC.base: если сервер стал новее (другое устройство что-то сохранило) —
   // тянем полное состояние и мержим. Во время НАШЕЙ генерации пропускаем цикл
   // (мы и так источник изменений), при ошибке сети — молчим, повторим позже.
-  const POLL_MS = 4000;
+  const POLL_MS = 15000;
   let pollTimer = null;
   function startRemotePoll() {
     if (pollTimer) return;

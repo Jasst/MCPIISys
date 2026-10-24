@@ -2259,8 +2259,12 @@ class CognitiveController:
         """
         try:
             from GCN.GCN import get_latest_head, get_heads
-            store = self.memory_service.shared_memory.gcn_store
+            # Личное ТЕКУЩЕЕ_Я приоритетнее; общее ядро — фолбэк, если личной цепочки нет.
+            store = self.memory_service.private_memory.gcn_store
             head = get_latest_head(store)
+            if head is None:
+                store = self.memory_service.shared_memory.gcn_store
+                head = get_latest_head(store)
             if head is None:
                 return ""
             heads = get_heads(store)

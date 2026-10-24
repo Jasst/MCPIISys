@@ -2130,7 +2130,7 @@ class GCNMemoryRouter:
                     subject=fact,
                     predicate="is_fact",
                     obj="true",
-                    scope=MemoryScope.GLOBAL,
+                    scope=MemoryScope.PRIVATE,  # факты из диалога — только в личную память
                     confidence=0.75,
                     source_type="dialogue_extraction"
                 )
@@ -2500,8 +2500,6 @@ class MemoryService:
             fact_lower = fact.lower()
             if "глобально" in fact_lower or "global" in fact_lower:
                 scope_enum = MemoryScope.GLOBAL
-            elif "shared" in fact_lower or "общий" in fact_lower or "команд" in fact_lower:
-                scope_enum = MemoryScope.SHARED
             else:
                 scope_enum = MemoryScope.PRIVATE
         else:

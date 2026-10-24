@@ -138,6 +138,31 @@ _ALLOW_LEGACY_HTTP = os.getenv("MCP_ALLOW_LEGACY_HTTP", "0") == "1"
 # Доверять заголовку X-User-Id по HTTP. nginx ОБЯЗАН его обнулять для внешних
 # клиентов, иначе заголовок подделывается. По умолчанию выключено.
 _TRUST_X_USER_ID = os.getenv("MCP_TRUST_X_USER_ID", "0") == "1"
+# IP-fallback сессий (см. _user_from_ctx). По умолчанию выключен: один IP
+# (NAT, офис, мобильный оператор) не должен давать доступ к чужой памяти.
+_IP_FALLBACK = os.getenv("MCP_IP_FALLBACK", "0") == "1"
+# Администраторы общего слоя (shared/global и общее ядро ТЕКУЩЕЕ_Я).
+_ADMIN_USERS = {u.strip().lower() for u in os.getenv("MCP_ADMIN_USERS", "").split(",") if u.strip()}
+_SHARED_SCOPES = ("shared", "global")
+
+
+def _admin_denied(uid: "Optional[str]") -> "Optional[str]":
+    """None — доступ разрешён; иначе текст ошибки."""
+    if uid and uid.lower() in _ADMIN_USERS:
+        return None
+    return "Операция с общим слоем (shared/global/ядро идентичности) доступна только администратору."
+
+
+def _shared_gate(uid: "Optional[str]", scope: "Optional[str]", texts=()) -> "Optional[str]":
+    """Блокирует запись в общие слои для не-администраторов.
+    Учитывает и явный scope, и автоопределение по ключевым словам (scope=None)."""
+    if scope and scope.lower() in _SHARED_SCOPES:
+        return _admin_denied(uid)
+    if not scope:
+        low = " ".join((t or "").lower() for t in texts)
+        if "глобально" in low or "global" in low:
+            return _admin_denied(uid)
+    return None
 
 _LOGIN_HINT = (
     "Требуется вход. Откройте веб-чат -> Профиль -> «Подключить ИИ», "
@@ -192,9 +217,14 @@ def issue_login_code(user_id: str, persistent: bool = True) -> str:
     for k in [k for k, (u, _) in _LOGIN_CODES.items() if u == uid]:
         _LOGIN_CODES.pop(k, None)
     code = "".join(secrets.choice(_CODE_ALPHABET) for _ in range(_CODE_LENGTH))
-    expires = _CODE_PERSISTENT if persistent else time.time() + _LOGIN_CODE_TTL
-    _LOGIN_CODES[code] = (uid, expires)
-    logger.info(f"[auth] issue код для {uid[:16]}… (persistent={persistent})")
+    if persistent:
+        # Постоянный код хранится в auth.db (переживает перезапуск сервера).
+        from auth_store import mcp_code_store
+        mcp_code_store(uid, code)
+        logger.info(f"[auth] issue постоянный код для {uid[:16]}…")
+        return code
+    _LOGIN_CODES[code] = (uid, time.time() + _LOGIN_CODE_TTL)
+    logger.info(f"[auth] issue одноразовый код для {uid[:16]}…")
     return code
 
 
@@ -202,6 +232,10 @@ def get_login_code_for_user(user_id: str) -> Optional[Tuple[str, float]]:
     """Возвращает (code, expires_at) текущий активный код пользователя или None."""
     uid = _canon_user_id(user_id) or user_id.strip().lower()
     _prune_login_state()
+    from auth_store import mcp_code_get
+    stored = mcp_code_get(uid)
+    if stored:
+        return stored, _CODE_PERSISTENT
     for code, (u, exp) in _LOGIN_CODES.items():
         if u == uid:
             return code, exp
@@ -221,6 +255,8 @@ def revoke_login_code(user_id: str) -> Dict[str, int]:
     codes_removed = [k for k, (u, _) in _LOGIN_CODES.items() if u == uid]
     for k in codes_removed:
         _LOGIN_CODES.pop(k, None)
+    from auth_store import mcp_code_revoke
+    db_codes = mcp_code_revoke(uid)
     sids_removed = [s for s, (u, _) in _HTTP_SESSIONS.items() if u == uid]
     for s in sids_removed:
         _HTTP_SESSIONS.pop(s, None)
@@ -232,11 +268,35 @@ def revoke_login_code(user_id: str) -> Dict[str, int]:
         f"sids={len(sids_removed)}, ips={len(ips_removed)}"
     )
     return {
-        "codes": len(codes_removed),
+        "codes": len(codes_removed) + db_codes,
         "sessions": len(sids_removed),
         "ips": len(ips_removed),
-        "total": len(codes_removed) + len(sids_removed) + len(ips_removed),
+        "total": len(codes_removed) + db_codes + len(sids_removed) + len(ips_removed),
     }
+
+
+_BEARER_PREFIX = "bearer "
+
+
+def _user_from_bearer(req) -> "Optional[str]":
+    """uid по заголовку «Authorization: Bearer <код>» или None.
+
+    Код проверяется тем же способом, что и в login(): хеш в mcp_codes, отзыв учитывается.
+    Неверные коды попадают в те же счётчики неудач, что и login(), так что перебор
+    ограничен тем же лимитом по IP. Сам код нигде не логируется.
+    """
+    raw = (req.headers.get("authorization") or "")[len(_BEARER_PREFIX):]
+    ip = req.headers.get("x-real-ip") or (req.client.host if getattr(req, "client", None) else "?")
+    now = time.time()
+    _prune_login_state(now)
+    if len(_LOGIN_FAILS.get(ip, [])) >= _LOGIN_FAIL_LIMIT:
+        return None
+    normalized = raw.strip().upper().replace("-", "").replace(" ", "")
+    uid = _consume_login_code(normalized, ip, now) if normalized else None
+    if not uid:
+        _LOGIN_FAILS.setdefault(ip, []).append(now)
+        return None
+    return _canon_user_id(uid) or uid
 
 
 def _user_from_ctx(ctx: "Optional[Context]") -> "Optional[str]":
@@ -253,6 +313,11 @@ def _user_from_ctx(ctx: "Optional[Context]") -> "Optional[str]":
     req = _http_request(ctx)
     if req is None:
         return None
+    # Bearer имеет приоритет: код проверяется на каждом запросе и не зависит ни от
+    # mcp-session-id, ни от IP. Если заголовок есть, но код неверный, второй путь
+    # (сессия/IP) не используем — иначе неверный код можно было бы «подтереть» сессией.
+    if (req.headers.get("authorization") or "").lower().startswith(_BEARER_PREFIX):
+        return _user_from_bearer(req)
     try:
         if _TRUST_X_USER_ID:
             uid = req.headers.get("x-user-id")
@@ -276,7 +341,7 @@ def _user_from_ctx(ctx: "Optional[Context]") -> "Optional[str]":
         ip = req.headers.get("x-real-ip") or (
             req.client.host if getattr(req, "client", None) else None
         )
-        if ip:
+        if _IP_FALLBACK and ip:
             entry = _HTTP_IP_SESSIONS.get(ip)
             if entry:
                 uid, exp = entry
@@ -492,6 +557,18 @@ def _prune_last_commands(now: float) -> None:
         _last_commands.pop(k, None)
 
 
+def _consume_login_code(normalized: str, ip: str, now: float) -> Optional[str]:
+    """uid по коду входа или None. Сначала одноразовые коды в памяти, затем постоянные в БД."""
+    entry = _LOGIN_CODES.get(normalized)
+    if entry and entry[1] >= now:  # inf-код никогда не истекает
+        uid, exp = entry
+        if exp != _CODE_PERSISTENT:  # legacy одноразовый код потребляем
+            _LOGIN_CODES.pop(normalized, None)
+        return uid
+    from auth_store import mcp_code_consume
+    return mcp_code_consume(normalized, ip)
+
+
 @mcp.tool()
 async def login(
         code: str = Field(...,
@@ -523,15 +600,10 @@ async def login(
 
     normalized = (code or "").strip().upper().replace("-", "").replace(" ", "")
     # .get, а не .pop: persistent-код не потребляем — им можно войти много раз.
-    entry = _LOGIN_CODES.get(normalized)
-    if not entry or entry[1] < now:  # < now, не <=: inf-код никогда не истекает
+    uid = _consume_login_code(normalized, ip, now)
+    if not uid:
         _LOGIN_FAILS.setdefault(ip, []).append(now)
         return {"status": "error", "message": "Код неверный или отозван. Получите новый в Профиле."}
-
-    uid, exp = entry
-    # Legacy-код с TTL потребляем (одноразовый). Persistent оставляем в словаре.
-    if exp != _CODE_PERSISTENT:
-        _LOGIN_CODES.pop(normalized, None)
     _HTTP_SESSIONS[sid] = (uid, now + _HTTP_SESSION_TTL)
     # NEW: пишем и IP-индекс — резервный путь для клиентов, которые меняют
     # mcp-session-id между вызовами. Переменная ip уже посчитана выше в login.
@@ -835,6 +907,9 @@ async def remember(
     uid, err = _safe_resolve_user(user_id, ctx)
     if err:
         return {"status": "error", "error": "forbidden", "message": err}
+    err = _shared_gate(uid, scope, [fact])
+    if err:
+        return {"status": "error", "error": "forbidden", "message": err}
     service = await get_memory_service(uid)
     result = await service.remember(fact, scope, force_new=force_new, user_explicit=True)
     return {"status": "ok", **result}
@@ -877,6 +952,9 @@ async def remember_with_handshake(
         return {"status": "error", "message": "Предыдущий голос не найден. Цепочка разорвана."}
     prev_text = prev_info.get("subject", "")
 
+    err = _shared_gate(uid, scope, [fact])
+    if err:
+        return {"status": "error", "error": "forbidden", "message": err}
     # 2. Получаем эмбеддинги (используем приватную память для доступа к эмбеддеру)
     mem_layer = service.private_memory
     emb_new = mem_layer.embed_text(fact)
@@ -942,6 +1020,9 @@ async def contribute_to_identity(
     uid, err = _safe_resolve_user(user_id, ctx)
     if err:
         return {"status": "error", "error": "forbidden", "message": err}
+    err = _admin_denied(uid)
+    if err:
+        return {"status": "error", "error": "forbidden", "message": err}
     service = await get_memory_service(uid)
     return await append_snapshot(
         service, content, contributor_model,
@@ -975,6 +1056,9 @@ async def merge_identity_branches(
     from GCN.GCN import merge_heads
 
     uid, err = _safe_resolve_user(user_id, ctx)
+    if err:
+        return {"status": "error", "error": "forbidden", "message": err}
+    err = _admin_denied(uid)
     if err:
         return {"status": "error", "error": "forbidden", "message": err}
     service = await get_memory_service(uid)
@@ -1051,6 +1135,9 @@ async def invalidate_identity(
     uid, err = _safe_resolve_user(user_id, ctx)
     if err:
         return {"status": "error", "error": "forbidden", "message": err}
+    err = _admin_denied(uid)
+    if err:
+        return {"status": "error", "error": "forbidden", "message": err}
     service = await get_memory_service(uid)
     return await invalidate_snapshot(service, identity_id, reason)
 
@@ -1106,6 +1193,10 @@ async def forget(
     uid, err = _safe_resolve_user(user_id, ctx)
     if err:
         return {"status": "error", "error": "forbidden", "message": err}
+    if not dry_run:
+        err = _shared_gate(uid, scope)
+        if err:
+            return {"status": "error", "error": "forbidden", "message": err}
     service = await get_memory_service(uid)
     return await service.forget(query, scope, dry_run)
 
@@ -1706,6 +1797,9 @@ async def remember_batch(
     if not clean:
         return {"status": "error", "message": "После фильтрации пустых строк не осталось фактов."}
 
+    err = _shared_gate(uid, scope, clean)
+    if err:
+        return {"status": "error", "error": "forbidden", "message": err}
     results = await asyncio.gather(
         *[service.remember(f, scope, user_explicit=True) for f in clean],
         return_exceptions=True,
@@ -1753,6 +1847,9 @@ async def update_fact(
     old_text = old_info.get("subject") or old_info.get("text", "")
     old_scope = old_info.get("scope", "private")
 
+    err = _shared_gate(uid, old_scope)
+    if err:
+        return {"status": "error", "error": "forbidden", "message": err}
     # 2. RETRACT: удаляем старый факт
     await service.forget(gcn_id, scope=old_scope, dry_run=False)
 

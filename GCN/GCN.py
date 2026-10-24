@@ -1783,6 +1783,13 @@ def _rotate_backup(gcn_state_path: Path) -> None:
             pass
 
 
+def identity_memory(service, layer: str = "shared"):
+    """Слой, где живёт цепочка ТЕКУЩЕЕ_Я.
+    'private' — личная цепочка пользователя (строится из его диалогов);
+    'shared'  — общее ядро (курируемое, пишет только администратор)."""
+    return service.private_memory if layer == "private" else service.shared_memory
+
+
 async def append_snapshot(
     service,  # GCN.memory_graph.MemoryService
     content: str,
@@ -1791,8 +1798,9 @@ async def append_snapshot(
     open_question: Optional[str] = None,
     parent_id: Optional[str] = None,
     merge_parent_ids: Optional[List[str]] = None,
+    layer: str = "shared",
 ) -> Dict[str, Any]:
-    """Добавляет новое звено в цепочку identity_core (shared-память).
+    """Добавляет новое звено в цепочку identity_core (слой: private или shared).
 
     Если parent_id не указан явно — используется текущая голова цепочки.
 
@@ -1814,7 +1822,7 @@ async def append_snapshot(
       - parent_warning — parent_id указывает на АННУЛИРОВАННОЕ звено;
         новая запись формально "продолжит мусор", обычно это не то, что нужно.
     """
-    memory = service.shared_memory
+    memory = identity_memory(service, layer)
     memory.reload_if_stale()  # см. модульный докстринг: критично не читать
                                # устаревшую голову перед append — иначе
                                # словим divergence, который сами же детектируем
@@ -1883,7 +1891,7 @@ async def append_snapshot(
         },
         author=contributor_model,
         created=datetime.now(timezone.utc),
-        scope=MemoryScope.SHARED,
+        scope=MemoryScope.PRIVATE if layer == "private" else MemoryScope.SHARED,
         confidence=1.0,
         source_type="identity_core",
     )
@@ -1923,6 +1931,7 @@ async def merge_heads(
     contributor_model: str,
     session_id: Optional[str] = None,
     open_question: Optional[str] = None,
+    layer: str = "shared",
 ) -> Dict[str, Any]:
     """Удобная обёртка: сводит ВСЕ текущие несведённые головы в одно новое
     merge-звено за один вызов, не заставляя вызывающего вручную собирать
@@ -1932,7 +1941,7 @@ async def merge_heads(
     штатное продолжение цепочки, не merge). Если голов 0 (пустая цепочка
     или все аннулированы) — создаёт корневое звено.
     """
-    memory = service.shared_memory
+    memory = identity_memory(service, layer)
     memory.reload_if_stale()
     store = memory.gcn_store
     heads = get_heads(store)
@@ -1941,6 +1950,7 @@ async def merge_heads(
         return await append_snapshot(
             service, content, contributor_model,
             session_id=session_id, open_question=open_question, parent_id=None,
+            layer=layer,
         )
 
     # Основной родитель — самая свежая голова (сохраняем то же соглашение,
@@ -1952,7 +1962,7 @@ async def merge_heads(
     result = await append_snapshot(
         service, content, contributor_model,
         session_id=session_id, open_question=open_question,
-        parent_id=primary.id, merge_parent_ids=others,
+        parent_id=primary.id, merge_parent_ids=others, layer=layer,
     )
     result["merged_heads_count"] = len(heads)
     return result
@@ -2065,7 +2075,8 @@ async def invalidate_snapshot(
         ),
     }
 
-def needs_consolidation(service, stale_after_seconds: float = 7 * 86400) -> Optional[Dict[str, Any]]:
+def needs_consolidation(service, stale_after_seconds: float = 7 * 86400,
+                        layer: str = "shared") -> Optional[Dict[str, Any]]:
     """Чистая проверка без побочных эффектов — для вызова из
     MotivationEngine на каждом tick() дёшево, без LLM. Возвращает причину,
     если есть, иначе None:
@@ -2078,7 +2089,7 @@ def needs_consolidation(service, stale_after_seconds: float = 7 * 86400) -> Opti
     состояние". Иначе свежий invalidate(old_head) тут же поднял бы ложную
     цель "ядро устарело".
     """
-    store = service.shared_memory.gcn_store
+    store = identity_memory(service, layer).gcn_store
     heads = get_heads(store)
 
     if len(heads) > 1:
