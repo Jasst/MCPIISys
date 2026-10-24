@@ -221,3 +221,33 @@ async def memory_llm_regenerate(body: ReviewBody, uid: str = Depends(require_aut
         raise HTTPException(status_code=503, detail="LM Studio недоступна")
     raw = raw or ""
     return {"proposal": core.sanitize_regen(core.extract_json(raw), detail["subject"]), "raw": raw[:1000]}
+
+
+@router.post("/llm/auto-scan")
+async def memory_llm_auto_scan(body: AutoScanBody, uid: str = Depends(require_auth)):
+    """Пакетная автокоррекция: ИИ ищет шум/дубли среди подозрительных записей и предлагает действия.
+
+    Применяются только штатные операции через /edit после подтверждения пользователем.
+    Дополнительно возвращаются эвристические предложения связей для изолированных записей
+    (без LLM) и группы текстовых повторов — их тоже видно до всякого сканирования.
+    """
+    _enabled()
+    mem = await _private_memory(uid)
+    async with mem._lock:
+        await asyncio.to_thread(mem.reload_if_stale)
+        candidates = await asyncio.to_thread(core.auto_candidates, mem.store, body.limit)
+        dups = await asyncio.to_thread(core.auto_dups, mem.store)
+        link_suggestions = await asyncio.to_thread(
+            core.auto_suggest_links, mem.store, [c["id"] for c in candidates])
+    if not candidates:
+        return {"proposals": [], "candidates": 0, "dups": dups,
+                "link_suggestions": link_suggestions,
+                "note": "подозрительных записей не найдено"}
+    try:
+        raw = await call_llm(core.auto_scan_messages(candidates), temp=0.0, max_tokens=1200)
+    except Exception:
+        raise HTTPException(status_code=503, detail="LM Studio недоступна")
+    raw = raw or ""
+    proposals = core.sanitize_auto_actions(core.extract_json(raw), candidates)
+    return {"proposals": proposals, "candidates": len(candidates),
+            "dups": dups, "link_suggestions": link_suggestions, "raw_len": len(raw)}
