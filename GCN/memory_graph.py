@@ -313,6 +313,46 @@ class CognitiveMemory:
             self.facts_by_id[fid] = fact
             for kw in fact.keywords:
                 self.keyword_index[kw].append(fid)
+
+        # Диалоговые факты (user/assistant) теперь живут в MEMORY_EVENT эпизодов.
+        # Восстанавливаем их из эпизодов; пропускаем тексты, которые уже есть
+        # из старых CLAIM (совместимость с ранее сохранёнными данными).
+        existing_dialog = {(f.text, f.type) for f in self.semantic_facts
+                           if f.type in ('user', 'assistant')}
+        for ep_obj in self.gcn_store.get_all_episodes(self.user_id):
+            if ep_obj.predicate == "user_message":
+                ep_type, ep_text, imp = 'user', ep_obj.subject, 1.0
+            elif ep_obj.predicate == "assistant_message":
+                ep_type, ep_text, imp = 'assistant', ep_obj.subject, 1.2
+            else:
+                continue
+            if (ep_text, ep_type) in existing_dialog:
+                continue
+            existing_dialog.add((ep_text, ep_type))
+            max_id += 1
+            fid = max_id
+            meta = ep_obj.object if isinstance(ep_obj.object, dict) else {}
+            fact = Fact(
+                id=fid,
+                text=ep_text,
+                type=ep_type,
+                timestamp=ep_obj.created.timestamp(),
+                keywords=list(self._extract_keywords(ep_text)),
+                importance=imp,
+                confidence=ep_obj.confidence,
+                novelty=0.0,
+                salience=meta.get("salience", DEFAULT_SALIENCE),
+                stability=DEFAULT_STABILITY,
+                plasticity=DEFAULT_PLASTICITY,
+                prediction_error=DEFAULT_PREDICTION_ERROR,
+                access_count=0,
+                last_accessed=0.0,
+                gcn_id=ep_obj.id,
+            )
+            self.semantic_facts.append(fact)
+            self.facts_by_id[fid] = fact
+            for kw in fact.keywords:
+                self.keyword_index[kw].append(fid)
         # --- НОВОЕ: заполняем противоречия из графа ---
         for f in self.semantic_facts:
             if f.gcn_id:
@@ -471,8 +511,13 @@ class CognitiveMemory:
     # ==================== ДОБАВЛЕНИЕ ФАКТОВ ====================
     def _add_fact(self, text: str, ftype: str, importance: float = 1.0,
                   confidence: float = 0.5, novelty: float = 0.0,
-                  salience: float = 0.0) -> int:
-        """Добавляет факт в GCN и кэш, возвращает целочисленный id."""
+                  salience: float = 0.0, gcn_id: Optional[str] = None) -> int:
+        """Добавляет факт в кэш и (если gcn_id не передан) в GCN.
+
+        Если gcn_id передан — локальный факт привязывается к уже существующему
+        объекту GCN (например, MEMORY_EVENT эпизода) и новый CLAIM не создаётся.
+        Это устраняет дубль одного и того же текста в графе памяти.
+        """
         fid = self._next_fact_id
         self._next_fact_id += 1
 
@@ -480,21 +525,23 @@ class CognitiveMemory:
         if self.use_embeddings:
             emb = self._get_embedding(text).tolist()
 
-        gcn_id = self.gcn_store.add_fact(
-            text=text,
-            fact_type=ftype,
-            author=self.user_id,
-            confidence=confidence,
-            importance=importance,
-            embedding=emb,
-            local_id=fid
-        )
-
-        # --- НОВОЕ: запись доступа и пересчёт confidence ---
-        self.gcn_store.record_access(gcn_id, self.user_id)
-        updated_conf = self.gcn_store.compute_confidence(gcn_id)
-        if updated_conf != confidence:
-            self.gcn_store.update(gcn_id, {"confidence": updated_conf}, self.user_id)
+        if gcn_id is None:
+            gcn_id = self.gcn_store.add_fact(
+                text=text,
+                fact_type=ftype,
+                author=self.user_id,
+                confidence=confidence,
+                importance=importance,
+                embedding=emb,
+                local_id=fid
+            )
+            # --- НОВОЕ: запись доступа и пересчёт confidence ---
+            self.gcn_store.record_access(gcn_id, self.user_id)
+            updated_conf = self.gcn_store.compute_confidence(gcn_id)
+            if updated_conf != confidence:
+                self.gcn_store.update(gcn_id, {"confidence": updated_conf}, self.user_id)
+        else:
+            updated_conf = confidence
 
         fact = Fact(
             id=fid,
@@ -724,8 +771,11 @@ class CognitiveMemory:
         user_id_gcn, ass_id_gcn = self.gcn_store.add_episode(user_msg, assistant_msg, self.user_id, salience)
 
         # Создаём локальные факты (как раньше) для совместимости
-        user_fid = self._add_fact(user_msg, 'user', importance=1.0, salience=salience)
-        assistant_fid = self._add_fact(assistant_msg, 'assistant', importance=1.2, salience=salience)
+        # Факты привязываются к MEMORY_EVENT эпизода, а не создают дубль CLAIM
+        user_fid = self._add_fact(user_msg, 'user', importance=1.0, salience=salience,
+                                  gcn_id=user_id_gcn)
+        assistant_fid = self._add_fact(assistant_msg, 'assistant', importance=1.2, salience=salience,
+                                       gcn_id=ass_id_gcn)
         self._create_synapse(user_fid, assistant_fid, weight=0.8)
         self._create_synapse(assistant_fid, user_fid, weight=0.6)
 

@@ -2539,10 +2539,13 @@ class CognitiveController:
         # ── ШАГ 3: веб-поиск ────────────────────────────────────────────
         # по цели и по проверенным гипотезам; текст рассуждений в запросы не попадает
         all_evidence = []
+        search_contexts: List[str] = []  # реальный текст страниц — источник фактов
         queries = [goal] + hypotheses[:2]
         for q in queries:
             try:
                 data = await deep_search(q, max_results=3)
+                if data.get("context"):
+                    search_contexts.append(data["context"])
                 for src in data.get("sources", []):
                     all_evidence.append({
                         "source": src.get("url", ""),
@@ -2574,8 +2577,12 @@ class CognitiveController:
         # ── ШАГ 5: записать новые факты в память (Уровень 2) ────────────
         saved_fact_ids: List[str] = []
         try:
-            if answer and len(answer) > 150:
-                facts = await self._extract_facts_llm(answer, all_evidence)
+            # Факты извлекаем из текста найденных страниц, а не из ответа модели:
+            # ответ содержит рассуждения и разметку, и без этого он сам попадал
+            # бы в память как «факты» (плюс лишний LLM-вызов на собственный текст).
+            source_text = "\n\n---\n\n".join(search_contexts)
+            if source_text and len(source_text) > 150:
+                facts = await self._extract_facts_llm(source_text, all_evidence)
                 if facts:
                     sanitized = intellect_mod.sanitize_search_facts(facts, all_evidence)
                     # Сохраняем через сервис — он сам разложит по scope
