@@ -52,6 +52,17 @@ class EdgeReviewBody(BaseModel):
 
 class AutoScanBody(BaseModel):
     limit: int = Field(default=core.AUTO_CANDIDATES, ge=5, le=60)
+    # False — только повторы и связи без LLM (бесплатно, открывается сразу)
+    use_llm: bool = False
+
+
+class SuggestLinksBody(BaseModel):
+    id: str = Field(..., max_length=128)
+    k: int = Field(default=10, ge=3, le=20)
+
+
+class EdgesBatchBody(BaseModel):
+    items: list[EdgeReviewBody] = Field(..., min_length=1, max_length=12)
 
 
 def _enabled():
@@ -204,6 +215,54 @@ async def memory_llm_check_edge(body: EdgeReviewBody, uid: str = Depends(require
     return {"proposal": core.sanitize_edge(core.extract_json(raw), body.relation), "raw": raw[:1000]}
 
 
+@router.post("/llm/check-edges")
+async def memory_llm_check_edges(body: EdgesBatchBody, uid: str = Depends(require_auth)):
+    """ИИ оценивает все связи записи одним запросом. Ничего не применяет."""
+    _enabled()
+    items = []
+    for it in body.items:
+        _check_id(it.source)
+        _check_id(it.target)
+        if not core.REL_RE.match(it.relation):
+            raise HTTPException(status_code=400, detail="некорректный тип связи")
+        items.append({"source": it.source, "relation": it.relation, "target": it.target})
+    mem = await _private_memory(uid)
+    async with mem._lock:
+        for it in items:
+            if it["source"] not in mem.store._objects or it["target"] not in mem.store._objects:
+                raise HTTPException(status_code=404, detail="запись не найдена")
+        messages = core.edges_batch_messages(mem.store, items)
+    try:
+        raw = await call_llm(messages, temp=0.0, max_tokens=120 * len(items) + 100)
+    except Exception:
+        raise HTTPException(status_code=503, detail="LM Studio недоступна")
+    raw = raw or ""
+    return {"proposals": core.sanitize_edges_batch(core.extract_json(raw), items), "raw": raw[:1000]}
+
+
+@router.post("/llm/suggest-links")
+async def memory_llm_suggest_links(body: SuggestLinksBody, uid: str = Depends(require_auth)):
+    """ИИ предлагает новые связи для записи. Кандидаты отбираются по эмбеддингам без LLM,
+    модель выбирает из них (один запрос). Ничего не применяет."""
+    _enabled()
+    _check_id(body.id)
+    mem = await _private_memory(uid)
+    async with mem._lock:
+        if body.id not in mem.store._objects:
+            raise HTTPException(status_code=404, detail="запись не найдена")
+        candidates = core.link_candidates(mem.store, body.id, k=body.k)
+        messages = core.link_suggest_messages(mem.store, body.id, candidates) if candidates else None
+    if not candidates:
+        return {"proposals": [], "candidates": 0, "llm": False}
+    try:
+        raw = await call_llm(messages, temp=0.0, max_tokens=700)
+    except Exception:
+        raise HTTPException(status_code=503, detail="LM Studio недоступна")
+    raw = raw or ""
+    return {"proposals": core.sanitize_link_suggestions(core.extract_json(raw), body.id, candidates),
+            "candidates": len(candidates), "llm": True, "raw": raw[:1000]}
+
+
 @router.post("/llm/regenerate")
 async def memory_llm_regenerate(body: ReviewBody, uid: str = Depends(require_auth)):
     """ИИ переписывает текст записи, сохраняя смысл. Ничего не применяет."""
@@ -241,13 +300,16 @@ async def memory_llm_auto_scan(body: AutoScanBody, uid: str = Depends(require_au
             core.auto_suggest_links, mem.store, [c["id"] for c in candidates])
     if not candidates:
         return {"proposals": [], "candidates": 0, "dups": dups,
-                "link_suggestions": link_suggestions,
+                "link_suggestions": link_suggestions, "llm": False,
                 "note": "подозрительных записей не найдено"}
+    if not body.use_llm:
+        return {"proposals": [], "candidates": len(candidates), "dups": dups,
+                "link_suggestions": link_suggestions, "llm": False}
     try:
         raw = await call_llm(core.auto_scan_messages(candidates), temp=0.0, max_tokens=1200)
     except Exception:
         raise HTTPException(status_code=503, detail="LM Studio недоступна")
     raw = raw or ""
     proposals = core.sanitize_auto_actions(core.extract_json(raw), candidates)
-    return {"proposals": proposals, "candidates": len(candidates),
+    return {"proposals": proposals, "candidates": len(candidates), "llm": True,
             "dups": dups, "link_suggestions": link_suggestions, "raw_len": len(raw)}

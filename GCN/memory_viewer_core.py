@@ -560,14 +560,35 @@ def impact(store, oid):
     }
 
 
+def _neighbour_subjects(store, oid, limit=3):
+    """До limit соседних записей (для контекста модели): тексты, без служебных id."""
+    out = []
+    for src, lst in store._graph._edges.items():
+        for _rel, tgt in lst:
+            if src == oid and tgt in store._objects:
+                out.append(tgt)
+            elif tgt == oid and src in store._objects:
+                out.append(src)
+            if len(out) >= limit:
+                break
+        if len(out) >= limit:
+            break
+    return [str(store._objects[i].subject or "")[:120] for i in out]
+
+
+def _ctx(store, oid):
+    subs = _neighbour_subjects(store, oid)
+    return (" (связи: " + "; ".join(f"«{s}»" for s in subs) + ")") if subs else ""
+
+
 def edge_review_messages(store, source, relation, target):
     a = str(store._objects[source].subject or "")[:500]
     b = str(store._objects[target].subject or "")[:500]
     prompt = (
         "Проверь одну связь в долговременной памяти ассистента.\n"
-        f"Запись A: «{a}»\n"
+        f"Запись A: «{a}»{_ctx(store, source)}\n"
         f"Связь: {relation}\n"
-        f"Запись B: «{b}»\n\n"
+        f"Запись B: «{b}»{_ctx(store, target)}\n\n"
         "Смысл связей: GROUNDS_IN — A опирается на B; CAUSES — A вызывает B; "
         "ENABLES — A делает возможным B; REQUIRES — A требует B; PREVENTS — A мешает B; "
         "PART_OF — A часть B; RELATED_TO — связаны по смыслу; DUPLICATE_OF — A и B об одном и том же; "
@@ -599,6 +620,142 @@ def sanitize_edge(p, relation):
         else:
             v = "unclear"
     return {"verdict": v, "new_relation": new, "reason": str(p.get("reason") or "")[:400]}
+
+
+EDGE_MEANING = (
+    "Смысл связей: GROUNDS_IN — A опирается на B; CAUSES — A вызывает B; "
+    "ENABLES — A делает возможным B; REQUIRES — A требует B; PREVENTS — A мешает B; "
+    "PART_OF — A часть B; RELATED_TO — связаны по смыслу; DUPLICATE_OF — A и B об одном и том же; "
+    "CONTRADICTS — A и B спорят."
+)
+
+
+def edges_batch_messages(store, items):
+    """Один запрос на несколько связей: модель оценивает каждую по номеру (index)."""
+    lines = []
+    for i, it in enumerate(items):
+        a = str(store._objects[it["source"]].subject or "")[:300]
+        b = str(store._objects[it["target"]].subject or "")[:300]
+        lines.append(f"{i}. A: «{a}»{_ctx(store, it['source'])} —{it['relation']}→ B: «{b}»{_ctx(store, it['target'])}")
+    prompt = (
+        "Проверь связи в долговременной памяти ассистента. Каждая связь — по номеру.\n"
+        + "\n".join(lines) + "\n\n" + EDGE_MEANING + "\n"
+        "Для каждой реши: связь верна (keep), её нужно удалить (remove) или нужен другой тип (change). "
+        "Если change, выбери new_relation из списка: " + ", ".join(RELATIONS_ALLOWED) + ".\n\n"
+        "Ответь ТОЛЬКО JSON без пояснений и без markdown:\n"
+        '{"edges": [{"index": 0, "verdict": "keep|remove|change", "new_relation": null, "reason": "кратко"}]}'
+    )
+    return [
+        {"role": "system", "content": "Ты аудитор памяти. Отвечаешь строго JSON."},
+        {"role": "user", "content": prompt},
+    ]
+
+
+def sanitize_edges_batch(p, items):
+    """Список вердиктов по порядку items; ответ без нужного индекса — unclear."""
+    if not isinstance(p, dict):
+        p = {}
+    raw = p.get("edges")
+    if not isinstance(raw, list):
+        raw = []
+    out = [{"verdict": "unclear", "new_relation": None, "reason": ""} for _ in items]
+    for e in raw[: len(items) * 2]:
+        if not isinstance(e, dict):
+            continue
+        idx = e.get("index")
+        if not isinstance(idx, int) or isinstance(idx, bool) or not 0 <= idx < len(items):
+            continue
+        out[idx] = sanitize_edge(e, items[idx]["relation"])
+    return out
+
+
+LINK_SUGGEST_RELATIONS = tuple(r for r in RELATIONS_ALLOWED if r not in CONTRADICT_RELATIONS)
+
+
+def link_candidates(store, node_id, k=10):
+    """Ближайшие по смыслу записи, которые ещё не связаны с node_id. Без LLM."""
+    emb = store._embedding_index
+    objs = store._objects
+    if node_id not in objs or node_id not in emb:
+        return []
+    linked = set()
+    for src, lst in store._graph._edges.items():
+        for _rel, tgt in lst:
+            if src == node_id:
+                linked.add(tgt)
+            elif tgt == node_id:
+                linked.add(src)
+    dim = len(emb[node_id])
+    ids = [i for i in objs if i in emb and i != node_id and i not in linked and len(emb[i]) == dim]
+    if not ids:
+        return []
+    mat = np.asarray([emb[i] for i in ids], dtype=np.float32)
+    norms = np.linalg.norm(mat, axis=1)
+    norms[norms == 0.0] = 1.0
+    mat = mat / norms[:, None]
+    v = np.asarray(emb[node_id], dtype=np.float32)
+    vn = float(np.linalg.norm(v))
+    if vn == 0.0:
+        return []
+    sims = mat @ (v / vn)
+    order = np.argsort(-sims)[:k]
+    return [{"id": ids[j], "subject": str(objs[ids[j]].subject or "")[:200],
+             "similarity": round(float(sims[j]), 3)} for j in order]
+
+
+def link_suggest_messages(store, node_id, candidates):
+    a = str(store._objects[node_id].subject or "")[:400]
+    lines = [f"- id={c['id']} | «{c['subject'][:200]}»" for c in candidates]
+    prompt = (
+        "Запись A из долговременной памяти ассистента:\n"
+        f"«{a}»{_ctx(store, node_id)}\n\n"
+        "Кандидаты (можно использовать только их id):\n" + "\n".join(lines) + "\n\n"
+        + EDGE_MEANING + "\n"
+        "Предложи связи между A и кандидатами, только если связь действительно верна по смыслу. "
+        "direction: out — A → кандидат, in — кандидат → A. CONTRADICTS не предлагай. "
+        "Пустой список — нормальный ответ.\n"
+        "relation — из списка: " + ", ".join(LINK_SUGGEST_RELATIONS) + ".\n"
+        "Ответь ТОЛЬКО JSON без пояснений и без markdown:\n"
+        '{"links": [{"id": "...", "direction": "out|in", "relation": "...", "reason": "кратко"}]}'
+    )
+    return [
+        {"role": "system", "content": "Ты аудитор памяти. Отвечаешь строго JSON."},
+        {"role": "user", "content": prompt},
+    ]
+
+
+def sanitize_link_suggestions(p, node_id, candidates):
+    """Белый список: только id из кандидатов, известные направления и типы связей."""
+    if not isinstance(p, dict):
+        p = {}
+    raw = p.get("links")
+    if not isinstance(raw, list):
+        raw = []
+    valid = {c["id"]: c for c in candidates}
+    out, seen = [], set()
+    for x in raw[:20]:
+        if not isinstance(x, dict):
+            continue
+        cid = x.get("id")
+        if cid not in valid or cid == node_id:
+            continue
+        direction = x.get("direction")
+        if direction not in ("out", "in"):
+            continue
+        rel = str(x.get("relation") or "").strip().upper()
+        if rel not in LINK_SUGGEST_RELATIONS:
+            continue
+        key = (cid, direction, rel)
+        if key in seen:
+            continue
+        seen.add(key)
+        source, target = (node_id, cid) if direction == "out" else (cid, node_id)
+        out.append({"source": source, "target": target, "relation": rel, "direction": direction,
+                    "candidate": cid, "subject": valid[cid]["subject"],
+                    "reason": str(x.get("reason") or "")[:300], "weight": 0.7})
+        if len(out) >= 8:
+            break
+    return out
 
 
 def regenerate_messages(detail):
@@ -750,38 +907,43 @@ def auto_dups(store):
 def auto_suggest_links(store, candidates_ids, threshold=0.82, max_links=15):
     """Эвристические предложения связей для изолированных записей по косинусу эмбеддингов.
 
-    Работает без LLM; каждое предложение всё равно применяется только после подтверждения
-    пользователем. Возвращает [{source, target, relation:"RELATED_TO", weight, similarity}].
+    Без LLM. Матрица эмбеддингов нормируется один раз, а для каждой изолированной записи
+    сходство считается одним матричным умножением (раньше — перебор всех пар в python).
+    Каждое предложение применяется только после подтверждения пользователем.
+    Возвращает [{source, target, relation:"RELATED_TO", weight, similarity}].
     """
     emb = store._embedding_index
     objs = store._objects
-    linked = set()
-    for src, lst in store._graph._edges.items():
-        for _rel, tgt in lst:
-            linked.add(frozenset((src, tgt)))
-    cand = [i for i in candidates_ids if i in objs and i in emb]
-    out = []
-    all_ids = list(objs.keys())
+    if not emb:
+        return []
+    ids = [i for i in objs if i in emb]
+    if len(ids) < 2:
+        return []
+    dim = len(emb[ids[0]])
+    ids = [i for i in ids if len(emb[i]) == dim]
+    pos = {i: k for k, i in enumerate(ids)}
+    mat = np.asarray([emb[i] for i in ids], dtype=np.float32)
+    norms = np.linalg.norm(mat, axis=1)
+    norms[norms == 0.0] = 1.0
+    mat = mat / norms[:, None]
 
     def has_edges(node):
         return bool(store._graph.get_neighbors(node)) or bool(store._graph.get_incoming(node))
 
-    for cid in cand:
-        if has_edges(cid):
+    out = []
+    for cid in candidates_ids:
+        if cid not in pos or has_edges(cid):
             continue  # связываем только полностью изолированные записи
-        best, best_sim = None, threshold
-        for other in all_ids:
-            if other == cid or other not in emb or frozenset((cid, other)) in linked:
-                continue
-            sim = _cosine(emb[cid], emb[other])
-            if sim > best_sim:
-                best, best_sim = other, sim
-        if best:
-            out.append({"source": cid, "target": best, "relation": "RELATED_TO",
+        k = pos[cid]
+        sims = mat @ mat[k]
+        sims[k] = -1.0  # сама с собой не связываем
+        best = int(np.argmax(sims))
+        best_sim = float(sims[best])
+        if best_sim > threshold:
+            out.append({"source": cid, "target": ids[best], "relation": "RELATED_TO",
                         "weight": round(best_sim, 3), "similarity": round(best_sim, 3)})
-            linked.add(frozenset((cid, best)))
-        if len(out) >= max_links:
-            break
+            if len(out) >= max_links:
+                break
     return out
 
 

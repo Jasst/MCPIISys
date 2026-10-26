@@ -119,6 +119,9 @@ a.back:hover{text-decoration:underline}
 .prop .mono{margin:3px 0;word-break:normal}
 .old{color:var(--text-muted);text-decoration:line-through;font-size:12px;margin:2px 0}
 .new{color:var(--text-primary);font-size:13px;margin:2px 0}
+.explain{font-size:12px;line-height:1.5;background:var(--bg-tertiary);border:1px solid var(--border-color);
+  border-left:3px solid var(--accent-color);border-radius:var(--radius-md);padding:8px 10px;margin:4px 0 8px}
+.explain .mono{margin:2px 0;word-break:normal}
 /* на десктопе экран занимает ровно высоту окна: граф не уезжает вниз из-за длинной панели записи */
 @media (min-width:901px){
   body{height:100vh;height:100dvh;display:flex;flex-direction:column;overflow:hidden}
@@ -197,7 +200,7 @@ a.back:hover{text-decoration:underline}
   </section>
   <aside id="right">
     <div id="sheet-head"></div>
-    <div id="detail"><div class="mono">Выбери узел на графе или в списке хабов.</div></div>
+    <div id="detail"><div class="mono">Выбери запись или связь (клик по линии) на графе.</div></div>
   </aside>
 </div>
 
@@ -223,6 +226,7 @@ const S = {
   pointers: new Map(), pinch: null, tap: null,
   redraw: true, cw: 0, ch: 0,
   insights: [], highlight: new Set(),
+  selEdge: null,   // выбранная связь: {s, r, t}
 };
 
 /* ---------- тема — как в основном чате (тёмная по умолчанию, светлая по классу) ---------- */
@@ -338,7 +342,10 @@ async function refresh(force) {
   fillTypeFilter(snap.metrics.by_type);
   applyFilter();
   renderMetrics(snap.metrics, snap.insights);
-  if (S.selected && S.byId.has(S.selected)) loadDetail(S.selected);
+  if (S.selEdge) {
+    if (edgeExists(S.selEdge)) renderEdgeDetail();
+    else { S.selEdge = null; clearDetail(); }
+  } else if (S.selected && S.byId.has(S.selected)) loadDetail(S.selected);
   else if (S.selected) { S.selected = null; clearDetail(); }
   S.alpha = Math.max(S.alpha, 0.3);
   S.redraw = true;
@@ -463,58 +470,242 @@ function toScreen(p) {
   return [S.cw / 2 + S.view.x + p.x * S.view.k, S.ch / 2 + S.view.y + p.y * S.view.k];
 }
 
+/* ---------- оформление: нейроны и синапсы ---------- */
+const DRAW = {danger: "#e5544f", focus: "#b6bec9", amber: "#f0b35a"};
+
+function hexRgb(hex) {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || "");
+  return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [140, 150, 165];
+}
+function rgba(hex, a) {
+  const [r, g, b] = hexRgb(hex);
+  return `rgba(${r},${g},${b},${a})`;
+}
+/* светлее на долю f (к белому) — даёт объём: блик на «теле» нейрона */
+function tint(hex, f) {
+  const [r, g, b] = hexRgb(hex);
+  const m = (c) => Math.round(c + (255 - c) * f);
+  return `rgb(${m(r)},${m(g)},${m(b)})`;
+}
+function nodeType(id) {
+  const n = S.byId.get(id);
+  return n ? n.type : null;
+}
+function animating() { return !!S.selEdge || contradicting.size > 0; }
+
+function roundRectPath(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+/* подпись в «пилюле» — читается на любом фоне */
+function pill(text, x, y, strong) {
+  ctx.save();
+  ctx.font = (strong ? "600 12px" : "500 11px") + " Inter, system-ui, sans-serif";
+  const w = ctx.measureText(text).width + 12;
+  ctx.fillStyle = S.theme === "light" ? "rgba(255,255,255,0.9)" : "rgba(14,16,22,0.8)";
+  roundRectPath(x - 6, y - 13, w, 19, 6);
+  ctx.fill();
+  ctx.fillStyle = S.labelColor;
+  ctx.fillText(text, x, y);
+  ctx.restore();
+}
+
+function drawBackdrop(w, h) {
+  const light = S.theme === "light";
+  const g = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.15, w / 2, h / 2, Math.max(w, h) * 0.75);
+  g.addColorStop(0, light ? "rgba(255,255,255,0)" : "rgba(110,130,170,0.07)");
+  g.addColorStop(1, light ? "rgba(60,70,90,0.06)" : "rgba(0,0,0,0.35)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, w, h);
+}
+
+/* синапс: изогнутая линия; цвет — тип связи, либо градиент от цвета одного конца к другому */
+function drawEdge(e, x1, y1, x2, y2, t, k) {
+  const sel = isSelEdge(e);
+  const involved = S.selected && (e.s === S.selected || e.t === S.selected);
+  const flow = sel || e.r.startsWith("CONTRADICT");       // бегущий пунктир для противоречий и выбранной связи
+  const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy) || 1;
+  // лёгкий изгиб; знак от порядка id, чтобы встречные связи не сливались в одну линию
+  const bend = Math.min(40, len * 0.10) * (e.s < e.t ? 1 : -1);
+  const cx = (x1 + x2) / 2 - (dy / len) * bend, cy = (y1 + y2) / 2 + (dx / len) * bend;
+  const dimmed = S.selected ? (involved ? 1 : 0.12) : S.selEdge ? (sel ? 1 : 0.18) : 1;
+  const base = 0.35 + Math.min(1, e.w) * 0.35;
+  const relCol = REL_COLORS[e.r];
+  let stroke;
+  if (relCol) {
+    stroke = rgba(relCol, 0.95);
+  } else {
+    const gr = ctx.createLinearGradient(x1, y1, x2, y2);
+    gr.addColorStop(0, rgba(TYPE_COLORS[nodeType(e.s)] || S.edgeColor, 0.9));
+    gr.addColorStop(1, rgba(TYPE_COLORS[nodeType(e.t)] || S.edgeColor, 0.9));
+    stroke = gr;
+  }
+
+  ctx.save();
+  ctx.globalAlpha = base * dimmed;
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = sel ? 3.4 : involved ? 2.2 : 0.9 + Math.min(1.6, e.w);
+  ctx.lineCap = "round";
+  if (sel) { ctx.shadowColor = rgba(relCol || "#ffffff", 0.9); ctx.shadowBlur = 14; }
+  ctx.setLineDash(flow ? [6, 5] : []);
+  ctx.lineDashOffset = flow ? -((t * 18) % 11) : 0;
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.quadraticCurveTo(cx, cy, x2, y2);
+  ctx.stroke();
+  ctx.restore();
+
+  // стрелка направления у конца — при приближении или для выбранных связей
+  if (k > 1.1 || sel || involved) {
+    const tx = x2 - cx, ty = y2 - cy, tl = Math.hypot(tx, ty) || 1;
+    const ux = tx / tl, uy = ty / tl;
+    const tn = S.byId.get(e.t);
+    const tipR = 4 + (tn ? nodeRadius(tn) : 6) * Math.min(1.6, Math.max(0.7, k));
+    const ax = x2 - ux * tipR, ay = y2 - uy * tipR;
+    ctx.save();
+    ctx.globalAlpha = base * dimmed;
+    ctx.fillStyle = relCol ? rgba(relCol, 1) : stroke;
+    ctx.beginPath();
+    ctx.moveTo(ax, ay);
+    ctx.lineTo(ax - ux * 8 - uy * 4, ay - uy * 8 + ux * 4);
+    ctx.lineTo(ax - ux * 8 + uy * 4, ay - uy * 8 - ux * 4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // у выбранной связи — подпись типа в середине дуги
+  if (sel) {
+    const mx = 0.25 * x1 + 0.5 * cx + 0.25 * x2, my = 0.25 * y1 + 0.5 * cy + 0.25 * y2;
+    pill(e.r, mx + 6, my - 4, true);
+  }
+}
+
+/* нейрон: объёмное тело, ореол по доверию, кольцо доверия; возвращает радиус */
+function drawNode(id, n, p, k, t, dimOn) {
+  const [x, y] = toScreen(p);
+  const rad = nodeRadius(n) * Math.min(1.6, Math.max(0.7, k));
+  const col = TYPE_COLORS[n.type] || S.nodeFill;
+  const conf = Math.max(0, Math.min(1, n.confidence));
+  const isSel = id === S.selected;
+  const hub = S.degreeRank.has(id);
+  const a = dimOn ? 0.16 : 0.45 + 0.55 * conf;
+
+  // тело с бликом
+  ctx.save();
+  ctx.globalAlpha = a;
+  ctx.shadowColor = rgba(col, isSel ? 0.9 : 0.25 + 0.45 * conf);
+  ctx.shadowBlur = dimOn ? 0 : isSel ? 22 : hub ? 14 : 3 + 9 * conf;
+  const g = ctx.createRadialGradient(x - rad * 0.35, y - rad * 0.4, rad * 0.1, x, y, rad);
+  g.addColorStop(0, tint(col, 0.55));
+  g.addColorStop(0.55, rgba(col, 1));
+  g.addColorStop(1, rgba(col, 0.7));
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(x, y, rad, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // кольцо доверия: дуга пропорциональна confidence
+  if (!dimOn) {
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.lineCap = "round";
+    ctx.lineWidth = 1.6;
+    ctx.strokeStyle = rgba(col, 0.16);
+    ctx.beginPath();
+    ctx.arc(x, y, rad + 3.5, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.strokeStyle = rgba(col, 0.95);
+    ctx.beginPath();
+    ctx.arc(x, y, rad + 3.5, -Math.PI / 2, -Math.PI / 2 + conf * Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // противоречие: пульсирующее пунктирное кольцо
+  if (hasContradiction(id)) {
+    const pulse = 1.5 * (0.5 + 0.5 * Math.sin(t * 4));
+    ctx.save();
+    ctx.globalAlpha = dimOn ? 0.2 : 0.9;
+    ctx.strokeStyle = DRAW.danger;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([3, 3]);
+    ctx.lineDashOffset = -((t * 10) % 6);
+    ctx.beginPath();
+    ctx.arc(x, y, rad + 7 + pulse, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  if (S.highlight.has(id) && !isSel) {
+    ctx.save();
+    ctx.strokeStyle = DRAW.amber;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.arc(x, y, rad + 11, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  if (isSel) {
+    ctx.save();
+    ctx.shadowColor = "rgba(255,255,255,0.5)";
+    ctx.shadowBlur = 12;
+    ctx.strokeStyle = DRAW.focus;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(x, y, rad + 7, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+  return rad;
+}
+
 function draw() {
   const r = cv.getBoundingClientRect();
   S.cw = r.width; S.ch = r.height;
   ctx.clearRect(0, 0, r.width, r.height);
   if (!S.snap) return;
+  DRAW.danger = cssVar("--danger-color", "#e5544f");
+  DRAW.focus = cssVar("--border-focus", "#b6bec9");
+  const t = performance.now() / 1000;
   const k = S.view.k;
-  // рёбра
+  drawBackdrop(r.width, r.height);
+
+  // синапсы под нейронами
   for (const e of S.visibleEdges) {
     const p = S.pos.get(e.s), q = S.pos.get(e.t);
     if (!p || !q) continue;
     const [x1, y1] = toScreen(p), [x2, y2] = toScreen(q);
-    const involved = S.selected && (e.s === S.selected || e.t === S.selected);
-    ctx.beginPath();
-    ctx.strokeStyle = REL_COLORS[e.r] || S.edgeColor;
-    ctx.globalAlpha = S.selected ? (involved ? 0.95 : 0.12) : 0.5;
-    ctx.lineWidth = (involved ? 2 : 1) + Math.min(2, e.w);
-    ctx.setLineDash(e.r.startsWith("CONTRADICT") ? [5, 4] : []);
-    ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    drawEdge(e, x1, y1, x2, y2, t, k);
   }
-  ctx.setLineDash([]);
-  // узлы
+
+  // нейроны и подписи
   const showLabels = k > 1.3;
   for (const id of S.visible) {
     const n = S.byId.get(id), p = S.pos.get(id);
     if (!n || !p) continue;
+    const dimOn = S.selected ? (id !== S.selected && !isNeighbour(id))
+      : S.selEdge ? !(id === S.selEdge.s || id === S.selEdge.t) : false;
+    const rad = drawNode(id, n, p, k, t, dimOn);
+    const label = n.subject.length > 40 ? n.subject.slice(0, 38) + "…" : n.subject;
     const [x, y] = toScreen(p);
-    const rad = nodeRadius(n) * Math.min(1.6, Math.max(0.7, k));
-    const dim = S.selected && id !== S.selected && !isNeighbour(id);
-    ctx.globalAlpha = dim ? 0.18 : (0.45 + 0.55 * Math.min(1, n.confidence)); // яркость = доверие
-    ctx.beginPath();
-    ctx.fillStyle = TYPE_COLORS[n.type] || S.nodeFill;
-    ctx.arc(x, y, rad, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = 1;
-    if (hasContradiction(id)) {
-      ctx.lineWidth = 2; ctx.strokeStyle = cssVar("--danger-color", "#e5544f"); ctx.stroke();
-    }
-    if (S.highlight.has(id) && id !== S.selected) {
-      ctx.beginPath(); ctx.arc(x, y, rad + 3, 0, Math.PI * 2);
-      ctx.setLineDash([3, 3]); ctx.lineWidth = 1.5; ctx.strokeStyle = "#f0b35a";
-      ctx.stroke(); ctx.setLineDash([]);
-    }
-    if (id === S.selected) {
-      ctx.beginPath(); ctx.arc(x, y, rad + 5, 0, Math.PI * 2);
-      ctx.lineWidth = 2; ctx.strokeStyle = cssVar("--border-focus", "#b6bec9"); ctx.stroke();
-    }
-    if (showLabels || id === S.selected || id === S.hover || S.degreeRank.has(id)) {
-      ctx.globalAlpha = dim ? 0.25 : 0.95;
+    if (id === S.selected || id === S.hover || S.highlight.has(id)) {
+      pill(label, x + rad + 6, y + 4, true);
+    } else if ((showLabels || S.degreeRank.has(id)) && !dimOn) {
+      ctx.save();
+      ctx.globalAlpha = 0.95;
       ctx.fillStyle = S.labelColor;
       ctx.font = "11px Inter, system-ui, sans-serif";
-      const label = n.subject.length > 40 ? n.subject.slice(0, 38) + "…" : n.subject;
-      ctx.fillText(label, x + rad + 4, y + 3);
+      ctx.fillText(label, x + rad + 6, y + 4);
+      ctx.restore();
     }
   }
   ctx.globalAlpha = 1;
@@ -556,10 +747,31 @@ function hitNode(sx, sy) {
   return best;
 }
 
+function isSelEdge(e) {
+  return !!S.selEdge && S.selEdge.s === e.s && S.selEdge.r === e.r && S.selEdge.t === e.t;
+}
+
+/* клик по линии связи: ближайшая связь в радиусе 6 px от точки */
+function hitEdge(sx, sy) {
+  let best = null, bestD = 6;
+  for (const e of S.visibleEdges) {
+    const p = S.pos.get(e.s), q = S.pos.get(e.t);
+    if (!p || !q) continue;
+    const [x1, y1] = toScreen(p), [x2, y2] = toScreen(q);
+    const dx = x2 - x1, dy = y2 - y1;
+    const len2 = dx * dx + dy * dy || 1;
+    const t = Math.max(0, Math.min(1, ((sx - x1) * dx + (sy - y1) * dy) / len2));
+    const d = Math.hypot(sx - (x1 + t * dx), sy - (y1 + t * dy));
+    if (d < bestD) { bestD = d; best = e; }
+  }
+  return best;
+}
+
 function loop() {
   const hot = S.layout === "graph" && S.alpha >= 0.003;   // раскладка ещё «горячая»
   if (hot) tick();
-  if (hot || S.redraw) { S.redraw = false; draw(); }
+  const anim = animating();   // пульсация и бегущий пунктир требуют кадров
+  if (hot || S.redraw || anim) { S.redraw = false; draw(); }
   requestAnimationFrame(loop);
 }
 
@@ -619,7 +831,9 @@ cv.addEventListener("pointermove", (ev) => {
   if (!S.drag) {
     if (ev.pointerType !== "touch") {
       const hid = hitNode(sx, sy);
-      if (hid !== S.hover) { S.hover = hid; cv.style.cursor = hid ? "pointer" : "grab"; }
+      const onEdge = !hid && !!hitEdge(sx, sy);
+      if (hid !== S.hover) S.hover = hid;
+      cv.style.cursor = hid || onEdge ? "pointer" : "grab";
     }
     return;
   }
@@ -643,7 +857,9 @@ cv.addEventListener("pointerup", (ev) => {
   if (S.drag && S.drag.type === "node") {
     if (!S.drag.moved) selectNode(S.drag.id);
   } else if (S.drag && S.drag.type === "pan" && !S.drag.moved) {
-    selectNode(null);
+    const [px, py] = localPos(ev);
+    const edge = hitEdge(px, py);
+    if (edge) selectEdge(edge); else selectNode(null);
   }
   S.drag = null;
   cv.classList.remove("grabbing");
@@ -717,6 +933,7 @@ function renderSheetHead() {
 
 function selectNode(id) {
   S.selected = id;
+  S.selEdge = null;
   rebuildNeighbours();
   if (id) {
     loadDetail(id);
@@ -726,7 +943,7 @@ function selectNode(id) {
 
 function clearDetail() {
   $("#detail").innerHTML = "";
-  $("#detail").append(h("div", {class: "mono"}, "Выбери запись на графе или в списке советов."));
+  $("#detail").append(h("div", {class: "mono"}, "Выбери запись или связь (клик по линии) на графе."));
 }
 
 async function loadDetail(id) {
@@ -830,12 +1047,17 @@ function renderDetail(d) {
 
   // 3. ИИ: только предложения
   const aiSlot = h("div", {});
+  const linkSlot = h("div", {});
   box.append(h("h3", {}, "ИИ-помощь"),
     h("div", {class: "hint"}, "ИИ только предлагает изменения. Без твоего нажатия ничего не меняется."),
     h("div", {class: "row"},
       h("button", {onclick: () => llmReview(d.id, aiSlot)}, "Проверить запись"),
       h("button", {disabled: ro ? "" : null, onclick: () => llmRegenerate(d, aiSlot)}, "Переписать текст")),
-    aiSlot);
+    aiSlot,
+    h("div", {class: "row"},
+      h("button", {disabled: ro ? "" : null, title: "ИИ выберет подходящие связи среди похожих записей",
+        onclick: () => llmSuggestLinks(d.id, linkSlot)}, "Связать с помощью ИИ")),
+    linkSlot);
 
   // 4. связи
   const total = d.out_edges.length + d.in_edges.length;
@@ -846,7 +1068,7 @@ function renderDetail(d) {
     box.append(h("div", {class: "hint"}, "Читается как фраза: «эта запись — тип — другая запись»."));
     const allSlot = h("div", {});
     box.append(h("div", {class: "row"},
-      h("button", {class: "small", onclick: () => llmCheckAll(d, allSlot)}, "ИИ проверит все связи")), allSlot);
+      h("button", {class: "small", onclick: () => llmCheckAll(d, allSlot)}, "ИИ проверит все связи (1 запрос)")), allSlot);
   }
   for (const e of d.out_edges) box.append(edgeBlock(d, e.r, e.t, e.subject, true));
   for (const e of d.in_edges) box.append(edgeBlock(d, e.r, e.s, e.subject, false));
@@ -924,7 +1146,7 @@ async function edit(op, args) {
   try {
     const res = await api(API + "/edit", {op, args});
     log(`${op}: готово`, "ok");
-    await refresh(true);
+    await refresh(false);
     if (op === "retract") { S.selected = null; clearDetail(); closeSheet(); }
     else if (op === "create" && res.id) selectNode(res.id);
     else if (S.selected) loadDetail(S.selected);
@@ -968,6 +1190,69 @@ function startCreate() {
     err);
   if (TOUCH_MODE()) openSheet();
   setTimeout(() => subj.focus(), 50);
+}
+
+/* ---------- выбранная связь (клик по линии на графе) ---------- */
+function edgeExists(e) {
+  return !!(S.snap && S.snap.edges.some((x) => x.s === e.s && x.r === e.r && x.t === e.t));
+}
+
+function selectEdge(e) {
+  S.selEdge = {s: e.s, r: e.r, t: e.t};
+  S.selected = null;
+  rebuildNeighbours();
+  renderEdgeDetail();
+  if (TOUCH_MODE()) openSheet();
+  S.redraw = true;
+}
+
+function renderEdgeDetail() {
+  const e = S.selEdge;
+  const ro = S.readonly;
+  const a = S.byId.get(e.s), b = S.byId.get(e.t);
+  const box = $("#detail");
+  box.innerHTML = "";
+  renderSheetHead();
+  const rel = e.r;
+  const slot = h("div", {});
+  const linkSlot = h("div", {});
+  const newRel = h("input", {value: rel, size: 14, list: "rel-list", disabled: ro ? "" : null,
+    title: "новый тип связи"});
+  box.append(
+    h("h3", {}, "Выбранная связь"),
+    h("div", {class: "explain"},
+      h("div", {}, `«${short(a ? a.subject : e.s, 90)}»`),
+      h("div", {class: "hint"}, `${REL_RU[rel] || rel} · тип ${rel}: ${REL_HELP[rel] || "свой тип"}`),
+      h("div", {}, `«${short(b ? b.subject : e.t, 90)}»`)),
+    h("div", {class: "row"},
+      h("button", {class: "small", onclick: () => selectNode(e.s)}, "открыть начало"),
+      h("button", {class: "small", onclick: () => selectNode(e.t)}, "открыть конец")),
+    h("h3", {}, "Улучшить связь"),
+    h("div", {class: "hint"}, "ИИ только предлагает. «ИИ проверит» — один запрос на эту связь, ничего не меняет."),
+    h("div", {class: "row"},
+      h("button", {class: "small", onclick: () => llmCheckEdge(e.s, rel, e.t, slot)}, "ИИ проверит эту связь"),
+      h("button", {class: "small danger", disabled: ro ? "" : null, onclick: async () => {
+        const r = await edit("unlink", {source: e.s, target: e.t, relation: rel});
+        if (r) { S.selEdge = null; clearDetail(); }
+      }}, "удалить связь")),
+    h("div", {class: "row"}, newRel,
+      h("button", {class: "small", disabled: ro ? "" : null, onclick: async () => {
+        const nr = newRel.value.trim().toUpperCase();
+        if (!nr || nr === rel) return;
+        const r = await edit("edge_replace", {source: e.s, target: e.t, old_relation: rel, new_relation: nr});
+        if (r) { S.selEdge = {s: e.s, r: nr, t: e.t}; renderEdgeDetail(); }
+      }}, "сменить тип")),
+    h("h3", {}, "Новые связи с ИИ"),
+    h("div", {class: "hint"}, "ИИ предложит связи для одного из концов этой связи. Каждую можно принять или отклонить."),
+    h("div", {class: "row"},
+      h("button", {class: "small", disabled: ro ? "" : null, onclick: () => llmSuggestLinks(e.s, linkSlot)},
+        "связать «начало» с ИИ"),
+      h("button", {class: "small", disabled: ro ? "" : null, onclick: () => llmSuggestLinks(e.t, linkSlot)},
+        "связать «конец» с ИИ")),
+    linkSlot,
+    h("datalist", {id: "rel-list"}, Object.keys(REL_HELP).map((x) => h("option", {value: x}))),
+    slot);
+  S.redraw = true;
 }
 
 /* ---------- предложения ИИ ---------- */
@@ -1028,6 +1313,36 @@ async function llmRegenerate(d, slot) {
   }
 }
 
+/* ---------- новые связи с помощью ИИ (для записи или одного конца связи) ---------- */
+async function llmSuggestLinks(nodeId, slot) {
+  slot.innerHTML = "";
+  slot.append(h("div", {class: "mono"}, "ищу похожие записи и спрашиваю ИИ…"));
+  try {
+    const res = await api(API + "/llm/suggest-links", {id: nodeId, k: 10});
+    slot.innerHTML = "";
+    if (!res.candidates) {
+      slot.append(h("div", {class: "hint"}, "Нет кандидатов: похожие записи уже связаны с этой или их нет."));
+      return;
+    }
+    const props = res.proposals || [];
+    if (!props.length) {
+      slot.append(h("div", {class: "hint"}, `ИИ просмотрел ${res.candidates} кандидатов и не нашёл верных связей.`));
+      return;
+    }
+    for (const p of props) {
+      const me = `«${short(autoSubject(nodeId), 60)}»`;
+      const other = `«${short(p.subject, 60)}»`;
+      const phrase = p.direction === "out" ? `${me} —${p.relation}→ ${other}` : `${other} —${p.relation}→ ${me}`;
+      const lines = [h("strong", {}, phrase), `причина: ${p.reason || "(без пояснения)"}`];
+      slot.append(proposalCard(lines, [{label: "связать", primary: true, run: () =>
+        edit("link", {source: p.source, target: p.target, relation: p.relation, weight: p.weight})}]));
+    }
+  } catch (e) {
+    slot.innerHTML = "";
+    slot.append(h("div", {class: "verdict-bad"}, "подбор связей не удался: " + e.message));
+  }
+}
+
 function edgeProposalCard(src, rel, tgt, p) {
   const lines = [`вердикт: ${EDGE_VERDICT_RU[p.verdict] || p.verdict}`, p.reason || "(без пояснения)"];
   const actions = [];
@@ -1058,25 +1373,29 @@ async function llmCheckEdge(src, rel, tgt, slot) {
 
 async function llmCheckAll(d, slot) {
   const items = [
-    ...d.out_edges.map((e) => ({rel: e.r, src: d.id, tgt: e.t, label: e.subject})),
-    ...d.in_edges.map((e) => ({rel: e.r, src: e.s, tgt: d.id, label: e.subject})),
+    ...d.out_edges.map((e) => ({relation: e.r, source: d.id, target: e.t, label: e.subject})),
+    ...d.in_edges.map((e) => ({relation: e.r, source: e.s, target: d.id, label: e.subject})),
   ].slice(0, 12);
   slot.innerHTML = "";
-  const status = h("div", {class: "mono"}, `проверяю ${items.length} связей…`);
+  const status = h("div", {class: "mono"}, `ИИ проверяет ${items.length} связей одним запросом…`);
   slot.append(status);
-  let keep = 0, problems = 0;
-  for (const it of items) {
-    try {
-      const res = await api(API + "/llm/check-edge", {source: it.src, relation: it.rel, target: it.tgt});
-      if (res.proposal.verdict === "keep") { keep++; continue; }
+  try {
+    const res = await api(API + "/llm/check-edges", {
+      items: items.map((it) => ({source: it.source, relation: it.relation, target: it.target})),
+    });
+    let keep = 0, problems = 0;
+    res.proposals.forEach((p, i) => {
+      const it = items[i];
+      if (p.verdict === "keep") { keep++; return; }
       problems++;
-      slot.append(h("div", {class: "mono"}, `«${short(it.label, 40)}» · ${it.rel}`));
-      slot.append(edgeProposalCard(it.src, it.rel, it.tgt, res.proposal));
-    } catch (e) {
-      slot.append(h("div", {class: "verdict-bad"}, `${it.rel}: ${e.message}`));
-    }
+      slot.append(h("div", {class: "mono"}, `«${short(it.label, 40)}» · ${it.relation}`));
+      slot.append(edgeProposalCard(it.source, it.relation, it.target, p));
+    });
+    status.textContent = `готово: верных связей ${keep}, с вопросами ${problems}`;
+  } catch (e) {
+    status.textContent = "проверка не удалась: " + e.message;
+    status.className = "verdict-bad";
   }
-  status.textContent = `готово: верных связей ${keep}, с вопросами ${problems}`;
 }
 
 /* ---------- подсказки: связи и значки советов ---------- */
@@ -1142,29 +1461,34 @@ function renderInsights(list) {
 }
 
 /* ---------- автокоррекция (вкладка «Авто-ИИ») ---------- */
-const AUTO_ACTION_RU = {
-  retract: "Удалить как шум", merge_into: "Слить дубликат", set_confidence: "Изменить доверие",
-  add_link: "Добавить связь", rewrite: "Переписать текст",
-};
-
 function autoSubject(id) {
   const n = S.byId.get(id);
   return n ? short(n.subject, 60) : id;
 }
 
-async function autoScan() {
+/* объяснение, что здесь происходит и что стоит по времени */
+function autoIntro() {
+  return h("div", {class: "explain"},
+    h("strong", {}, "Что здесь"),
+    h("div", {class: "mono"}, "• Повторы и связи для одиноких записей считаются локально, без ИИ. Открывается сразу."),
+    h("div", {class: "mono"}, "• «Проверить ИИ» — тяжёлая часть: один запрос к LM Studio на до 30 подозрительных записей. Запускается только по кнопке; результат хранится, пока открыта страница."),
+    h("div", {class: "mono"}, "• Ничего не меняется само: каждое действие применяется только твоей кнопкой «Применить»."));
+}
+
+async function autoScan(useLlm = false) {
   const box = $("#tab-auto");
   if (S.autoBusy) return;
   S.autoBusy = true;
   box.innerHTML = "";
-  box.append(h("div", {class: "hint"}, "ИИ сканирует подозрительные записи… Ничего не меняется без твоих кнопок."));
+  box.append(autoIntro(), h("div", {class: "mono"},
+    useLlm ? "ИИ сканирует подозрительные записи… это может занять до минуты." : "Считаю повторы и связи…"));
   try {
-    const res = await api(API + "/llm/auto-scan", {limit: 30});
-    renderAutoResults(res);
+    const res = await api(API + "/llm/auto-scan", {limit: 30, use_llm: useLlm});
+    renderAutoResults(res, useLlm);
   } catch (e) {
     box.innerHTML = "";
-    box.append(h("div", {class: "verdict-bad"}, "сканирование не удалось: " + e.message),
-      h("button", {class: "primary", onclick: autoScan}, "Повторить"));
+    box.append(autoIntro(), h("div", {class: "verdict-bad"}, "сканирование не удалось: " + e.message),
+      h("button", {class: "primary small", onclick: () => autoScan(useLlm)}, "Повторить"));
   } finally {
     S.autoBusy = false;
   }
@@ -1179,46 +1503,52 @@ function autoProposalCard(title, lines, runFn, danger) {
   return proposalCard([h("strong", {}, title), ...lines.map((l) => l instanceof Node ? l : h("div", {class: "mono"}, l))], acts);
 }
 
-function renderAutoResults(res) {
+function renderAutoResults(res, useLlm) {
   const box = $("#tab-auto");
   box.innerHTML = "";
+  box.append(autoIntro());
   box.append(h("div", {class: "row"},
-    h("button", {class: "primary small", onclick: autoScan}, "↻ Сканировать заново")));
-  box.append(h("div", {class: "hint"}, `просмотрено кандидатов: ${res.candidates ?? 0}. Каждое изменение применяется только по твоей кнопке.`));
+    h("button", {class: "primary small", onclick: () => autoScan(true)},
+      useLlm ? "↻ Проверить ИИ заново" : "Проверить ИИ (1 запрос)")));
+  box.append(h("div", {class: "hint"}, useLlm
+    ? `ИИ просмотрел кандидатов: ${res.candidates ?? 0}. Каждое изменение применяется только по твоей кнопке.`
+    : "ИИ ещё не запускался. Ниже повторы и связи без него."));
 
-  // 1. предложения ИИ
-  const props = res.proposals || [];
-  box.append(h("h3", {}, `Предложения ИИ (${props.length})`));
-  if (!props.length) box.append(h("div", {class: "hint"}, "ИИ не нашёл того, что стоит исправить, или LM Studio недоступна."));
-  for (const p of props) {
-    let card = null;
-    if (p.action === "retract") {
-      card = autoProposalCard(`Удалить: «${autoSubject(p.id)}»`, [`причина: ${p.reason}`],
-        {op: "retract", args: {id: p.id, reason: "auto_scan"}}, true);
-    } else if (p.action === "merge_into") {
-      card = autoProposalCard(`Слить «${autoSubject(p.id)}» → «${autoSubject(p.target_id)}»`,
-        [`причина: ${p.reason}`, "связи удаляемой записи переедут к целевой"],
-        {op: "merge_into", args: {from_id: p.id, into_id: p.target_id}});
-    } else if (p.action === "set_confidence") {
-      card = autoProposalCard(`Доверие «${autoSubject(p.id)}» → ${p.value}`, [`причина: ${p.reason}`],
-        {op: "set_confidence", args: {id: p.id, value: p.value}});
-    } else if (p.action === "add_link") {
-      card = autoProposalCard(`Связать «${autoSubject(p.id)}» —${p.relation}→ «${autoSubject(p.target_id)}»`,
-        [`причина: ${p.reason}`],
-        {op: "link", args: {source: p.id, target: p.target_id, relation: p.relation, weight: 0.7}});
-    } else if (p.action === "rewrite") {
-      card = autoProposalCard(`Переписать «${autoSubject(p.id)}»`,
-        [h("div", {class: "mono"}, "новый текст: " + p.subject), `причина: ${p.reason}`],
-        {op: "set_subject", args: {id: p.id, text: p.subject}});
+  // 1. предложения ИИ (только после запуска по кнопке)
+  if (useLlm) {
+    const props = res.proposals || [];
+    box.append(h("h3", {}, `Предложения ИИ (${props.length})`));
+    if (!props.length) box.append(h("div", {class: "hint"}, "ИИ не нашёл того, что стоит исправить, или LM Studio недоступна."));
+    for (const p of props) {
+      let card = null;
+      if (p.action === "retract") {
+        card = autoProposalCard(`Удалить: «${autoSubject(p.id)}»`, [`причина: ${p.reason}`],
+          {op: "retract", args: {id: p.id, reason: "auto_scan"}}, true);
+      } else if (p.action === "merge_into") {
+        card = autoProposalCard(`Слить «${autoSubject(p.id)}» → «${autoSubject(p.target_id)}»`,
+          [`причина: ${p.reason}`, "связи удаляемой записи переедут к целевой"],
+          {op: "merge_into", args: {from_id: p.id, into_id: p.target_id}});
+      } else if (p.action === "set_confidence") {
+        card = autoProposalCard(`Доверие «${autoSubject(p.id)}» → ${p.value}`, [`причина: ${p.reason}`],
+          {op: "set_confidence", args: {id: p.id, value: p.value}});
+      } else if (p.action === "add_link") {
+        card = autoProposalCard(`Связать «${autoSubject(p.id)}» —${p.relation}→ «${autoSubject(p.target_id)}»`,
+          [`причина: ${p.reason}`],
+          {op: "link", args: {source: p.id, target: p.target_id, relation: p.relation, weight: 0.7}});
+      } else if (p.action === "rewrite") {
+        card = autoProposalCard(`Переписать «${autoSubject(p.id)}»`,
+          [h("div", {class: "mono"}, "новый текст: " + p.subject), `причина: ${p.reason}`],
+          {op: "set_subject", args: {id: p.id, text: p.subject}});
+      }
+      if (!card) continue;
+      card.prepend(h("div", {class: "row", style: "margin:0 0 4px"},
+        h("button", {class: "small", onclick: () => selectNode(p.id)}, "открыть запись"),
+        h("button", {class: "small", onclick: () => toggleHighlight([p.id])}, "подсветить")));
+      box.append(card);
     }
-    if (!card) continue;
-    card.prepend(h("div", {class: "row", style: "margin:0 0 4px"},
-      h("button", {class: "small", onclick: () => selectNode(p.id)}, "открыть запись"),
-      h("button", {class: "small", onclick: () => toggleHighlight([p.id])}, "подсветить")));
-    box.append(card);
   }
 
-  // 2. группы повторов (без LLM)
+  // 2. повторы текстов (без LLM)
   const dups = res.dups || [];
   box.append(h("h3", {}, `Повторы текстов (${dups.length})`));
   if (!dups.length) box.append(h("div", {class: "hint"}, "одинаковых текстов не найдено."));
@@ -1230,14 +1560,16 @@ function renderAutoResults(res) {
       h("div", {class: "row"}, keeper,
         h("button", {class: "small", disabled: S.readonly ? "" : null, onclick: async () => {
           const dst = keeper.value;
-          for (const id of g) if (id !== dst) await edit("merge_into", {from_id: id, into_id: dst});
+          const from = g.filter((id) => id !== dst);
+          if (!confirm(`Слить ${from.length} запись(и) в «${autoSubject(dst)}»? Их связи переедут к ней.`)) return;
+          for (const id of from) await edit("merge_into", {from_id: id, into_id: dst});
         }}, "слить в выбранную"))));
   }
 
-  // 3. эвристические предложения связей для изолированных
+  // 3. эвристические предложения связей для изолированных (без LLM)
   const links = res.link_suggestions || [];
-  box.append(h("h3", {}, `Предложения связей для изолированных (${links.length})`));
-  if (!links.length) box.append(h("div", {class: "hint"}, "нет очевидных пар: все кандидаты уже связаны или слишком далеки по смыслу."));
+  box.append(h("h3", {}, `Связи для одиноких записей (${links.length})`));
+  if (!links.length) box.append(h("div", {class: "hint"}, "нет очевидных пар: кандидаты уже связаны или слишком далеки по смыслу."));
   for (const s of links) {
     box.append(autoProposalCard(`«${autoSubject(s.source)}» ↔ RELATED_TO «${autoSubject(s.target)}»`,
       [`сходство по смыслу: ${s.similarity}`],
@@ -1313,7 +1645,7 @@ function barList(obj) {
 document.querySelectorAll(".tab").forEach((b) => b.addEventListener("click", () => {
   document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("on", x === b));
   for (const p of ["insights", "auto", "metrics", "legend"]) $("#tab-" + p).hidden = p !== b.dataset.tab;
-  if (b.dataset.tab === "auto" && !$("#tab-auto").childNodes.length) autoScan();
+  if (b.dataset.tab === "auto" && !$("#tab-auto").childNodes.length) autoScan(false);
 }));
 $("#layout").addEventListener("change", async (e) => {
   S.layout = e.target.value;
