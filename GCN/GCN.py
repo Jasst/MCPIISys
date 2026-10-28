@@ -2000,6 +2000,7 @@ async def invalidate_snapshot(
     service,  # GCN.memory_graph.MemoryService
     identity_id: str,
     reason: str,
+    layer: str = "shared",
 ) -> Dict[str, Any]:
     """Помечает звено цепочки как недействительное, НЕ удаляя его.
 
@@ -2029,8 +2030,9 @@ async def invalidate_snapshot(
                         "почему звено ошибочно и что вместо него считать верным."),
         }
 
-    service.shared_memory.reload_if_stale()  # та же причина, что в append_snapshot
-    store = service.shared_memory.gcn_store
+    memory = identity_memory(service, layer)
+    memory.reload_if_stale()  # та же причина, что в append_snapshot
+    store = memory.gcn_store
     obj = store.get(identity_id)
     if obj is None:
         return {"status": "error", "message": f"Звено {identity_id} не найдено"}
@@ -2059,7 +2061,7 @@ async def invalidate_snapshot(
     store.update(identity_id, {"object": meta}, actor="invalidation")
 
     # Синхронная запись на диск — как в append_snapshot, критичные данные.
-    await service.shared_memory._save_async()
+    await memory._save_async()
 
     heads_after = get_heads(store)
     return {

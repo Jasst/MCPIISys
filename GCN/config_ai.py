@@ -19,6 +19,8 @@ LM_STUDIO_TIMEOUT = 1800          # увеличено с 600 до 1800 сек (
 LM_STUDIO_STREAM_TIMEOUT = 2700   # увеличено с 900 до 2700 сек (45 мин) для потоковых ответов
 LM_STUDIO_USE_STREAM = True
 LM_STUDIO_VISION_SUPPORTED = True
+# Модель по умолчанию, если пользователь не выбрал другую в интерфейсе.
+LM_STUDIO_MODEL = os.getenv("LM_STUDIO_MODEL", "local-model")
 DEFAULT_MAX_TOKENS = 4096         # увеличенная длина ответа по умолчанию (было 2048)
 
 # -------------------------------

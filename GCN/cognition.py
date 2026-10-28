@@ -1013,6 +1013,35 @@ _FACT_VERB_RE = re.compile(
 )
 
 
+# Фрагменты ответа модели, которые нельзя сохранять как факты о мире:
+#  * разметка (**жирный**, заголовки, таблицы, разделители --- , «85 |»);
+#  * служебные разделы ответа («Вступление», «Заключение», «Вывод»);
+#  * самоописание модели («моё состояние», «я понимаю», «мне»).
+_MARKUP_FRAGMENT_RE = re.compile(
+    r"\*\*|__|^\s*#|\||^\s*-{3,}|^\s*\d{1,2}\s*[|.)]\s",
+    re.MULTILINE,
+)
+_SECTION_FRAGMENT_RE = re.compile(
+    r"^\W*(вступление|введение|основная часть|заключение|вывод|итог)\b",
+    re.IGNORECASE,
+)
+_SELF_REFERENCE_RE = re.compile(
+    r"\b(я|мо[её]|моя|мой|моего|моему|мне|меня|мною)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_answer_fragment(text: str) -> bool:
+    """True, если текст — кусок ответа модели, а не проверяемый факт о мире."""
+    if _MARKUP_FRAGMENT_RE.search(text):
+        return True
+    if _SECTION_FRAGMENT_RE.search(text):
+        return True
+    if _SELF_REFERENCE_RE.search(text):
+        return True
+    return False
+
+
 def _fact_is_factual(text: str) -> bool:
     if re.search(r"\b\d", text):
         return True
@@ -1039,6 +1068,11 @@ def sanitize_search_facts(
         text = (f.get("text") if isinstance(f, dict) else f) or ""
         text = str(text).strip()
         if not (20 <= len(text) <= 300):
+            continue
+        if _is_answer_fragment(text):
+            # Куски ответа модели (разметка, разделы, самоописание) не сохраняем:
+            # иначе модель запоминает собственные размышления как факты.
+            logger.debug("[Sanitizer] отброшен фрагмент ответа: %r", text[:80])
             continue
         low = text.lower()
         if any(m in low for m in _OPINION_MARKERS):

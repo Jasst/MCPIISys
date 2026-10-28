@@ -2,7 +2,16 @@ import asyncio
 import aiohttp
 import logging
 from typing import List, Dict, Optional
-from GCN.config_ai import LM_STUDIO_URL, LM_STUDIO_API_KEY, LM_STUDIO_TIMEOUT, LM_STUDIO_STREAM_TIMEOUT, DEFAULT_MAX_TOKENS
+import contextvars
+from GCN.config_ai import LM_STUDIO_URL, LM_STUDIO_API_KEY, LM_STUDIO_TIMEOUT, LM_STUDIO_STREAM_TIMEOUT, DEFAULT_MAX_TOKENS, LM_STUDIO_MODEL
+
+# Модель, выбранная пользователем в чате. Ставится на время запроса (см. ai_assistant),
+# вне запроса — LM_STUDIO_MODEL.
+llm_model_var: contextvars.ContextVar = contextvars.ContextVar("llm_model", default=None)
+
+
+def _model_name() -> str:
+    return llm_model_var.get() or LM_STUDIO_MODEL
 import json
 
 logger = logging.getLogger(__name__)
@@ -73,7 +82,7 @@ async def call_llm_raw(
     """
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LM_STUDIO_API_KEY}"}
     payload = {
-        "model": "local-model",
+        "model": _model_name(),
         "messages": messages if think else _no_think(messages),
         "temperature": temp,
         "max_tokens": max_tokens
@@ -179,7 +188,7 @@ async def _call_llm_stream_once(
     """
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LM_STUDIO_API_KEY}"}
     payload = {
-        "model": "local-model",
+        "model": _model_name(),
         # Ход без режима рассуждений — модель не должна «думать» скрыто (экономия TTFT).
         "messages": messages if include_reasoning else _no_think(messages),
         "temperature": temp,
@@ -301,3 +310,15 @@ async def call_llm_stream(
         async for ev in _call_llm_stream_once(messages, temp, max_tokens, stop, False):
             yield ev
 
+
+async def list_models() -> List[str]:
+    """Идентификаторы моделей из LM Studio (/v1/models). Эмбеддинг-модели не нужны для чата."""
+    url = LM_STUDIO_URL.replace("/chat/completions", "/models")
+    headers = {"Authorization": f"Bearer {LM_STUDIO_API_KEY}"}
+    session = await _get_session()
+    async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        if resp.status != 200:
+            raise RuntimeError(f"LM Studio /models: HTTP {resp.status}")
+        data = await resp.json()
+    ids = [m.get("id") for m in data.get("data", []) if isinstance(m, dict) and m.get("id")]
+    return [i for i in ids if "embed" not in i.lower()]
