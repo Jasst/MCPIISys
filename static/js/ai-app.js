@@ -498,6 +498,11 @@
       }
       b.appendChild(dot);
       b.addEventListener('click', () => { selectSession(s.id); closeNav(); });
+      UI.attachContext(b, () => [
+        { label: 'Открыть', onClick: () => { selectSession(s.id); closeNav(); } },
+        { sep: true },
+        { label: 'Удалить чат', danger: true, onClick: () => deleteSession(s.id) },
+      ]);
       els.list.appendChild(b);
     }
   }
@@ -1385,6 +1390,7 @@
     const body = {
       message: text || 'Опиши, что изображено',
       stream: true,
+      model: currentModel(),
       web_search: chips.web,
       reasoning: chips.reason,
       gen_key: msgs[idx].id,
@@ -1465,7 +1471,7 @@
       scheduleSync(true);   // форс-пул начального состояния ДО genFlag в startGeneration
       renderMessages({ scroll: false });
       refreshUI();
-      const body = { message: prompt, stream: true, web_search: chips.web, reasoning: chips.reason,
+      const body = { message: prompt, stream: true, model: currentModel(), web_search: chips.web, reasoning: chips.reason,
                      gen_key: nid, chat_id: id, user_msg_id: userKey };
       if (regenImg && regenImg.base64) { body.image_base64 = regenImg.base64; body.image_mime = regenImg.mime; }
       startGeneration(id, nidx, 'send', body).then(() => {
@@ -1589,10 +1595,10 @@
     download(safeFileName(s.name) + '.md', lines.join('\n'), 'text/markdown');
   }
 
-  function clearCurrent() {
+  async function clearCurrent() {
     const s = currentSession();
     if (!s || isGenHere()) return;
-    if (!confirm('Очистить историю этого чата?')) return;
+    if (!(await UI.confirm('Очистить историю этого чата?', { title: 'Очистить историю', okText: 'Очистить', danger: true }))) return;
     cache[s.id] = [];
     commit(s.id);
     renderMessages({ scroll: false });
@@ -1600,17 +1606,26 @@
     toast('История очищена');
   }
 
-  function deleteCurrent() {
-    const s = currentSession();
-    if (!s || isGenHere()) return;
-    if (!confirm('Удалить этот чат?')) return;
-    removeSession(s.id);
-    currentId = null;
-    const next = sessions.slice().sort((a, b) => (b.updated || b.created) - (a.updated || a.created))[0];
-    currentId = next ? next.id : null;
+  // Удаление любого чата из списка (кнопка или правый клик); чат, который сейчас пишет ответ, не трогаем.
+  async function deleteSession(id) {
+    const s = sessions.find((x) => x.id === id);
+    if (!s || (gen && gen.sessionId === id)) return;
+    const ok = await UI.confirm(`Удалить чат «${s.name}»?`, { title: 'Удалить чат', okText: 'Удалить', danger: true });
+    if (!ok) return;
+    removeSession(id);
+    if (currentId === id) {
+      const next = sessions.slice().sort((a, b) => (b.updated || b.created) - (a.updated || a.created))[0];
+      currentId = next ? next.id : null;
+    }
     renderMessages({ scroll: false });
     refreshUI();
     toast('Чат удалён');
+  }
+
+  function deleteCurrent() {
+    const s = currentSession();
+    if (!s || isGenHere()) return;
+    deleteSession(s.id);
   }
 
   async function copyText(text) {
@@ -1722,7 +1737,7 @@
 
   async function wipeAllChats() {
     if (gen) { toast('Дождитесь окончания ответа'); return; }
-    if (!confirm('Удалить все чаты в этом браузере? Это нельзя отменить.')) return;
+    if (!(await UI.confirm('Удалить все чаты в этом браузере? Это нельзя отменить.', { title: 'Удалить все чаты', okText: 'Удалить все', danger: true }))) return;
     for (const s of sessions) {
       delete cache[s.id]; delete lastSeen[s.id];
       localStorage.removeItem(LS_MSGS + s.id);
@@ -2078,7 +2093,7 @@
 
   // Выпуск нового кода: старый код и все MCP-сессии отключаются — просим подтверждение.
   $('#mcpCodeBtn').addEventListener('click', async () => {
-    if (!confirm('Выпустить новый код? Старый код перестанет работать, все подключённые внешние ИИ отключатся.')) return;
+    if (!(await UI.confirm('Выпустить новый код? Старый код перестанет работать, все подключённые внешние ИИ отключатся.', { title: 'Новый код подключения', okText: 'Выпустить', danger: true }))) return;
     try {
       const r = await fetch('/ai/mcp_code', { method: 'POST', credentials: 'same-origin' });
       if (r.status === 401) { location.href = '/login'; return; }
@@ -2905,6 +2920,33 @@
     });
     stateES.onerror = () => { /* браузер сам переподключится; если нет — работает poll */ };
   }
+
+  // ---- выбор модели LM Studio ----
+  const MODEL_KEY = 'chatModel';
+  function currentModel() {
+    const sel = $('#modelSelect');
+    return sel && !sel.hidden && sel.value ? sel.value : null;
+  }
+  async function loadModels() {
+    const sel = $('#modelSelect');
+    if (!sel) return;
+    try {
+      const r = await fetch('/ai/models', { credentials: 'same-origin', cache: 'no-store' });
+      if (!r.ok) return;
+      const data = await r.json();
+      const models = Array.isArray(data.models) ? data.models : [];
+      if (!models.length) return;
+      const saved = localStorage.getItem(MODEL_KEY);
+      const pick = models.includes(saved) ? saved : (models.includes(data.default) ? data.default : models[0]);
+      sel.innerHTML = '';
+      for (const id of models) sel.appendChild(new Option(id, id));
+      sel.value = pick;
+      sel.hidden = false;
+    } catch { /* LM Studio недоступна: селектор остаётся скрытым */ }
+  }
+  const modelSel = $('#modelSelect');
+  if (modelSel) modelSel.addEventListener('change', () => localStorage.setItem(MODEL_KEY, modelSel.value));
+  loadModels();
 
   window.addEventListener('online', async () => {
     if (!SYNC.ready && currentScopeUid) SYNC.ready = await pullState();

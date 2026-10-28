@@ -10,6 +10,7 @@
 
 <!-- стили основного чата: та же палитра, шрифты, скроллбары -->
 <link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/ui.css">
 
 <style>
 /* ==== тема наследуется из style.css (как в основном чате) ====
@@ -178,11 +179,13 @@ a.back:hover{text-decoration:underline}
     <div class="tabs">
       <button class="tab on" data-tab="insights" title="что можно улучшить в памяти">Улучшить</button>
       <button class="tab" data-tab="auto" title="автокоррекция, чистка шума и автосвязи с подтверждением">Авто-ИИ</button>
+      <button class="tab" data-tab="identity" title="цепочка ТЕКУЩЕЕ_Я: просмотр, новые звенья, аннулирование">Личность</button>
       <button class="tab" data-tab="metrics">Метрики</button>
       <button class="tab" data-tab="legend">Легенда</button>
     </div>
     <div id="tab-insights"></div>
     <div id="tab-auto" hidden></div>
+    <div id="tab-identity" hidden></div>
     <div id="tab-metrics" hidden><div id="metrics"></div></div>
     <div id="tab-legend" hidden>
       <h3>Типы записей</h3>
@@ -206,6 +209,7 @@ a.back:hover{text-decoration:underline}
 
 <div id="feed"></div>
 
+<script src="/static/js/ui.js"></script>
 <script>
 "use strict";
 const API = "/ai/memory";
@@ -1107,7 +1111,8 @@ function renderDetail(d) {
       if (im.relied_by.length) msg += `\nЗаписи, которые на ней держатся, потеряют опору: ${im.relied_by.length}.`;
       if (im.contradicts.length) msg += `\nПротиворечия исчезнут: ${im.contradicts.length}.`;
     }
-    if (confirm(msg)) edit("retract", {id: d.id, reason: "memory_viewer"});
+    UI.confirm(msg, {title: "Отозвать запись", okText: "Отозвать", danger: true})
+      .then((ok) => { if (ok) edit("retract", {id: d.id, reason: "memory_viewer"}); });
   }}, "Отозвать запись");
   box.append(h("h3", {}, "Удаление"), impactBox, h("div", {class: "row"}, delBtn));
   loadImpact(d.id, impactBox, box);
@@ -1276,7 +1281,8 @@ async function llmReview(id, slot) {
     if (p.suggest_retract) {
       lines.push("ИИ предлагает отозвать запись");
       actions.push({label: "отозвать", danger: true, run: () =>
-        confirm("Отозвать запись по предложению ИИ?") ? edit("retract", {id, reason: "llm_review_confirmed"}) : null});
+        UI.confirm("Отозвать запись по предложению ИИ?", {title: "Отозвать запись", okText: "Отозвать", danger: true})
+          .then((ok) => ok ? edit("retract", {id, reason: "llm_review_confirmed"}) : null)});
     }
     if (!actions.length) lines.push("Менять нечего.");
     slot.append(proposalCard(lines, actions));
@@ -1561,7 +1567,7 @@ function renderAutoResults(res, useLlm) {
         h("button", {class: "small", disabled: S.readonly ? "" : null, onclick: async () => {
           const dst = keeper.value;
           const from = g.filter((id) => id !== dst);
-          if (!confirm(`Слить ${from.length} запись(и) в «${autoSubject(dst)}»? Их связи переедут к ней.`)) return;
+          if (!(await UI.confirm(`Слить ${from.length} запись(и) в «${autoSubject(dst)}»? Их связи переедут к ней.`, {title: "Слияние записей", okText: "Слить"}))) return;
           for (const id of from) await edit("merge_into", {from_id: id, into_id: dst});
         }}, "слить в выбранную"))));
   }
@@ -1641,11 +1647,169 @@ function barList(obj) {
     h("span", {class: "mono"}, String(v)))));
 }
 
+/* ---------- цепочка ТЕКУЩЕЕ_Я (identity_core): просмотр и новые звенья ----------
+   Личный слой редактируется; общее ядро только для чтения.
+   Цепочка append-only: «правка» = новое звено, продолжающее выбранное (по умолчанию — голову);
+   старые звенья не переписываются, аннулирование помечает звено и не удаляет его. */
+S.idLayer = "private";
+S.idData = null;
+S.idParent = null;
+S.idExpanded = new Set();
+S.idUI = null;
+
+function idShort(id) { return String(id || "").slice(-12); }
+
+async function idRequest(path, body, label) {
+  try {
+    const res = await api(API + path, body);
+    log(label, "ok");
+    if (res && res.branch_warning) log("внимание: " + String(res.branch_warning), "bad");
+    await loadIdentity();
+    refresh(false).catch(() => {});
+    return res;
+  } catch (e) {
+    log(`${label}: ${e.message}`, "bad");
+    return null;
+  }
+}
+
+async function loadIdentity() {
+  try {
+    S.idData = await api(API + "/identity?layer=" + S.idLayer + "&limit=200");
+  } catch (e) {
+    const box = $("#tab-identity");
+    box.innerHTML = "";
+    box.append(h("div", {class: "mono"}, "не удалось загрузить цепочку: " + e.message));
+    return;
+  }
+  if (S.idParent && !S.idData.chain.some((s) => s.id === S.idParent)) S.idParent = null;
+  renderIdentity();
+}
+
+function setIdParent(id) {
+  S.idParent = id || null;
+  const d = S.idData;
+  if (!S.idUI || !d) return;
+  const latest = [...d.chain].reverse().find((s) => d.heads.includes(s.id));
+  S.idUI.where.textContent = S.idParent
+    ? `продолжит от звена …${idShort(S.idParent)}`
+    : (latest ? `продолжит от текущей головы …${idShort(latest.id)}` : "цепочка пуста: будет создано первое звено");
+}
+
+function renderIdentity() {
+  const box = $("#tab-identity");
+  const d = S.idData;
+  if (!d) return;
+  const draft = S.idUI ? {t: S.idUI.ta.value, q: S.idUI.oq.value} : null;
+  const ro = d.readonly || S.readonly;
+  box.innerHTML = "";
+
+  const layerBtn = (key, label) => h("button", {class: "small" + (S.idLayer === key ? " primary" : ""),
+    onclick: () => {
+      if (S.idLayer === key) return;
+      S.idLayer = key; S.idParent = null; S.idUI = null;
+      loadIdentity();
+    }}, label);
+  box.append(
+    h("div", {class: "row"}, layerBtn("private", "Личная"), layerBtn("shared", "Общее ядро"),
+      h("span", {class: "mono"}, `звеньев: ${d.chain.length} · голов: ${d.heads.length}`)),
+    h("div", {class: "hint"}, ro
+      ? "только чтение"
+      : "append-only: правка = новое звено; старые звенья не переписываются"));
+  if (d.diverged) {
+    box.append(h("div", {class: "card prop"}, h("div", {class: "mono"},
+      `⚠ цепочка разошлась: ${d.heads.length} несведённых голов. Сведите их в одно звено или продолжите от одной из них.`)));
+  }
+  if (!ro) box.append(identityCompose(d, draft));
+  if (!d.chain.length) {
+    box.append(h("div", {class: "mono"}, "цепочка ТЕКУЩЕЕ_Я пуста"));
+    return;
+  }
+  for (const s of [...d.chain].reverse()) box.append(identityEntry(d, s, ro));
+}
+
+function identityCompose(d, draft) {
+  const ta = h("textarea", {rows: 3, placeholder: "текст звена: что теперь считаешь верным о себе", style: "width:100%"});
+  const oq = h("input", {placeholder: "открытый вопрос для следующего звена (необязательно)", style: "width:100%"});
+  const where = h("div", {class: "hint"});
+  if (draft) { ta.value = draft.t; oq.value = draft.q; }
+  S.idUI = {ta, oq, where};
+  setIdParent(S.idParent);
+
+  // поля очищаем ДО запроса: после успеха цепочка перерисуется, и черновик не должен вернуться
+  const send = async (path, body, label, restoreOnFail) => {
+    const prev = {t: ta.value, q: oq.value, p: S.idParent};
+    ta.value = ""; oq.value = ""; S.idParent = null;
+    const res = await idRequest(path, body, label);
+    if (!res && restoreOnFail) {
+      ta.value = prev.t; oq.value = prev.q; setIdParent(prev.p);
+    }
+  };
+
+  return h("div", {class: "card", style: "margin:8px 0"},
+    ta, oq, where,
+    h("div", {class: "row"},
+      h("button", {class: "small primary", onclick: () => {
+        const content = ta.value.trim();
+        if (!content) return log("пустое звено не сохраняю", "bad");
+        return send("/identity/append",
+          {layer: S.idLayer, content, open_question: oq.value.trim() || null, parent_id: S.idParent},
+          "звено добавлено", true);
+      }}, "добавить звено"),
+      d.diverged ? h("button", {class: "small", onclick: () => {
+        const content = ta.value.trim();
+        if (!content) return log("для слияния напишите текст слитого звена", "bad");
+        return send("/identity/merge",
+          {layer: S.idLayer, content, open_question: oq.value.trim() || null},
+          "ветки сведены", true);
+      }}, "свести ветки") : null,
+      h("button", {class: "small", onclick: () => setIdParent(null)}, "от головы")));
+}
+
+function identityEntry(d, s, ro) {
+  const isHead = d.heads.includes(s.id);
+  const open = S.idExpanded.has(s.id);
+  const text = h("div", {style: "font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;cursor:pointer;margin:4px 0",
+    onclick: () => {
+      if (open) S.idExpanded.delete(s.id); else S.idExpanded.add(s.id);
+      renderIdentity();
+    }}, open ? s.content : short(s.content, 180));
+  const card = h("div", {class: "ins", style: s.invalidated ? "opacity:.6" : null},
+    h("div", {class: "row"},
+      h("span", {class: "badge"}, new Date(s.created).toLocaleString("ru-RU")),
+      h("span", {class: "badge"}, s.contributor_model || "—"),
+      isHead ? h("span", {class: "badge"}, "голова") : null,
+      (s.merge_parent_ids || []).length ? h("span", {class: "badge"}, `слияние ×${s.merge_parent_ids.length}`) : null,
+      s.invalidated ? h("span", {class: "badge"}, "аннулировано") : null,
+      h("span", {class: "mono"}, idShort(s.id)),
+      h("span", {class: "mono"}, s.parent_id ? "← " + idShort(s.parent_id) : "корень")),
+    text);
+  if (s.open_question) card.append(h("div", {class: "hint"}, `вопрос: ${s.open_question}`));
+  if (s.invalidated) card.append(h("div", {class: "hint"}, `аннулировано: ${s.invalidation_reason || "без причины"}`));
+  if (!ro) {
+    const acts = [h("button", {class: "small", onclick: () => {
+      setIdParent(s.id);
+      if (S.idUI) S.idUI.ta.focus();
+    }}, "продолжить отсюда")];
+    if (!s.invalidated) acts.push(h("button", {class: "small danger", onclick: () => {
+      UI.prompt("Почему это звено ошибочно?", {title: "Аннулировать звено", okText: "Аннулировать", danger: true, required: true})
+        .then((reason) => {
+          if (reason === null) return;
+          return idRequest("/identity/invalidate",
+            {layer: S.idLayer, identity_id: s.id, reason: reason.trim()}, "звено аннулировано");
+        });
+    }}, "аннулировать"));
+    card.append(h("div", {class: "row"}, ...acts));
+  }
+  return card;
+}
+
 /* ---------- события интерфейса ---------- */
 document.querySelectorAll(".tab").forEach((b) => b.addEventListener("click", () => {
   document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("on", x === b));
-  for (const p of ["insights", "auto", "metrics", "legend"]) $("#tab-" + p).hidden = p !== b.dataset.tab;
+  for (const p of ["insights", "auto", "metrics", "identity", "legend"]) $("#tab-" + p).hidden = p !== b.dataset.tab;
   if (b.dataset.tab === "auto" && !$("#tab-auto").childNodes.length) autoScan(false);
+  if (b.dataset.tab === "identity") loadIdentity();
 }));
 $("#layout").addEventListener("change", async (e) => {
   S.layout = e.target.value;
@@ -1663,6 +1827,21 @@ $("#q").addEventListener("input", applyFilter);
 $("#ftype").addEventListener("change", applyFilter);
 $("#minc").addEventListener("input", applyFilter);
 $("#fit").addEventListener("click", fitView);
+/* правый клик по записи на графе: открыть или отозвать (без поиска по панели) */
+cv.addEventListener("contextmenu", (ev) => {
+  ev.preventDefault();
+  const [sx, sy] = localPos(ev);
+  const id = hitNode(sx, sy);
+  if (!id) return;
+  UI.menu(ev.clientX, ev.clientY, [
+    {label: "Открыть", onClick: () => selectNode(id)},
+    {label: "Отозвать запись", danger: true, disabled: S.readonly, onClick: () => retractNode(id)},
+  ]);
+});
+function retractNode(id) {
+  return UI.confirm("Отозвать запись? Это сохранится в истории.", {title: "Отозвать запись", okText: "Отозвать", danger: true})
+    .then((ok) => (ok ? edit("retract", {id, reason: "memory_viewer"}) : null));
+}
 $("#add").addEventListener("click", startCreate);
 $("#zin").addEventListener("click", () => { const r = cv.getBoundingClientRect(); zoomAt(r.width / 2, r.height / 2, 1.4); });
 $("#zout").addEventListener("click", () => { const r = cv.getBoundingClientRect(); zoomAt(r.width / 2, r.height / 2, 1 / 1.4); });

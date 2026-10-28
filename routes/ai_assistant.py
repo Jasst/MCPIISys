@@ -82,7 +82,7 @@ from GCN.mcp_client_manager import MCPToolManager
 from GCN.GCN import KnowledgeObject, KnowledgeType, MemoryScope
 from GCN.memory_graph import CognitiveMemory, Fact, Goal, GCNMemoryRouter
 
-from GCN.llm_client import call_llm, call_llm_raw, call_llm_stream
+from GCN.llm_client import call_llm, call_llm_raw, call_llm_stream, list_models, llm_model_var
 from GCN.web_search import deep_search, is_time_sensitive_query
 from GCN.image_utils import enhance_prompt, generate_image
 from GCN.tool_router import ToolRegistry, ToolRouter, build_tool_trace_context
@@ -2626,7 +2626,8 @@ class CognitiveController:
                               image_base64: str = None, image_mime: str = None,
                               reasoning: bool = False, char_by_char: bool = None,
                               gen_key: Optional[str] = None,
-                              chat_id: Optional[str] = None, user_msg_id: Optional[str] = None):
+                              chat_id: Optional[str] = None, user_msg_id: Optional[str] = None, model: Optional[str] = None):
+        llm_model_var.set(model)
         """
         Тонкая обёртка над StreamingResponse. Реальная генерация выполняется в
         self._stream_response_worker, запущенном как отдельная asyncio.Task
@@ -3279,7 +3280,8 @@ class CognitiveController:
 
     async def get_response(self, message: str, web_search: bool = False,
                            image_base64: str = None, image_mime: str = None,
-                           reasoning: bool = False):
+                           reasoning: bool = False, model: Optional[str] = None):
+        llm_model_var.set(model)
         return await self.process_input(message, web_search, image_base64, image_mime, reasoning)
 
     def _spawn_background_task(self, coro, name: str = "") -> "asyncio.Task":
@@ -3409,6 +3411,8 @@ class AIRequest(BaseModel):
     # id чата и вопроса на клиенте: сервер сам фиксирует финальный ответ в снапшоте
     chat_id: Optional[str] = Field(None, max_length=200)
     user_msg_id: Optional[str] = Field(None, max_length=200)
+    # модель LM Studio, выбранная в интерфейсе; None — модель по умолчанию
+    model: Optional[str] = Field(None, max_length=200)
 
 class ResearchRequest(BaseModel):
     goal: str = Field(..., min_length=1, max_length=2000)
@@ -3444,6 +3448,7 @@ async def chat_with_ai(body: AIRequest, address: str = Depends(require_auth)):
                 gen_key=body.gen_key,
                 chat_id=body.chat_id,
                 user_msg_id=body.user_msg_id,
+                model=body.model,
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache,no-store,must-revalidate", "X-Accel-Buffering": "no"}
@@ -3453,9 +3458,20 @@ async def chat_with_ai(body: AIRequest, address: str = Depends(require_auth)):
         web_search=body.web_search,
         image_base64=body.image_base64,
         image_mime=body.image_mime,
-        reasoning=body.reasoning
+        reasoning=body.reasoning,
+        model=body.model,
     )
     return {"reply": response, "meta": meta}
+
+@router.get("/models")
+async def list_chat_models(address: str = Depends(require_auth)):
+    """Модели LM Studio для выбора в чате. Если LM Studio недоступна — пустой список."""
+    try:
+        models = await list_models()
+    except Exception as e:
+        logger.warning(f"/ai/models: {e}")
+        return {"models": [], "default": LM_STUDIO_MODEL}
+    return {"models": models, "default": LM_STUDIO_MODEL}
 
 @router.get("/chat/attach")
 async def attach_to_active_stream(watch: bool = False, key: Optional[str] = None,

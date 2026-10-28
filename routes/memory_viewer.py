@@ -15,8 +15,9 @@ routes/memory_viewer.py — просмотр и правка СОБСТВЕНН�
 """
 import asyncio
 import os
+from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
@@ -27,6 +28,10 @@ from dependencies import require_auth
 from GCN import memory_viewer_core as core
 from GCN.llm_client import call_llm
 from GCN.memory_graph import get_memory_service
+from GCN.GCN import (
+    IdentitySnapshot, _all_identity_objects, append_snapshot, get_heads,
+    identity_memory, invalidate_snapshot, merge_heads,
+)
 
 ENABLED = os.getenv("MEMORY_VIEWER_ENABLED", "1") == "1"
 READONLY = os.getenv("MEMORY_VIEWER_READONLY", "0") == "1"
@@ -63,6 +68,25 @@ class SuggestLinksBody(BaseModel):
 
 class EdgesBatchBody(BaseModel):
     items: list[EdgeReviewBody] = Field(..., min_length=1, max_length=12)
+
+
+class IdentityAppendBody(BaseModel):
+    layer: str = Field(default="private", max_length=16)
+    content: str = Field(..., min_length=1, max_length=4000)
+    open_question: Optional[str] = Field(default=None, max_length=500)
+    parent_id: Optional[str] = Field(default=None, max_length=128)
+
+
+class IdentityMergeBody(BaseModel):
+    layer: str = Field(default="private", max_length=16)
+    content: str = Field(..., min_length=1, max_length=4000)
+    open_question: Optional[str] = Field(default=None, max_length=500)
+
+
+class IdentityInvalidateBody(BaseModel):
+    layer: str = Field(default="private", max_length=16)
+    identity_id: str = Field(..., max_length=128)
+    reason: str = Field(..., min_length=1, max_length=500)
 
 
 def _enabled():
@@ -313,3 +337,110 @@ async def memory_llm_auto_scan(body: AutoScanBody, uid: str = Depends(require_au
     proposals = core.sanitize_auto_actions(core.extract_json(raw), candidates)
     return {"proposals": proposals, "candidates": len(candidates), "llm": True,
             "dups": dups, "link_suggestions": link_suggestions, "raw_len": len(raw)}
+
+# ---------- цепочка ТЕКУЩЕЕ_Я (identity_core) ----------
+# Личный слой (private) — редактируется владельцем; общее ядро (shared) — только чтение.
+# Цепочка append-only: «правка» = новое звено от выбранного предка, а не перезапись текста.
+# Записи идут через функции GCN, которые сами берут _lock при сохранении, поэтому
+# здесь НЕ держим mem._lock во время вызова (иначе deadlock на том же asyncio.Lock).
+IDENTITY_LAYERS = ("private", "shared")
+HUMAN_AUTHOR = "user"
+
+
+def _identity_layer(layer: str) -> str:
+    if layer not in IDENTITY_LAYERS:
+        raise HTTPException(status_code=400, detail="неизвестный слой цепочки")
+    return layer
+
+
+def _identity_writable(layer: str) -> None:
+    if READONLY or layer != "private":
+        raise HTTPException(status_code=403, detail="этот слой доступен только для чтения")
+
+
+def _identity_result(res: Dict[str, Any]) -> Dict[str, Any]:
+    if res.get("status") == "error":
+        raise HTTPException(status_code=400, detail=res.get("message", "ошибка цепочки"))
+    return {"ok": True, **res}
+
+
+@router.get("/identity")
+async def identity_chain(layer: str = "private", limit: int = 200,
+                         uid: str = Depends(require_auth)):
+    """Все звенья ТЕКУЩЕЕ_Я выбранного слоя по времени (старые → новые), включая аннулированные.
+
+    Полная история, а не только путь от головы: get_chain() начинает с последней ВАЛИДНОЙ головы
+    и аннулированное звено туда не попадает, а в просмотрщике его нужно видеть с причиной.
+    heads — текущие валидные концы; diverged — цепочка разошлась и требует сверки.
+    """
+    _enabled()
+    layer = _identity_layer(layer)
+    limit = max(1, min(500, int(limit)))
+    service = await get_memory_service(uid)
+    mem = identity_memory(service, layer)
+    async with mem._lock:
+        await asyncio.to_thread(mem.reload_if_stale)
+        store = mem.gcn_store
+        objs = _all_identity_objects(store)[-limit:]
+        entries = [asdict(IdentitySnapshot.from_object(o)) for o in objs]
+        heads = get_heads(store)
+        version = core.store_version(store)
+    return {
+        "layer": layer,
+        "readonly": READONLY or layer != "private",
+        "version": version,
+        "chain": entries,
+        "heads": [h.id for h in heads],
+        "diverged": len(heads) > 1,
+        "invalidated_in_chain": [e["id"] for e in entries if e["invalidated"]],
+    }
+
+
+@router.post("/identity/append")
+async def identity_append(body: IdentityAppendBody, uid: str = Depends(require_auth)):
+    """Новое звено, продолжающее цепочку (от parent_id или от текущей головы)."""
+    _enabled()
+    layer = _identity_layer(body.layer)
+    _identity_writable(layer)
+    if body.parent_id:
+        _check_id(body.parent_id)
+    service = await get_memory_service(uid)
+    res = await append_snapshot(
+        service,
+        content=body.content.strip(),
+        contributor_model=HUMAN_AUTHOR,
+        open_question=(body.open_question or "").strip() or None,
+        parent_id=body.parent_id or None,
+        layer=layer,
+    )
+    return _identity_result(res)
+
+
+@router.post("/identity/merge")
+async def identity_merge(body: IdentityMergeBody, uid: str = Depends(require_auth)):
+    """Сводит все несведённые головы в одно merge-звено."""
+    _enabled()
+    layer = _identity_layer(body.layer)
+    _identity_writable(layer)
+    service = await get_memory_service(uid)
+    res = await merge_heads(
+        service,
+        content=body.content.strip(),
+        contributor_model=HUMAN_AUTHOR,
+        open_question=(body.open_question or "").strip() or None,
+        layer=layer,
+    )
+    return _identity_result(res)
+
+
+@router.post("/identity/invalidate")
+async def identity_invalidate(body: IdentityInvalidateBody, uid: str = Depends(require_auth)):
+    """Помечает звено недействительным (без удаления). Причина обязательна."""
+    _enabled()
+    layer = _identity_layer(body.layer)
+    _identity_writable(layer)
+    _check_id(body.identity_id)
+    service = await get_memory_service(uid)
+    res = await invalidate_snapshot(service, identity_id=body.identity_id,
+                                    reason=body.reason, layer=layer)
+    return _identity_result(res)
