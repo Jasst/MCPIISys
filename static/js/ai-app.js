@@ -2986,10 +2986,17 @@
     } catch { /* LM Studio недоступна: контрол остаётся скрытым */ }
   }
   // ---- выпадающий список моделей в стиле приложения (.model-dd) ----
-  let ddEl = null;
+  // Окно живёт во временном layer-контейнере на body: position:fixed внутри
+  // шапки с backdrop-filter давал бы «двойную» подложку и чужие тени.
+  let ddEl = null, ddLayer = null, ddCloseOnScroll = false;
   function closeModelDd() {
     if (!ddEl) return;
-    ddEl.remove(); ddEl = null;
+    ddEl = null;
+    if (ddLayer) { ddLayer.remove(); ddLayer = null; }
+    if (ddCloseOnScroll) {
+      ddCloseOnScroll = false;
+      document.removeEventListener('scroll', closeModelDd, true);
+    }
     const btn = $('#modelSelectBtn');
     if (btn) btn.setAttribute('aria-expanded', 'false');
   }
@@ -2997,10 +3004,41 @@
     if (ddEl && !ddEl.contains(e.target) && !e.target.closest('#modelSelectBtn')) closeModelDd();
   }, true);
   window.addEventListener('resize', closeModelDd);
+  // имя модели в LM Studio длинное ("qwen2.5-coder-32b-instruct-q4_k_m"):
+  // режем середину для показа, полное имя всегда остаётся в title/атрибутах
+  function shortModelName(id, max = 34) {
+    if (!id || id.length <= max) return id || '';
+    const half = Math.floor((max - 1) / 2);
+    return id.slice(0, half) + '…' + id.slice(id.length - half);
+  }
+  function positionModelDd() {
+    if (!ddEl) return;
+    const btn = $('#modelSelectBtn');
+    if (!btn) return;
+    // ширина: по самому длинному пункту, но не шире экрана и не уже кнопки
+    const items = ddEl.querySelectorAll('.model-dd-item');
+    let natural = 0;
+    items.forEach((it) => { natural = Math.max(natural, it.scrollWidth); });
+    const w = Math.min(Math.max(natural + 4, btn.offsetWidth), window.innerWidth - 16);
+    ddEl.style.width = w + 'px';
+    const maxH = Math.min(320, Math.floor(window.innerHeight * 0.5));
+    ddEl.querySelector('.model-dd-list').style.maxHeight = maxH + 'px';
+    const r = btn.getBoundingClientRect();
+    const dr = ddEl.getBoundingClientRect();
+    ddEl.style.left = Math.max(8, Math.min(r.left, window.innerWidth - dr.width - 8)) + 'px';
+    ddEl.style.top = (r.bottom + 6 + dr.height > window.innerHeight - 8)
+      ? Math.max(8, r.top - dr.height - 6) + 'px'
+      : (r.bottom + 6) + 'px';
+  }
   function openModelDd() {
     const btn = $('#modelSelectBtn');
     if (!btn || !modelList.models || !modelList.models.length) return;
     if (ddEl) { closeModelDd(); return; }        // повторный клик — закрыть
+    ddLayer = document.createElement('div');
+    ddLayer.style.position = 'fixed';            // дочерние .model-dd позиционируются от вьюпорта
+    ddLayer.style.inset = '0';
+    ddLayer.style.pointerEvents = 'none';        // клики «сквозь» слой — обработчик закрытия на документе
+    ddLayer.style.zIndex = '10002';
     const d = document.createElement('div');
     d.className = 'model-dd';
     d.setAttribute('role', 'listbox');
@@ -3013,6 +3051,7 @@
     list.className = 'model-dd-list';
     const cur = currentModel();
     for (const id of modelList.models) {
+      const loaded = modelList.loaded && id === modelList.loaded;
       const b = document.createElement('button');
       b.type = 'button';
       b.className = 'model-dd-item' + (id === cur ? ' current' : '');
@@ -3020,21 +3059,26 @@
       b.setAttribute('aria-selected', String(id === cur));
       const nm = document.createElement('span');
       nm.className = 'model-dd-name';
-      nm.textContent = id;
-      nm.title = id;
+      nm.textContent = shortModelName(id);
+      nm.title = id;                              // полное имя — при наведении
       b.appendChild(nm);
       const meta = document.createElement('span');
       meta.className = 'model-dd-meta';
-      if (modelList.loaded && id === modelList.loaded) {
+      if (loaded) {
         const dot = document.createElement('span');
         dot.className = 'model-dd-dot';
         dot.title = 'Модель сейчас в памяти (VRAM)';
         meta.appendChild(dot);
+        const badge = document.createElement('span');
+        badge.className = 'model-dd-badge';
+        badge.textContent = 'в памяти';
+        meta.appendChild(badge);
       }
       if (id === cur) {
         const chk = document.createElement('span');
         chk.className = 'model-dd-check';
         chk.textContent = '✓';
+        chk.title = 'Выбранная модель';
         meta.appendChild(chk);
       }
       if (meta.childNodes.length) b.appendChild(meta);
@@ -3054,25 +3098,22 @@
     upd.addEventListener('click', () => { closeModelDd(); loadModels(); toast('Список моделей обновлён'); });
     list.appendChild(upd);
     d.appendChild(list);
-    document.body.appendChild(d);
+    ddLayer.appendChild(d);
+    document.body.appendChild(ddLayer);
     ddEl = d;
     btn.setAttribute('aria-expanded', 'true');
-    // позиционирование под кнопкой, как у контекстного меню UI.menu
-    const maxH = Math.min(320, Math.floor(window.innerHeight * 0.5));
-    list.style.maxHeight = maxH + 'px';
-    const r = btn.getBoundingClientRect();
-    const dr = d.getBoundingClientRect();
-    d.style.left = Math.max(8, Math.min(r.left, window.innerWidth - dr.width - 8)) + 'px';
-    d.style.top = (r.bottom + 6 + dr.height > window.innerHeight - 8)
-      ? Math.max(8, r.top - dr.height - 6) + 'px'
-      : (r.bottom + 6) + 'px';
+    // скролл любой прокручиваемой области — закрываем окно (как системные меню):
+    // fixed-позиция не «приклеена» к кнопке, иначе список улетит вверх
+    document.addEventListener('scroll', closeModelDd, true);
+    ddCloseOnScroll = true;
+    positionModelDd();
     const first = list.querySelector('.model-dd-item.current') || list.querySelector('.model-dd-item');
-    if (first) first.focus();
+    if (first) first.focus({ preventScroll: true });
     d.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') { closeModelDd(); btn.focus(); }
     });
   }
-  function ddSetStatus(text) {
+  function ddSetStatus(text, isErr) {
     // строка-статус внутри открытого списка («Загрузка модели в память…», ошибки)
     if (!ddEl) return;
     let s = ddEl.querySelector('.model-dd-status');
@@ -3085,6 +3126,8 @@
       s.appendChild(document.createElement('span'));
       ddEl.querySelector('.model-dd-list').appendChild(s);
     }
+    s.classList.toggle('err', !!isErr);
+    s.classList.toggle('spin', !isErr);
     s.lastChild.textContent = text;
   }
   function onModelPicked(model) {
@@ -3140,8 +3183,9 @@
         toast(data.message || 'Идёт генерация — модель загрузится автоматически после ответа.', 4200);
       } else {
         if (sel) { sel.value = previous; updateModelLabel(); }   // откат значения при отказе сервера
-        ddSetStatus(data.message || data.error || 'Не удалось переключить модель');
-        toast(data.message || data.error || 'Не удалось переключить модель', 4200);
+        const em = data.message || data.error || 'Не удалось переключить модель';
+        ddSetStatus(em, true);   // красный текст без спиннера: ошибка, а не загрузка
+        toast(em, 4200);
       }
     } catch {
       if (sel) { sel.value = previous; updateModelLabel(); }
