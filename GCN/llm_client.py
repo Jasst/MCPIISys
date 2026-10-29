@@ -380,11 +380,93 @@ _LMS_HEADERS = {"Authorization": f"Bearer {LM_STUDIO_API_KEY}"}
 # сразу после старта/финала генерации.
 _loaded_model_id: Optional[str] = None
 _load_ts: float = 0.0
+# «Намерение пользователя» — какая модель выбрана в интерфейсе (перезапись при
+# каждом выборе). Сервер использует её как ориентир после перезагрузки страницы
+# или рестарта процесса: если LM Studio уже держит эту модель в VRAM — заново
+# ничего НЕ загружается (см. reconcile_loaded_model / GET /ai/models).
+_desired_model_id: Optional[str] = None
 # глобальная блокировка: выгрузка/загрузка weights — эксклюзивная операция,
 # во время неё нельзя запускать генерацию и вторую смену модели
 model_ops_lock = asyncio.Lock()
 # фоновая задача дозарядки модели после смены (отменяется при новой смене)
 _preload_task: Optional[asyncio.Task] = None
+# фоновая сверка «выбранная модель vs VRAM» (одна на процесс, не пересоздаётся)
+_reconcile_task: Optional[asyncio.Task] = None
+
+
+def set_desired_model(model_id: Optional[str]) -> None:
+    """Запомнить выбор пользователя (для сверки после перезагрузки страницы)."""
+    global _desired_model_id
+    if model_id:
+        _desired_model_id = model_id
+
+
+def get_desired_model() -> Optional[str]:
+    return _desired_model_id
+
+
+async def reconcile_loaded_model(target: Optional[str]) -> Dict:
+    """Проверить, какая модель ФАКТИЧЕСКИ в VRAM, и загрузить target только
+    если её там нет.
+
+    Ключевой сценарий: пользователь перезагружает страницу — фронтенд снова
+    вызывает /ai/models/select с сохранённой моделью. Раньше это каждый раз
+    запускало unload+load (тяжёлая выгрузка/загрузка весов), даже когда модель
+    уже висела в памяти. Здесь мы сначала спрашиваем LM Studio
+    (/models/current): если целевая модель уже загружена — возвращаем
+    changed=False и НЕ трогаем VRAM. Идемпотентно.
+    """
+    global _loaded_model_id
+    target = target or LM_STUDIO_MODEL
+    async with model_ops_lock:
+        current = await get_loaded_model()
+        if current == target:
+            _loaded_model_id = target
+            return {"ok": True, "loaded": target, "changed": False, "error": None}
+        return await ensure_model_loaded(target)
+
+
+async def _reconcile_worker(target: str) -> None:
+    """Фоновая сверка: дождаться окончания генерации/операций с весами, затем
+    проверить VRAM и загрузить target ТОЛЬКО если он реально отсутствует."""
+    try:
+        for _ in range(900):              # максимум ~15 минут ожидания покоя
+            await asyncio.sleep(1.0)
+            if model_ops_lock.locked():
+                continue
+            st = await get_generation_status()
+            if not st.get("active"):
+                break
+        else:
+            return
+        # за время ожидания пользователь мог выбрать другую модель — берём свежее намерение
+        fresh = _desired_model_id or target
+        res = await reconcile_loaded_model(fresh)
+        if res["ok"] and res["changed"]:
+            logger.info(f"reconcile: модель {fresh!r} отсутствовала в VRAM — загружена")
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.debug(f"reconcile '{target}': {e}")
+
+
+def schedule_reconcile(target: Optional[str]) -> None:
+    """Одна фоновая задача сверки на весь процесс: если target уже в VRAM —
+    ничего не делает; если нет (например, сервер рестартовал) — дозагрузит
+    в момент покоя. Повторные вызовы для той же модели игнорируются."""
+    global _reconcile_task
+    target = target or LM_STUDIO_MODEL
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    if (_reconcile_task and not _reconcile_task.done()
+            and (_reconcile_task.get_name() or "").endswith(target)):
+        return
+    if _reconcile_task and not _reconcile_task.done():
+        _reconcile_task.cancel()
+    _reconcile_task = loop.create_task(_reconcile_worker(target),
+                                       name=f"model-reconcile:{target}")
 
 
 async def get_loaded_model() -> Optional[str]:
@@ -438,12 +520,17 @@ async def ensure_model_loaded(target: Optional[str]) -> Dict:
     """
     global _loaded_model_id, _load_ts, _preload_task
     target = target or LM_STUDIO_MODEL
+    set_desired_model(target)
     if _preload_task and not _preload_task.done():
         _preload_task.cancel()
         _preload_task = None
     async with model_ops_lock:
         current = await get_loaded_model()
         if current == target:
+            # Модель УЖЕ в VRAM (например, страница перезагрузилась и фронтенд
+            # повторно прислал тот же выбор) — НЕ трогаем веса: никаких
+            # unload/load, только сверка учёта. Это и есть защита от повторной
+            # загрузки модели при каждом обновлении страницы.
             _loaded_model_id = target
             return {"ok": True, "loaded": target, "changed": False, "error": None}
         try:

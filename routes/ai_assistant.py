@@ -84,7 +84,8 @@ from GCN.memory_graph import CognitiveMemory, Fact, Goal, GCNMemoryRouter
 
 from GCN.llm_client import (call_llm, call_llm_raw, call_llm_stream, list_models, llm_model_var,
                             list_models_cached, get_loaded_model, ensure_model_loaded,
-                            schedule_preload, model_ops_lock)
+                            schedule_preload, model_ops_lock,
+                            set_desired_model, get_desired_model, schedule_reconcile)
 from GCN.web_search import deep_search, is_time_sensitive_query
 from GCN.image_utils import enhance_prompt, generate_image
 from GCN.tool_router import ToolRegistry, ToolRouter, build_tool_trace_context
@@ -3494,6 +3495,12 @@ async def list_chat_models(address: str = Depends(require_auth)):
     Кэш с TTL (list_models_cached): страницу открывает каждый клиент, а список
     меняется редко. В ответе дополнительно отдаём `loaded` — модель, фактически
     стоящая в VRAM, чтобы UI подсвечивал реальное состояние, а не только выбор.
+
+    `desired` — последняя выбранная пользователями модель (намерение). Фронтенд
+    после перезагрузки страницы сверяет её с `loaded`: если это одна и та же
+    модель — повторный /models/select НЕ вызывается и веса заново НЕ грузятся;
+    если сервер рестартовал и модель выгрузилась — фронтенд сам попросит её
+    загрузить (или это сделает фоновая сверка schedule_reconcile).
     """
     models = await list_models_cached()
     loaded = None
@@ -3501,11 +3508,15 @@ async def list_chat_models(address: str = Depends(require_auth)):
         loaded = await get_loaded_model()
     except Exception as e:
         logger.debug(f"/ai/models loaded: {e}")
-    return {"models": models, "default": LM_STUDIO_MODEL, "loaded": loaded or LM_STUDIO_MODEL}
+    return {"models": models, "default": LM_STUDIO_MODEL,
+            "loaded": loaded or LM_STUDIO_MODEL, "desired": get_desired_model()}
 
 
 class ModelSelectRequest(BaseModel):
     model: Optional[str] = Field(None, max_length=200)
+    # check_only=True — «только проверить»: ничего не загружать, если целевая
+    # модель уже в VRAM (используется при загрузке/перезагрузке страницы)
+    check_only: bool = False
 
 
 @router.post("/models/select")
@@ -3520,14 +3531,36 @@ async def select_chat_model(body: ModelSelectRequest, address: str = Depends(req
         модель ставим в очередь фоновой дозарядки (schedule_preload) — она
         загрузится автоматически, как только печать закончится;
       * иначе выполняем ensure_model_loaded под глобальным model_ops_lock.
+        ensure_model_loaded идемпотентна: если target уже в VRAM — веса НЕ
+        трогаются (changed=False), повторной загрузки не происходит;
+      * check_only=True (стартап/перезагрузка страницы): если target уже в
+        VRAM — просто подтверждаем; если нет — НЕ блокируем HTTP-запрос долгой
+        загрузкой, а ставим фоновую сверку (schedule_reconcile), которая
+        дозагрузит модель в момент покоя, и сразу отвечаем loaded=false.
     """
     target = (body.model or "").strip() or LM_STUDIO_MODEL
+    set_desired_model(target)
+    # Выбор из выпадашка = реальное переключение весов в LM Studio.
+    # ensure_model_loaded идемпотентна: если целевая модель уже в VRAM
+    # (например, страница перезагрузилась и фронтенд повторно прислал тот же
+    # выбор) — веса НЕ выгружаются и НЕ загружаются заново, ответ будет
+    # changed=false. Никакой «повторной загрузки модели после F5» больше нет.
     models = await list_models_cached()
     # Whitelist: если LM Studio недоступна (кэш пуст) — не блокируем выбор
     # дефолтной модели; про неизвестный id при известном списке — ошибка.
     if models and target not in models:
         return JSONResponse({"detail": "unknown_model",
                              "message": "Модель не найдена в LM Studio"}, status_code=400)
+    if body.check_only:
+        try:
+            current = await get_loaded_model()
+        except Exception:
+            current = None
+        if current == target:
+            return {"ok": True, "loaded": target, "changed": False, "already_loaded": True}
+        schedule_reconcile(target)
+        return {"ok": True, "loaded": current, "changed": False, "already_loaded": False,
+                "queued": target}
     busy = await any_active_generation()
     if busy["active"]:
         schedule_preload(target)
