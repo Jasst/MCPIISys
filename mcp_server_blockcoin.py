@@ -170,6 +170,20 @@ _LOGIN_HINT = (
     "и вызовите инструмент login(code)."
 )
 
+# NEW: текст для случая «login() прошёл успешно, но следующий вызов всё равно
+# forbidden». Типичная причина — облачный MCP-клиент/шлюз открывает новую
+# MCP-сессию (или не шлёт mcp-session-id вообще) на каждый tools/call, поэтому
+# привязка по session-id теряется. Правильный путь для таких клиентов —
+# заголовок Authorization: Bearer <код> на КАЖДОМ HTTP-запросе к /mcp.
+_LOGIN_RELOGIN_HINT = (
+    "Если login(code) уже вернул status ok, но этот вызов всё равно forbidden: "
+    "ваш клиент не переиспользует mcp-session-id между вызовами (типично для "
+    "облачных MCP-шлюзов). Надёжное решение — передавать тот же код доступа в "
+    "заголовке каждого запроса: 'Authorization: Bearer <код>' (в настройках "
+    "MCP-сервера обычно есть поле headers). Повторный login(code) без смены "
+    "сессии ничего не изменит."
+)
+
 
 def _http_request(ctx: "Optional[Context]"):
     """Starlette-запрос для HTTP-транспорта или None (stdio / вне запроса)."""
@@ -303,6 +317,8 @@ def _user_from_ctx(ctx: "Optional[Context]") -> "Optional[str]":
     """Пользователь, подтверждённый для ТЕКУЩЕГО HTTP-запроса.
 
     Источники (в порядке приоритета):
+      0) Authorization: Bearer <код доступа> — надёжный путь для клиентов,
+         которые пересоздают MCP-сессию на каждый вызов;
       1) X-User-Id — только при MCP_TRUST_X_USER_ID=1 (по умолчанию выкл.);
       2) привязка mcp-session-id -> user_id, созданная login(code);
       3) NEW: привязка ip -> user_id (fallback, если клиент не шлёт стабильный
@@ -325,6 +341,11 @@ def _user_from_ctx(ctx: "Optional[Context]") -> "Optional[str]":
                 return uid.strip()
 
         sid = req.headers.get("mcp-session-id")
+        # ВАЖНО: многие облачные MCP-шлюзы (Qwen/ChatGPT-подключение и т.п.)
+        # открывают НОВУЮ MCP-сессию на каждый tools/call либо вообще не шлют
+        # mcp-session-id — тогда привязка login(code) теряется и клиент получает
+        # «forbidden» сразу после успешного входа. Логируем оба случая, чтобы
+        # отличать «клиент не шлёт sid» от «sid другой сессии».
         if sid:
             entry = _HTTP_SESSIONS.get(sid)
             if entry:
@@ -335,6 +356,12 @@ def _user_from_ctx(ctx: "Optional[Context]") -> "Optional[str]":
             logger.info(
                 f"[auth] sid={sid[:8]!r} не найден в _HTTP_SESSIONS "
                 f"(known={len(_HTTP_SESSIONS)}) — пробую IP-fallback"
+            )
+        else:
+            logger.info(
+                "[auth] запрос пришёл БЕЗ заголовка mcp-session-id — "
+                "привязка login(code) к сессии невозможна; используй "
+                "Authorization: Bearer <код> на каждом запросе"
             )
 
         # NEW: IP-fallback
@@ -424,7 +451,7 @@ def _resolve_user(user_id: "Optional[str]", ctx: "Optional[Context]" = None) -> 
         # args.user_id/env/default_user — то есть ЛЮБОЙ клиент мог читать
         # чужую память, зная id. Теперь по HTTP нужен login(code).
         if not _ALLOW_LEGACY_HTTP:
-            raise PermissionError(_LOGIN_HINT)
+            raise PermissionError(_LOGIN_HINT + " " + _LOGIN_RELOGIN_HINT)
         if user_id:
             return _canon_user_id(user_id) or user_id.strip()
         if _ENV_DEFAULT_USER:
@@ -583,6 +610,12 @@ async def login(
     использовать много раз (переподключение после перезапуска клиента, работа
     с нескольких устройств и т.п.). Отзыв немедленно сбрасывает все активные
     MCP-сессии этого пользователя.
+
+    ВАЖНО для клиентов, которые открывают новую MCP-сессию на каждый вызов
+    (облачные шлюзы: Qwen, ChatGPT и т.п.): вход по login() привязывается к
+    mcp-session-id, и если клиент его не переиспользует — следующий вызов будет
+    forbidden. Надёжный способ: слать тот же код в заголовке каждого запроса
+    'Authorization: Bearer <код>' — тогда login() вообще не нужен.
     """
     req = _http_request(ctx)
     if req is None:
@@ -614,7 +647,10 @@ async def login(
         f"(ip={ip}, ip_sessions={len(_HTTP_IP_SESSIONS)})"
     )
     return {"status": "ok", "user_id": uid,
-            "message": "Вход выполнен. Дальше user_id передавать не нужно."}
+            "message": "Вход выполнен. Дальше user_id передавать не нужно. "
+                       "Если следующий вызов вернёт forbidden — твой клиент "
+                       "не переиспользует mcp-session-id; слай тот же код в "
+                       "заголовке каждого запроса: Authorization: Bearer <код>."}
 
 
 @mcp.tool()

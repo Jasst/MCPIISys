@@ -77,6 +77,19 @@
   content: ''; flex: none; width: 6px; height: 6px; border-radius: 50%;
   background: var(--success-color); box-shadow: var(--glow-sm);
 }
+/* подпись «в памяти: …» на кнопке модели — когда выбрана одна модель, а
+   в VRAM держится другая. Скрыта по умолчанию (атрибут hidden + правило
+   ниже), JS показывает её через st.hidden = false */
+.model-select .model-status[hidden] { display: none; }
+.model-select .model-status {
+  flex: none; font-size: 10.5px; color: var(--text-muted);
+  white-space: nowrap; max-width: 120px; overflow: hidden; text-overflow: ellipsis;
+}
+@media (max-width: 900px) {
+  /* на мобильных шапка тесная (кнопка и так max-width:150px) —
+     реальное состояние видно в title кнопки и в выпадающем списке */
+  .model-select .model-status { display: none; }
+}
 .model-select svg { flex: none; opacity: .7; transition: transform var(--transition-fast); }
 .model-select[aria-expanded="true"] { background: var(--bg-hover); color: var(--text-main); }
 .model-select[aria-expanded="true"] svg { transform: rotate(180deg); }
