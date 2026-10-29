@@ -86,6 +86,7 @@ from GCN.llm_client import (call_llm, call_llm_raw, call_llm_stream, list_models
                             list_models_cached, get_loaded_model, ensure_model_loaded,
                             schedule_preload, model_ops_lock,
                             set_desired_model, get_desired_model, schedule_reconcile,
+                            loaded_model_cached as vram_state_cached,
                             _MODELS_CACHE_TTL_S)
 from GCN.web_search import deep_search, is_time_sensitive_query
 from GCN.image_utils import enhance_prompt, generate_image
@@ -3542,9 +3543,17 @@ async def list_chat_models(address: str = Depends(require_auth)):
     # ответит «Model with identifier 'current' not found».
     if not loaded or (models and loaded not in models):
         loaded = None
+    desired = get_desired_model()
+    # САМО-СОГЛАСОВАННОЕ НАМЕРЕНИЕ: если пользователь в другом окне/на другом
+    # устройстве уже переключил веса, его старый выбор больше не «намерение» —
+    # иначе каждое новое окно упорно просило бы дозагрузить уже ненужную модель
+    # и получало ложный toast «загрузится автоматически, как только освободится».
+    if loaded and desired and desired != loaded and desired in models:
+        set_desired_model(loaded)
+        desired = loaded
     default = LM_STUDIO_MODEL if (not models or LM_STUDIO_MODEL in models) else (models[0] if models else None)
     return {"models": models, "default": default,
-            "loaded": loaded, "desired": get_desired_model()}
+            "loaded": loaded, "desired": desired}
 
 
 class ModelSelectRequest(BaseModel):
@@ -3598,8 +3607,12 @@ async def select_chat_model(body: ModelSelectRequest, address: str = Depends(req
     # показать toast «в памяти сейчас X, Y загрузится автоматически», хотя
     # грузить ничего не нужно). Если наш учёт (_loaded_model_id) совпадает с
     # target и список моделей свежий — подтверждаем выбор БЕЗ опроса LMS.
+    # ВАЖНО: берём учётный кэш ТОЛЬКО через loaded_model_cached() — он
+    # протухает по тому же TTL, что и состояние /ai/models. Прямое чтение
+    # _loaded_model_id давало бы ложное «уже в памяти» после ручного
+    # выгружения модели в LM Studio (кэш залипал навсегда).
     from GCN import llm_client as _lc
-    hot = (_lc._loaded_model_id == target and models
+    hot = (vram_state_cached() == target and models
            and time.monotonic() - _lc._models_cache["ts"] < _MODELS_CACHE_TTL_S)
     if body.check_only:
         if hot:

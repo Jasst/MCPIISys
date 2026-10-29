@@ -2948,6 +2948,18 @@
     // в выпадающем списке (.model-dd-dot); если LM Studio сообщает, что в
     // памяти висит другая модель, кнопка честно показывает это, а не только галочку «выбрано»
     if (btn) btn.classList.toggle('loaded', !!(cur && modelList.loaded === cur));
+    // ЧЕСТНЫЙ СТАТУС: когда выбрана одна модель, а в памяти держится ДРУГАЯ
+    // (её грузят в фоне / переключили вручную / другой вкладок сменил веса),
+    // подпись под именем показывает реальное положение дел. Раньше UI молча
+    // подсвечивал модель из VRAM и создавал ощущение «выбор не применяется».
+    if (btn && cur) {
+      const other = modelList.loaded && modelList.loaded !== cur ? modelList.loaded : null;
+      const st = $('#modelStatus');
+      if (st) {
+        if (other) { st.hidden = false; st.textContent = 'в памяти: ' + shortModelName(other, 26); }
+        else { st.hidden = true; st.textContent = ''; }
+      }
+    }
   }
   // Селектор НИКОГДА не блокируется через disabled (браузер закрашивает его серым,
   // и он выглядит «мёртвым»). Вместо этого вешаем класс .busy с подсказкой:
@@ -2988,14 +3000,18 @@
         }
       }
       // КЛЮЧЕВОЕ ПРАВИЛО UI: интерфейс выбирает ту модель, которая СЕЙЧАС В
-      // ПАМЯТИ (data.loaded). Если сохранённый выбор совпадает с загруженной
-      // моделью — оставляем его; если в VRAM висит ДРУГАЯ модель, подсвечиваем
-      // реальную (она готова к работе), а не «выбранную когда-то», которую ещё
-      // надо грузить. При неизвестном состоянии loaded — прежний приоритет
-      // saved > default > первый.
-      const pick = models.includes(data.loaded) ? data.loaded
+      // ПАМЯТИ (data.loaded) — она реально готова к работе. Но «выбранная» ≠
+      // «в памяти»: если пользователь явно выбрал ДРУГУЮ модель (сервер
+      // подтверждает это через data.desired — намерение последнего выбора),
+      // НЕ перебиваем его выбор моделью из VRAM, иначе клик по X мгновенно
+      // «возвращал» подсветку на Y и казалось, что выбор не применяется.
+      // При неизвестном состоянии loaded — прежний приоритет saved > default > первый.
+      const explicitChoice = data.desired && models.includes(data.desired)
+                             && (!data.loaded || data.desired !== data.loaded);
+      const pick = (explicitChoice ? data.desired : null)
+                 || (models.includes(data.loaded) ? data.loaded
                  : (models.includes(saved) ? saved
-                 : (models.includes(data.default) ? data.default : models[0]));
+                 : (models.includes(data.default) ? data.default : models[0])));
       if (sel) {
         sel.innerHTML = '';
         for (const id of models) sel.appendChild(new Option(id, id));
@@ -3037,11 +3053,37 @@
         modelList = Object.assign({}, modelList, { loaded: pick });
         updateModelLabel();
       } else if (data.queued) {
-        toast(`В памяти сейчас ${shortModelName(loaded)}. Модель ${shortModelName(pick)} загрузится автоматически, как только LM Studio освободится.`, 5200);
-        setTimeout(() => { loadModels(); }, 8000); // подтянем актуальный статус
+        // ЧЕСТНЫЙ ТЕКСТ: раньше здесь всегда писалось «загрузится
+        // автоматически, как только LM Studio освободится» — даже когда LM
+        // Studio полностью свободна и просто держит в памяти ДРУГУЮ модель
+        // (её пользователь мог переключить вручную или в другом окне).
+        // Формулировка зависит от реального состояния: идёт печать — ждём
+        // освобождения; печати нет — веса перезаряжаются прямо сейчас.
+        const busyNow = !!(gen || genFlagGet());
+        toast(busyNow
+          ? `В памяти ${shortModelName(loaded)}. ${shortModelName(pick)} загрузится автоматически, как только генерация закончится.`
+          : `В памяти ${shortModelName(loaded)}. ${shortModelName(pick)} загружается сейчас — это займёт несколько секунд.`);
+        // Подтянем статус не одним таймером, а короткими шагами: тяжёлая
+        // модель может грузиться минуту, и пользователь должен увидеть, как
+        // метка «в памяти» переезжает на выбранную модель, а не ждать 8 секунд
+        // с устаревшим состоянием.
+        pollUntilLoaded(pick);
       }
     } catch { /* сервер недоступен — попробуем при следующем открытии списка */ }
     finally { startupCheckInFlight = false; }
+  }
+  let vramPollTimer = null;
+  function pollUntilLoaded(id, deadlineMs = 120000) {
+    if (vramPollTimer) clearTimeout(vramPollTimer);
+    const t0 = Date.now();
+    const step = async () => {
+      vramPollTimer = null;
+      if (modelList.loaded === id) return;               // цель достигнута
+      if (Date.now() - t0 > deadlineMs) return;          // дальше решает сервер
+      await loadModels();                                 // обновим метку «в VRAM»
+      if (modelList.loaded !== id) vramPollTimer = setTimeout(step, 4000);
+    };
+    vramPollTimer = setTimeout(step, 3500);
   }
   // ---- выпадающий список моделей в стиле приложения (.model-dd) ----
   // Окно живёт во временном layer-контейнере на body: position:fixed внутри
