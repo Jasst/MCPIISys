@@ -897,6 +897,7 @@
   function refreshUI() {
     updateHeader();
     renderList();
+    if (typeof updateModelBusy === 'function') updateModelBusy();
   }
 
   function syncChips() {
@@ -2927,6 +2928,27 @@
     const sel = $('#modelSelect');
     return sel && !sel.hidden && sel.value ? sel.value : null;
   }
+  // Селектор НИКОГДА не блокируется через disabled (браузер закрашивает его серым,
+  // и он выглядит «мёртвым»). Вместо этого вешаем класс .busy с подсказкой:
+  // выбор остаётся возможным — сервер сам ответит 409 и поставит модель в очередь.
+  function updateModelBusy() {
+    const sel = $('#modelSelect');
+    if (!sel) return;
+    // ВАЖНО: «занято» показывает ТОЛЬКО наша активная печать (gen).
+    // genFlagGet() — это localStorage-флаг владения локом, который снимается
+    // не сразу по окончании ответа, а только после финального commit/pushState
+    // (см. releaseGenLock в finally). Если учитывать его здесь, рамка .busy
+    // залипала бы и без реальной генерации — плюс на каждой перерисовке
+    // менялся title, что выглядело как «кнопка всегда серая/подсвеченная».
+    const busy = !!gen;
+    if (busy) {
+      sel.classList.add('busy');
+      sel.title = 'Идёт генерация: смена модели применится автоматически после окончания ответа';
+    } else {
+      sel.classList.remove('busy');   // явное снятие: обычное состояние контрола
+      sel.removeAttribute('title');
+    }
+  }
   async function loadModels() {
     const sel = $('#modelSelect');
     if (!sel) return;
@@ -2976,7 +2998,9 @@
     }
     if (modelSwitching) return;
     modelSwitching = true;
-    if (sel) { sel.disabled = true; sel.title = 'Загрузка модели…'; }
+    // НЕ ставим sel.disabled — браузер закрасит селектор серым и он будет
+    // выглядеть мёртвым. Вместо этого подсветка .busy + подсказка в title.
+    if (sel) { sel.classList.add('busy'); sel.title = 'Загрузка модели в память…'; }
     try {
       const r = await fetch('/ai/models/select', {
         method: 'POST', credentials: 'same-origin',
@@ -3000,7 +3024,7 @@
       toast('Сервер недоступен: модель не переключена');
     } finally {
       modelSwitching = false;
-      if (sel) { sel.disabled = false; sel.title = ''; }
+      updateModelBusy();   // снимает .busy/title, вернёт обычный вид (или «занято», если печать началась)
     }
   }
   const modelSel = $('#modelSelect');
