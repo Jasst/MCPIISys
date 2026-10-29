@@ -61,12 +61,19 @@
   font: inherit; font-size: 13px; box-sizing: border-box;
   background: transparent; color: var(--text-secondary);
   border: 1px solid transparent;
+  display: inline-flex; align-items: center; gap: 6px;
   cursor: pointer; transition: background var(--transition-fast);
 }
 @media (hover: hover) {
   .model-select:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-main); }
 }
 .model-select:focus-visible { outline: none; border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-glow); }
+/* Кнопка-триггер (заменила нативный select): имя модели + стрелка. */
+.model-select[hidden] { display: none; }   /* hidden важнее inline-flex выше */
+.model-select .model-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-select svg { flex: none; opacity: .7; transition: transform var(--transition-fast); }
+.model-select[aria-expanded="true"] { background: var(--bg-hover); color: var(--text-main); }
+.model-select[aria-expanded="true"] svg { transform: rotate(180deg); }
 /* Селектор никогда не блокируется через disabled (браузер закрасил бы его
    «мёртвым» серым). Занятость показывается только акцентной рамкой:
    во время генерации или загрузки модели выбор остаётся возможным — сервер
@@ -96,4 +103,55 @@
   .ui-actions { flex-direction: column-reverse; }
   .ui-actions .ui-btn { width: 100%; }
   .model-select { max-width: 150px; font-size: 16px; }
+}
+
+/* ---------- выпадающий список моделей (замена нативного <select>) ---------- */
+/* Нативный dropdown рисуется ОС/браузером: белое системное окно с галочками,
+   которое совсем не похоже на приложение. Список собран из тех же примитивов,
+   что и контекстное меню (.ui-menu): тёмная/светлая подложка --bg-secondary,
+   радиус 10px, та же тень и те же отступы — выпадашка выглядит родной. */
+.model-dd {
+  position: fixed; z-index: 10002; box-sizing: border-box; padding: 4px;
+  background: var(--bg-secondary); border: 1px solid var(--border-color);
+  border-radius: 10px; box-shadow: var(--shadow-lg);
+  animation: ddIn var(--transition-fast) ease-out;
+}
+@keyframes ddIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .model-dd { animation: none; } }
+.model-dd-head {
+  padding: 6px 10px 7px; font-size: 11px; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--text-muted);
+  border-bottom: 1px solid var(--border-color); margin: 0 2px 4px;
+}
+.model-dd-list { overflow-y: auto; overscroll-behavior: contain; }
+.model-dd-item {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 8px 10px; border: 0; border-radius: 6px;
+  text-align: left; font: inherit; font-size: 13px; cursor: pointer;
+  background: transparent; color: var(--text-primary);
+}
+.model-dd-item:hover:not(:disabled), .model-dd-item:focus-visible {
+  background: var(--bg-hover); outline: none;
+}
+.model-dd-name {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.model-dd-meta { flex: none; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+/* «в VRAM» — акцентная точка вместо символа ● в тексте имени */
+.model-dd-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent-color); }
+/* галочка выбранной модели — как в системных списках, но нашим цветом */
+.model-dd-check { color: var(--accent-color); font-size: 14px; line-height: 1; }
+.model-dd-item.current .model-dd-name { color: var(--text-main); font-weight: 600; }
+.model-dd-sep { height: 1px; margin: 4px 2px; background: var(--border-color); }
+.model-dd-item.muted { color: var(--text-muted); cursor: default; }
+.model-dd-item.spin { color: var(--text-secondary); }
+.model-dd-spinner {
+  display: inline-block; width: 12px; height: 12px; flex: none;
+  border: 2px solid var(--border-color); border-top-color: var(--accent-color);
+  border-radius: 50%; animation: ddSpin .8s linear infinite;
+}
+@keyframes ddSpin { to { transform: rotate(360deg); } }
+@media (max-width: 900px) {
+  .model-dd-item { min-height: 44px; padding: 10px 12px; font-size: 16px; }
+  .model-dd-head { font-size: 12px; }
 }

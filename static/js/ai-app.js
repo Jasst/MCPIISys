@@ -2924,55 +2924,175 @@
 
   // ---- выбор модели LM Studio ----
   const MODEL_KEY = 'chatModel';
+  let modelList = [];        // последний ответ /ai/models: {models, loaded, default}
   function currentModel() {
     const sel = $('#modelSelect');
-    return sel && !sel.hidden && sel.value ? sel.value : null;
+    return sel && sel.value ? sel.value : null;
+  }
+  // Видимость контрола и подпись кнопки — теперь это кнопка-триггер, а не select:
+  // системный dropdown рисуется ОС и не совпадает со стилем приложения.
+  function setModelControlVisible(v) {
+    const btn = $('#modelSelectBtn');
+    if (btn) btn.hidden = !v;
+    const sel = $('#modelSelect');
+    if (sel) sel.hidden = !v;
+  }
+  function updateModelLabel() {
+    const name = $('#modelName');
+    if (!name) return;
+    const cur = currentModel();
+    name.textContent = cur || 'Модель…';
+    const btn = $('#modelSelectBtn');
+    if (btn) btn.title = cur ? ('Модель: ' + cur + ' — нажмите, чтобы сменить') : 'Выбрать модель';
   }
   // Селектор НИКОГДА не блокируется через disabled (браузер закрашивает его серым,
   // и он выглядит «мёртвым»). Вместо этого вешаем класс .busy с подсказкой:
   // выбор остаётся возможным — сервер сам ответит 409 и поставит модель в очередь.
   function updateModelBusy() {
-    const sel = $('#modelSelect');
-    if (!sel) return;
+    const ctrl = $('#modelSelectBtn') || $('#modelSelect');
+    if (!ctrl) return;
     // ВАЖНО: «занято» показывает ТОЛЬКО наша активная печать (gen).
     // genFlagGet() — это localStorage-флаг владения локом, который снимается
-    // не сразу по окончании ответа, а только после финального commit/pushState
-    // (см. releaseGenLock в finally). Если учитывать его здесь, рамка .busy
-    // залипала бы и без реальной генерации — плюс на каждой перерисовке
-    // менялся title, что выглядело как «кнопка всегда серая/подсвеченная».
+    // не сразу по окончании ответа, а только после финального commit/pushState.
     const busy = !!gen;
     if (busy) {
-      sel.classList.add('busy');
-      sel.title = 'Идёт генерация: смена модели применится автоматически после окончания ответа';
+      ctrl.classList.add('busy');
+      ctrl.title = 'Идёт генерация: смена модели применится автоматически после окончания ответа';
     } else {
-      sel.classList.remove('busy');   // явное снятие: обычное состояние контрола
-      sel.removeAttribute('title');
+      ctrl.classList.remove('busy');   // явное снятие: обычное состояние контрола
+      updateModelLabel();              // возвращаем обычный title с именем модели
     }
   }
   async function loadModels() {
-    const sel = $('#modelSelect');
-    if (!sel) return;
     try {
       const r = await fetch('/ai/models', { credentials: 'same-origin', cache: 'no-store' });
       if (!r.ok) return;
       const data = await r.json();
       const models = Array.isArray(data.models) ? data.models : [];
       if (!models.length) return;
+      modelList = data;
+      const sel = $('#modelSelect');
       const saved = localStorage.getItem(MODEL_KEY);
       const pick = models.includes(saved) ? saved : (models.includes(data.default) ? data.default : models[0]);
-      sel.innerHTML = '';
-      for (const id of models) {
-        const opt = new Option(id, id);
-        // помечаем модель, которая реально стоит в VRAM (данные /api/v0 с сервера),
-        // а не только «выбранную в выпадашке» — это разные вещи после сбоя загрузки
-        if (data.loaded && id === data.loaded) opt.textContent = id + ' ●';
-        sel.appendChild(opt);
+      if (sel) {
+        sel.innerHTML = '';
+        for (const id of models) sel.appendChild(new Option(id, id));
+        sel.value = pick;
       }
-      sel.value = pick;
-      sel.hidden = false;
+      setModelControlVisible(true);
+      updateModelLabel();
       // сохранённая модель исчезла из LM Studio (удалена/выключена) — предупреждаем
       if (saved && !models.includes(saved)) toast('Сохранённая модель недоступна в LM Studio, выбран другой вариант');
-    } catch { /* LM Studio недоступна: селектор остаётся скрытым */ }
+    } catch { /* LM Studio недоступна: контрол остаётся скрытым */ }
+  }
+  // ---- выпадающий список моделей в стиле приложения (.model-dd) ----
+  let ddEl = null;
+  function closeModelDd() {
+    if (!ddEl) return;
+    ddEl.remove(); ddEl = null;
+    const btn = $('#modelSelectBtn');
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+  }
+  document.addEventListener('pointerdown', (e) => {
+    if (ddEl && !ddEl.contains(e.target) && !e.target.closest('#modelSelectBtn')) closeModelDd();
+  }, true);
+  window.addEventListener('resize', closeModelDd);
+  function openModelDd() {
+    const btn = $('#modelSelectBtn');
+    if (!btn || !modelList.models || !modelList.models.length) return;
+    if (ddEl) { closeModelDd(); return; }        // повторный клик — закрыть
+    const d = document.createElement('div');
+    d.className = 'model-dd';
+    d.setAttribute('role', 'listbox');
+    d.setAttribute('aria-label', 'Модели LM Studio');
+    const head = document.createElement('div');
+    head.className = 'model-dd-head';
+    head.textContent = 'Модель LM Studio';
+    d.appendChild(head);
+    const list = document.createElement('div');
+    list.className = 'model-dd-list';
+    const cur = currentModel();
+    for (const id of modelList.models) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'model-dd-item' + (id === cur ? ' current' : '');
+      b.setAttribute('role', 'option');
+      b.setAttribute('aria-selected', String(id === cur));
+      const nm = document.createElement('span');
+      nm.className = 'model-dd-name';
+      nm.textContent = id;
+      nm.title = id;
+      b.appendChild(nm);
+      const meta = document.createElement('span');
+      meta.className = 'model-dd-meta';
+      if (modelList.loaded && id === modelList.loaded) {
+        const dot = document.createElement('span');
+        dot.className = 'model-dd-dot';
+        dot.title = 'Модель сейчас в памяти (VRAM)';
+        meta.appendChild(dot);
+      }
+      if (id === cur) {
+        const chk = document.createElement('span');
+        chk.className = 'model-dd-check';
+        chk.textContent = '✓';
+        meta.appendChild(chk);
+      }
+      if (meta.childNodes.length) b.appendChild(meta);
+      b.addEventListener('click', () => {
+        closeModelDd();
+        if (id !== cur) onModelPicked(id);
+      });
+      list.appendChild(b);
+    }
+    const sep = document.createElement('div');
+    sep.className = 'model-dd-sep';
+    list.appendChild(sep);
+    const upd = document.createElement('button');
+    upd.type = 'button';
+    upd.className = 'model-dd-item muted';
+    upd.textContent = '↻ Обновить список';
+    upd.addEventListener('click', () => { closeModelDd(); loadModels(); toast('Список моделей обновлён'); });
+    list.appendChild(upd);
+    d.appendChild(list);
+    document.body.appendChild(d);
+    ddEl = d;
+    btn.setAttribute('aria-expanded', 'true');
+    // позиционирование под кнопкой, как у контекстного меню UI.menu
+    const maxH = Math.min(320, Math.floor(window.innerHeight * 0.5));
+    list.style.maxHeight = maxH + 'px';
+    const r = btn.getBoundingClientRect();
+    const dr = d.getBoundingClientRect();
+    d.style.left = Math.max(8, Math.min(r.left, window.innerWidth - dr.width - 8)) + 'px';
+    d.style.top = (r.bottom + 6 + dr.height > window.innerHeight - 8)
+      ? Math.max(8, r.top - dr.height - 6) + 'px'
+      : (r.bottom + 6) + 'px';
+    const first = list.querySelector('.model-dd-item.current') || list.querySelector('.model-dd-item');
+    if (first) first.focus();
+    d.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { closeModelDd(); btn.focus(); }
+    });
+  }
+  function ddSetStatus(text) {
+    // строка-статус внутри открытого списка («Загрузка модели в память…», ошибки)
+    if (!ddEl) return;
+    let s = ddEl.querySelector('.model-dd-status');
+    if (!s) {
+      s = document.createElement('div');
+      s.className = 'model-dd-item spin model-dd-status';
+      const sp = document.createElement('span');
+      sp.className = 'model-dd-spinner';
+      s.appendChild(sp);
+      s.appendChild(document.createElement('span'));
+      ddEl.querySelector('.model-dd-list').appendChild(s);
+    }
+    s.lastChild.textContent = text;
+  }
+  function onModelPicked(model) {
+    const sel = $('#modelSelect');
+    const prev = sel ? sel.value : null;
+    if (sel) sel.value = model;
+    updateModelLabel();
+    selectModel(model, prev);
   }
   let modelSwitching = false;
   async function selectModel(model, previous) {
@@ -2983,6 +3103,7 @@
     if (gen || genFlagGet()) {
       if (sel) sel.value = previous;              // откатываем выбор: сейчас нельзя
       localStorage.setItem(MODEL_KEY, model);     // запомнили намерение
+      updateModelLabel();
       try {
         const r = await fetch('/ai/models/select', {
           method: 'POST', credentials: 'same-origin',
@@ -2998,9 +3119,11 @@
     }
     if (modelSwitching) return;
     modelSwitching = true;
-    // НЕ ставим sel.disabled — браузер закрасит селектор серым и он будет
-    // выглядеть мёртвым. Вместо этого подсветка .busy + подсказка в title.
-    if (sel) { sel.classList.add('busy'); sel.title = 'Загрузка модели в память…'; }
+    // НЕ ставим disabled — браузер закрасит контрол серым и он будет выглядеть
+    // мёртвым. Вместо этого подсветка .busy + подсказка в title.
+    const ctrl = $('#modelSelectBtn') || sel;
+    if (ctrl) { ctrl.classList.add('busy'); ctrl.title = 'Загрузка модели в память…'; }
+    ddSetStatus('Загрузка модели в память…');
     try {
       const r = await fetch('/ai/models/select', {
         method: 'POST', credentials: 'same-origin',
@@ -3016,27 +3139,26 @@
         localStorage.setItem(MODEL_KEY, model);
         toast(data.message || 'Идёт генерация — модель загрузится автоматически после ответа.', 4200);
       } else {
-        if (sel) sel.value = previous;             // откат значения при отказе сервера
+        if (sel) { sel.value = previous; updateModelLabel(); }   // откат значения при отказе сервера
+        ddSetStatus(data.message || data.error || 'Не удалось переключить модель');
         toast(data.message || data.error || 'Не удалось переключить модель', 4200);
       }
     } catch {
-      if (sel) sel.value = previous;
+      if (sel) { sel.value = previous; updateModelLabel(); }
       toast('Сервер недоступен: модель не переключена');
     } finally {
       modelSwitching = false;
       updateModelBusy();   // снимает .busy/title, вернёт обычный вид (или «занято», если печать началась)
     }
   }
-  const modelSel = $('#modelSelect');
-  if (modelSel) {
-    let prevModel = modelSel.value;
-    modelSel.addEventListener('focus', () => { prevModel = modelSel.value; });
-    modelSel.addEventListener('change', () => {
-      const next = modelSel.value;
-      if (next === prevModel) return;
-      const from = prevModel;
-      prevModel = next;
-      selectModel(next, from);
+  const modelBtn = $('#modelSelectBtn');
+  if (modelBtn) {
+    modelBtn.addEventListener('click', openModelDd);
+    modelBtn.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        openModelDd();
+      }
     });
   }
   loadModels();
