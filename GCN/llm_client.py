@@ -469,25 +469,70 @@ def schedule_reconcile(target: Optional[str]) -> None:
                                        name=f"model-reconcile:{target}")
 
 
+def _extract_loaded_key(data) -> Optional[str]:
+    """Вытащить id загруженной модели из ответа нативного API LM Studio.
+
+    Ответы разных версий LMS различаются по форме:
+      * GET /api/v0/models/current (новые сборки) — объект модели с "key";
+      * список ["model-a", "model-b"] — первая загруженная;
+      * {"loaded_models": [...]} / {"models": [...]} — список объектов/строк;
+      * {"key": ...} / {"id": ...} / {"model": ...}.
+    Если распознать ничего не удалось — None (состояние неизвестно).
+    """
+    def _key_of(item):
+        if isinstance(item, str):
+            return item or None
+        if isinstance(item, dict):
+            return item.get("key") or item.get("id") or item.get("model") or None
+        return None
+
+    if data is None:
+        return None
+    if isinstance(data, list):
+        return _key_of(data[0]) if data else None
+    if isinstance(data, dict):
+        for field in ("loaded_models", "models", "instances"):
+            lst = data.get(field)
+            if isinstance(lst, list) and lst:
+                k = _key_of(lst[0])
+                if k:
+                    return k
+        for field in ("key", "id", "model"):
+            v = data.get(field)
+            if isinstance(v, str) and v:
+                return v
+    return None
+
+
 async def get_loaded_model() -> Optional[str]:
-    """id модели, фактически стоящей в VRAM LM Studio (по данным самого LMS)."""
+    """id модели, фактически стоящей в VRAM LM Studio (по данным самого LMS).
+
+    ВАЖНО: при любой нестандартной ситуации (старая версия LMS без этого
+    эндпоинта, прокси, отдающий HTML-страницу 404, таймаут) возвращаем
+    УЧЁТНЫЙ КЭШ _loaded_model_id, а НЕ выдуманные значения вроде 'current' —
+    иначе это «id» уходит в unload/load и LM Studio отвечает
+    `Model with identifier 'current' not found`.
+    """
     global _loaded_model_id
     url = f"{_LMS_API_BASE}/models/current"
     try:
         session = await _get_session()
         async with session.get(url, headers=_LMS_HEADERS,
                                timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            if resp.status == 404:      # API недоступно (старая версия LM Studio)
+            if resp.status != 200:      # нет эндпоинта / ошибка — опора на учётный кэш
                 return _loaded_model_id
-            if resp.status != 200:
-                raise RuntimeError(f"LM Studio /models/current: HTTP {resp.status}")
-            data = await resp.json()
+            try:
+                data = await resp.json(content_type=None)
+            except Exception:
+                return _loaded_model_id   # вместо JSON пришёл HTML/текст — не разваливаем выбор
     except asyncio.CancelledError:
         raise
     except Exception as e:
         logger.debug(f"get_loaded_model: {e} (использую учётный кэш)")
         return _loaded_model_id
-    _loaded_model_id = data.get("key") or data.get("id") or None
+    key = _extract_loaded_key(data)
+    if key:
+        _loaded_model_id = key
     return _loaded_model_id
 
 
@@ -533,8 +578,14 @@ async def ensure_model_loaded(target: Optional[str]) -> Dict:
             # загрузки модели при каждом обновлении страницы.
             _loaded_model_id = target
             return {"ok": True, "loaded": target, "changed": False, "error": None}
+        # Реальные id моделей LM Studio — по ним сверяем «current» перед unload,
+        # чтобы мусорное значение не ушло в API (ошибка «identifier not found»).
+        known_ids = set(await list_models_cached())
         try:
-            if current:
+            # Страховка: в unload уходит ТОЛЬКО реальный id модели. Пустые или
+            # служебные значения ('current', 'default' и т.п.) LM Studio не
+            # понимает и отвечает «Model with identifier 'current' not found».
+            if current and current != target and current in known_ids:
                 await unload_model(current)
             await load_model(target)
             _loaded_model_id = target

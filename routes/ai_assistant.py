@@ -3508,8 +3508,15 @@ async def list_chat_models(address: str = Depends(require_auth)):
         loaded = await get_loaded_model()
     except Exception as e:
         logger.debug(f"/ai/models loaded: {e}")
-    return {"models": models, "default": LM_STUDIO_MODEL,
-            "loaded": loaded or LM_STUDIO_MODEL, "desired": get_desired_model()}
+    # Если LM Studio не смогла сообщить реальную модель (старая версия API,
+    # сетевой сбой) — НЕ отдаём в UI ничего кроме настоящего id из whitelist;
+    # иначе фронтенд может подставить это «значение» в /models/select и LMS
+    # ответит «Model with identifier 'current' not found».
+    if not loaded or (models and loaded not in models):
+        loaded = None
+    default = LM_STUDIO_MODEL if (not models or LM_STUDIO_MODEL in models) else (models[0] if models else None)
+    return {"models": models, "default": default,
+            "loaded": loaded, "desired": get_desired_model()}
 
 
 class ModelSelectRequest(BaseModel):
@@ -3539,6 +3546,13 @@ async def select_chat_model(body: ModelSelectRequest, address: str = Depends(req
         дозагрузит модель в момент покоя, и сразу отвечаем loaded=false.
     """
     target = (body.model or "").strip() or LM_STUDIO_MODEL
+    # Серверная страховка от «Model with identifier 'current' not found»:
+    # служебные слова, которые никогда не являются id модели в LM Studio
+    # (класс CSS/свойство ответа, затесавшееся во фронтенде), отсекаем до API.
+    if target.lower() in ("current", "default", "none", "null", "loaded"):
+        return JSONResponse({"detail": "unknown_model",
+                             "message": "Некорректный идентификатор модели: выберите модель из списка"},
+                            status_code=400)
     set_desired_model(target)
     # Выбор из выпадашка = реальное переключение весов в LM Studio.
     # ensure_model_loaded идемпотентна: если целевая модель уже в VRAM

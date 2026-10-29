@@ -3178,6 +3178,7 @@
       const loaded = modelList.loaded && id === modelList.loaded;
       const b = document.createElement('button');
       b.type = 'button';
+      b.dataset.model = id;                       // реальный id модели — единственный источник для API
       b.className = 'model-dd-item' + (id === cur ? ' current' : '');
       b.setAttribute('role', 'option');
       b.setAttribute('aria-selected', String(id === cur));
@@ -3265,7 +3266,9 @@
       if ((e.key === 'Enter' || e.key === ' ') && e.target.closest('#modelSelectBtn')) return;
       if (e.key === 'Escape') { e.preventDefault(); closeModelDd(); btn.focus(); return; }
       if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-        const items = Array.from(ddEl.querySelectorAll('.model-dd-item'));
+        // только пункты-кнопки с реальным id модели: разделитель/статус-строка
+        // не должны участвовать в навигации и «выборе»
+        const items = Array.from(ddEl.querySelectorAll('.model-dd-item[data-model]'));
         if (!items.length) return;
         const active = e.target.closest ? e.target.closest('.model-dd-item') : null;
         let i = items.indexOf(active);
@@ -3339,6 +3342,16 @@
   }
   let modelSwitching = false;
   async function selectModel(model, previous) {
+    // ГИГИЕНА ID: в API уходит только реальный идентификатор модели из
+    // /ai/models. Служебные/случайные строки ('current', 'default', пустые)
+    // раньше долетали до LM Studio и давали «Model with identifier
+    // 'current' not found».
+    if (!model || typeof model !== 'string'
+        || model === 'current' || model === 'default') {
+      toast('Не удалось определить выбранную модель — откройте список и выберите заново');
+      loadModels();                        // подтянем актуальный список/состояние VRAM
+      return;
+    }
     const sel = $('#modelSelect');
     // Смена модели = выгрузка текущей и загрузка выбранной в LM Studio.
     // Пока модель участвует в генерации (наша печать или чужой стрим на этом

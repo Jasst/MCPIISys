@@ -1,27 +1,12 @@
-<<<<<<< Updated upstream
-node_modules/
-dist/
-build/
-*.tsbuildinfo
-=======
-__pycache__/
 *.pyc
+__pycache__/
+*.whl
 .env
-*.xml
-/ai_memory_v3
-/.idea
-*.pid
-*.log
-*.db
-*.zip
-/ui_state
-*.log
-/memory_viewer
-/ui_media
-/u22
-*.json
-node_modules/
-dist/
-build/
-*.tsbuildinfo
->>>>>>> Stashed changes
+.env.local
+*.env.*
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
