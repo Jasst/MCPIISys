@@ -71,7 +71,15 @@
         <span class="chat-sub" id="chatSub"></span>
       </div>
       <div class="top-actions">
-        <select class="model-select" id="modelSelect" aria-label="Модель ИИ" hidden></select>
+        <!-- Кнопка-триггер вместо нативного <select>: системный dropdown не
+             стилизуется и выглядит чужеродно. Список рисует ai-app.js в стиле
+             приложения (.model-dd); скрытый select ниже — только для значения. -->
+        <button class="model-select" id="modelSelectBtn" type="button"
+                aria-haspopup="listbox" aria-expanded="false" title="Выбрать модель" hidden>
+          <span class="model-name" id="modelName"></span>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
+        <select id="modelSelect" aria-hidden="true" style="display:none"></select>
         <button class="icon-btn" id="renameBtn" type="button" title="Переименовать" disabled>
           <img class="ico" src="/static/icons/Edit.png" alt="">
         </button>
