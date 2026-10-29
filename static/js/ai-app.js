@@ -2939,13 +2939,82 @@
       const saved = localStorage.getItem(MODEL_KEY);
       const pick = models.includes(saved) ? saved : (models.includes(data.default) ? data.default : models[0]);
       sel.innerHTML = '';
-      for (const id of models) sel.appendChild(new Option(id, id));
+      for (const id of models) {
+        const opt = new Option(id, id);
+        // помечаем модель, которая реально стоит в VRAM (данные /api/v0 с сервера),
+        // а не только «выбранную в выпадашке» — это разные вещи после сбоя загрузки
+        if (data.loaded && id === data.loaded) opt.textContent = id + ' ●';
+        sel.appendChild(opt);
+      }
       sel.value = pick;
       sel.hidden = false;
+      // сохранённая модель исчезла из LM Studio (удалена/выключена) — предупреждаем
+      if (saved && !models.includes(saved)) toast('Сохранённая модель недоступна в LM Studio, выбран другой вариант');
     } catch { /* LM Studio недоступна: селектор остаётся скрытым */ }
   }
+  let modelSwitching = false;
+  async function selectModel(model, previous) {
+    const sel = $('#modelSelect');
+    // Смена модели = выгрузка текущей и загрузка выбранной в LM Studio.
+    // Пока модель участвует в генерации (наша печать или чужой стрим на этом
+    // аккаунте), сервер ответит 409 и поставит модель в очередь дозарядки.
+    if (gen || genFlagGet()) {
+      if (sel) sel.value = previous;              // откатываем выбор: сейчас нельзя
+      localStorage.setItem(MODEL_KEY, model);     // запомнили намерение
+      try {
+        const r = await fetch('/ai/models/select', {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model }),
+        });
+        if (r.status === 409) {
+          toast('Модель нельзя сменить: идёт генерация. Она будет загружена автоматически после окончания ответа.', 4200);
+          return;
+        }
+      } catch { /* сеть недоступна — намерение осталось в localStorage */ }
+      return;
+    }
+    if (modelSwitching) return;
+    modelSwitching = true;
+    if (sel) { sel.disabled = true; sel.title = 'Загрузка модели…'; }
+    try {
+      const r = await fetch('/ai/models/select', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok) {
+        localStorage.setItem(MODEL_KEY, model);
+        toast(data.changed ? `Модель ${model} загружена` : `Модель ${model} уже в памяти`, 3200);
+        loadModels();                              // обновим пометку «в VRAM»
+      } else if (r.status === 409) {
+        localStorage.setItem(MODEL_KEY, model);
+        toast(data.message || 'Идёт генерация — модель загрузится автоматически после ответа.', 4200);
+      } else {
+        if (sel) sel.value = previous;             // откат значения при отказе сервера
+        toast(data.message || data.error || 'Не удалось переключить модель', 4200);
+      }
+    } catch {
+      if (sel) sel.value = previous;
+      toast('Сервер недоступен: модель не переключена');
+    } finally {
+      modelSwitching = false;
+      if (sel) { sel.disabled = false; sel.title = ''; }
+    }
+  }
   const modelSel = $('#modelSelect');
-  if (modelSel) modelSel.addEventListener('change', () => localStorage.setItem(MODEL_KEY, modelSel.value));
+  if (modelSel) {
+    let prevModel = modelSel.value;
+    modelSel.addEventListener('focus', () => { prevModel = modelSel.value; });
+    modelSel.addEventListener('change', () => {
+      const next = modelSel.value;
+      if (next === prevModel) return;
+      const from = prevModel;
+      prevModel = next;
+      selectModel(next, from);
+    });
+  }
   loadModels();
 
   window.addEventListener('online', async () => {
