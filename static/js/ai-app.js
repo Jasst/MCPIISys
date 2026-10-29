@@ -2987,7 +2987,40 @@
       updateModelLabel();
       // сохранённая модель исчезла из LM Studio (удалена/выключена) — предупреждаем
       if (saved && !models.includes(saved)) toast('Сохранённая модель недоступна в LM Studio, выбран другой вариант');
+      // КЛЮЧЕВОЕ после перезагрузки страницы: СНАЧАЛА проверяем, какая модель
+      // реально загружена на сервере (data.loaded), и только если выбранная НЕ
+      // совпадает — просим её загрузить. Если в VRAM уже стоит наша модель —
+      // повторный select НЕ отправляем: никакая новая модель заново не грузится.
+      verifyLoadedModel(pick, data.loaded);
     } catch { /* LM Studio недоступна: контрол остаётся скрытым */ }
+  }
+  let startupCheckInFlight = false;
+  async function verifyLoadedModel(pick, loaded) {
+    if (!pick || startupCheckInFlight) return;
+    // Модель уже в памяти (или про неё ещё ничего не известно) — ничего не делаем
+    if (!loaded || loaded === pick) return;
+    startupCheckInFlight = true;
+    try {
+      // check_only:true — сервер проверит VRAM и, если модели там нет, поставит
+      // её на фоновую дозарядку в момент покоя, НЕ выгружая то, что сейчас
+      // используется другой генерацией. Тяжёлый unload+load при каждой
+      // перезагрузке страницы больше не запускается вслепую.
+      const r = await fetch('/ai/models/select', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: pick, check_only: true }),
+      });
+      if (!r.ok) return;
+      const data = await r.json().catch(() => ({}));
+      if (data.already_loaded) {                  // гонка: модель успели загрузить
+        modelList = Object.assign({}, modelList, { loaded: pick });
+        updateModelLabel();
+      } else if (data.queued) {
+        toast(`В памяти сейчас ${shortModelName(loaded)}. Модель ${shortModelName(pick)} загрузится автоматически, как только LM Studio освободится.`, 5200);
+        setTimeout(() => { loadModels(); }, 8000); // подтянем актуальный статус
+      }
+    } catch { /* сервер недоступен — попробуем при следующем открытии списка */ }
+    finally { startupCheckInFlight = false; }
   }
   // ---- выпадающий список моделей в стиле приложения (.model-dd) ----
   // Окно живёт во временном layer-контейнере на body: position:fixed внутри
