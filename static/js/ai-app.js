@@ -2993,11 +2993,12 @@
   // Окно живёт во временном layer-контейнере на body: position:fixed внутри
   // шапки с backdrop-filter давал бы «двойную» подложку и чужие тени.
   let ddEl = null, ddLayer = null, ddKeyLis = null, ddScrollLis = null,
-      ddWheelLis = null, ddTouchLis = null;
+      ddWheelLis = null, ddTouchLis = null, ddReposLis = null;
   function closeModelDd() {
     if (!ddEl) return;
     const gone = ddEl;
     ddEl = null;
+    const goneLayer = ddLayer;
     if (ddLayer) { ddLayer.remove(); ddLayer = null; }
     if (ddKeyLis) {
       // слушатель вешался на само окно и терялся вместе с ним: после этого
@@ -3005,11 +3006,25 @@
       document.removeEventListener('keydown', ddKeyLis);
       ddKeyLis = null;
     }
-    if (ddScrollLis) { gone.removeEventListener('scroll', ddScrollLis, true); ddScrollLis = null; }
-    // wheel/touchmove вешаются на само окно с passive:false — снимаем их
+    // wheel/touchmove вешаются на слой-обёртку с passive:false — снимаем их
     // явно, иначе после нескольких открытий накопятся дубли обработчиков
-    if (ddWheelLis) { gone.removeEventListener('wheel', ddWheelLis); ddWheelLis = null; }
-    if (ddTouchLis) { gone.removeEventListener('touchmove', ddTouchLis); ddTouchLis = null; }
+    if (goneLayer) {
+      if (ddWheelLis) goneLayer.removeEventListener('wheel', ddWheelLis);
+      if (ddTouchLis) goneLayer.removeEventListener('touchmove', ddTouchLis);
+    }
+    ddWheelLis = null; ddTouchLis = null;
+    void gone;   // окно удаляется вместе со слоем; явного снятия не требует
+    // scroll-слушатель окна больше не вешается: скролл списка НЕ должен его
+    // закрывать (см. openModelDd/ddReposLis); переменная обнуляется для верности
+    ddScrollLis = null;
+    // слушатель скролла страницы/чата, перепозиционирующий окно — тоже снимаем
+    // явно: window-слушатели не «собираются» сами и после закрытия окна начали
+    // бы дублироваться при каждом новом открытии
+    if (ddReposLis) {
+      window.removeEventListener('scroll', ddReposLis, true);
+      document.removeEventListener('scroll', ddReposLis, true);
+      ddReposLis = null;
+    }
     const btn = $('#modelSelectBtn');
     if (btn) btn.setAttribute('aria-expanded', 'false');
   }
@@ -3047,49 +3062,53 @@
     ddEl.style.flexDirection = '';
     const list = ddEl.querySelector('.model-dd-list');
     if (list) { list.style.maxHeight = ''; list.style.flex = ''; }
-    // ширина: по самому длинному пункту, но не шире экрана и не уже кнопки.
-    // scrollWidth у flex-пункта равен его же ширине (пункт width:100%), поэтому
-    // измеряем внутренний блок: имя + мета-маркеры. Справа — отступы пункта
-    // (padding 10+10) и окна (4+4) плюс запас на полосу прокрутки списка.
-    const PAD = 28;
+    // Ширина: берём РЕАЛЬНУЮ ширину содержимого (getBoundingClientRect у flex-
+    // контейнера с min-width:0 корректно возвращает полную ширину текста, в отличие
+    // от scrollWidth, который при overflow:hidden возвращал ширину видимой части).
+    // Старый расчёт по scrollWidth+PAD занижал ширину → имена обрезались, а из-за
+    // переполнения возникал «мёртвый» горизонтальный скролл внутри списка.
+    const PAD = 30;   // паддинги пункта (10+10) + окна (4+4) + полоса прокрутки (~8)
     let natural = 0;
     ddEl.querySelectorAll('.model-dd-item').forEach((it) => {
       const name = it.querySelector('.model-dd-name');
       const meta = it.querySelector('.model-dd-meta');
-      const inner = (name ? name.scrollWidth : 0) + (meta ? meta.offsetWidth : 0);
+      const inner = (name ? name.getBoundingClientRect().width : 0) +
+                    (meta ? meta.getBoundingClientRect().width : 0);
       natural = Math.max(natural, inner + PAD);
     });
     const w = Math.min(Math.max(natural, btn.offsetWidth), window.innerWidth - 16);
     ddEl.style.width = w + 'px';
     // высота списка — по доступному месту вокруг кнопки, иначе при большом
-    // числе моделей окно упиралось за экран и часть списка была недостижима
+    // числе моделей окно упиралось за экран и часть списка была недостижима.
+    // Считаем её НЕ от середины экрана, а от реальной позиции окна (выше/ниже
+    // кнопки) — иначе на низких экранах max-height выходил больше фактической
+    // «урезанной» высоты окна и нижняя часть списка уходила за вьюпорт:
+    // вертикальная прокрутка как бы «не доходила» до последних пунктов.
     const r = btn.getBoundingClientRect();
-    const spaceBelow = window.innerHeight - r.bottom - 14;
-    const spaceAbove = r.top - 14;
+    const below = r.bottom + 6;
+    const spaceBelow = window.innerHeight - below - 8;
+    const spaceAbove = r.top - 6 - 8;
+    const preferAbove = spaceBelow < 200 && spaceAbove > spaceBelow;
     const avail = Math.max(120, Math.max(spaceBelow, spaceAbove));
     if (list) list.style.maxHeight = Math.min(360, avail) + 'px';
     const dr = ddEl.getBoundingClientRect();
     ddEl.style.left = Math.max(8, Math.min(r.left, window.innerWidth - dr.width - 8)) + 'px';
-    const below = r.bottom + 6;
     // Если окно ниже кнопки не влезает целиком — поднимаем его над кнопкой,
     // но НЕ выше верхней границы экрана: иначе верх списка (и заголовок)
     // уходил за вьюпорт и часть пунктов становилась недостижима ни кликом,
     // ни прокруткой («список сломался»). Вместо подъёма урезаем высоту
     // самого окна, чтобы оно всегда помещалось под кнопкой.
-    if (below + dr.height > window.innerHeight - 8) {
-      const above = r.top - dr.height - 6;
-      if (above >= 8) {
-        ddEl.style.top = above + 'px';
-      } else {
-        const fit = Math.max(140, window.innerHeight - below - 8);
-        if (dr.height > fit) {
-          ddEl.style.height = fit + 'px';
-          ddEl.style.display = 'flex';
-          ddEl.style.flexDirection = 'column';
-          if (list) list.style.flex = '1 1 auto';   // остальное место — списку
-        }
-        ddEl.style.top = below + 'px';
+    if (preferAbove && dr.height <= spaceAbove) {
+      ddEl.style.top = (r.top - dr.height - 6) + 'px';
+    } else if (below + dr.height > window.innerHeight - 8) {
+      const fit = Math.max(140, spaceBelow);
+      if (dr.height > fit) {
+        ddEl.style.height = fit + 'px';
+        ddEl.style.display = 'flex';
+        ddEl.style.flexDirection = 'column';
+        if (list) { list.style.flex = '1 1 auto'; list.style.minHeight = '0'; }
       }
+      ddEl.style.top = below + 'px';
     } else {
       ddEl.style.top = below + 'px';
     }
@@ -3184,18 +3203,13 @@
     btn.setAttribute('aria-expanded', 'true');
     bindDdDismiss(d);
     positionModelDd();
-    // прокрутка колесом/тапом: window.addEventListener('scroll', ..., true) не
-    // ловит scroll у элементов, поэтому слушатель вешаем на само окно и снимаем
-    // в closeModelDd() (иначе после N открытий накопится N дублей обработчика).
-    ddScrollLis = () => closeModelDd();
-    d.addEventListener('scroll', ddScrollLis, true);
-    const first = list.querySelector('.model-dd-item.current') || list.querySelector('.model-dd-item');
-    if (first) first.focus({ preventScroll: true });
     // Прокрутка колесом/тапом: блокируем дефолт только для событий, пришедших
     // НЕ из прокручиваемого списка (заголовок, отступы окна) — иначе чат под
     // выпадашкой начинал скроллиться «сквозь» неё. Внутри .model-dd-list
-    // default не отменяем: браузер сам скроллит список (слушатели passive:false
-    // на всё окно раньше перехватывали wheel и убивали прокрутку entirely).
+    // default не отменяем: браузер сам скроллит список.
+    // Слушатели вешаем на СЛОЙ (а не на окно): прозрачный щит лежит внутри слоя
+    // и перекрывает весь экран — раньше wheel/touchmove над щитом вообще не
+    // обрабатывались, и колесо крутило чат «сквозь» открытое меню.
     const nonListScroll = (e) => {
       if (!ddEl) return;
       if (!(e.target && e.target.closest && e.target.closest('.model-dd-list'))) {
@@ -3203,8 +3217,10 @@
       }
     };
     ddWheelLis = nonListScroll; ddTouchLis = nonListScroll;
-    d.addEventListener('wheel', nonListScroll, { passive: false });
-    d.addEventListener('touchmove', nonListScroll, { passive: false });
+    ddLayer.addEventListener('wheel', nonListScroll, { passive: false });
+    ddLayer.addEventListener('touchmove', nonListScroll, { passive: false });
+    const first = list.querySelector('.model-dd-item.current') || list.querySelector('.model-dd-item');
+    if (first) first.focus({ preventScroll: true });
     // Клавиатура: Esc — закрыть, стрелки — переход по пунктам (как в .ui-menu).
     // Слушатель вешаем на document (а не на окно) и снимаем в closeModelDd():
     // вложенные span'ы имени/бейджа не видны closest('button'), если слушать
@@ -3228,13 +3244,41 @@
         e.preventDefault();
         if (i < 0) i = e.key === 'ArrowUp' ? items.length - 1 : 0;
         else i = (i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
-        items[i].focus();
+        items[i].focus({ preventScroll: true });
+        keepItemVisible(items[i]);
         return;
       }
       // Tab уводит фокус из списка — закрываем, как системные меню
       if (e.key === 'Tab') closeModelDd();
     };
     document.addEventListener('keydown', ddKeyLis);
+    // Скролл страницы/чата при открытом списке: раньше любое scroll-событие
+    // закрывал окно: прокрутка чата под выпадашкой мгновенно её захлопывала.
+    // Теперь окно остаётся открытым и перепозиционируется вслед за кнопкой.
+    // ВАЖНО: скролл самого списка (.model-dd-list) игнорируем — иначе
+    // перепозиционирование сбрасывало бы его scrollTop (окно «прыгало» на
+    // первый пункт, а нижняя часть списка становилась недостижимой).
+    ddReposLis = (e) => {
+      if (!ddEl) return;
+      const t = e && e.target;
+      if (t && t.closest && t.closest('.model-dd')) return;   // внутренний скролл окна
+      positionModelDd();
+    };
+    window.addEventListener('scroll', ddReposLis, true);
+  }
+  // Доводимый до видимости пункт при стрелочной навигации: focus() с
+  // preventScroll сам ничего не прокручивает, а без этого последний пункт
+  // можно было «потерять» за нижней границей списка. Прокручиваем именно
+  // контейнер списка (а не window.scrollIntoView, который мог прокрутить и
+  // страницу под меню): если пункт ушёл выше верхней или ниже нижней границы
+  // .model-dd-list — подтягиваем его в зону видимости минимальным сдвигом.
+  function keepItemVisible(it) {
+    if (!it || !ddEl) return;
+    const list = ddEl.querySelector('.model-dd-list');
+    if (!list) return;
+    const lr = list.getBoundingClientRect(), ir = it.getBoundingClientRect();
+    if (ir.top < lr.top) list.scrollTop -= (lr.top - ir.top) + 4;
+    else if (ir.bottom > lr.bottom) list.scrollTop += (ir.bottom - lr.bottom) + 4;
   }
   function ddSetStatus(text, isErr) {
     // строка-статус внутри открытого списка («Загрузка модели в память…», ошибки)
