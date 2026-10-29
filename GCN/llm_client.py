@@ -378,8 +378,18 @@ _LMS_HEADERS = {"Authorization": f"Bearer {LM_STUDIO_API_KEY}"}
 # id модели, которая по нашему учёту сейчас в VRAM (None — неизвестно);
 # timestamp последней успешной загрузки — для блокировки смены модели
 # сразу после старта/финала генерации.
+# ts_aware: результат актуален ровно столько, сколько живёт кэш состояния
+# /ai/models (_loaded_state_ttl_s). Без отметки времени «учётный кэш»
+# залипал навсегда: LM Studio перезапустили / модель выгрузили вручную —
+# а сервер продолжал считать, что она в памяти, и UI показывал ложную
+# метку «в памяти».
 _loaded_model_id: Optional[str] = None
+_loaded_model_ts: float = 0.0
+_loaded_state_ttl_s: float = 10.0   # см. _MODELS_STATE_TTL_S в routes/ai_assistant
 _load_ts: float = 0.0
+# момент последней операции с весами (load/unload/reconcile) — по нему
+# быстрая сверка состояния понимает, можно ли доверять учётному кэшу
+_last_ops_ts: float = 0.0
 # «Намерение пользователя» — какая модель выбрана в интерфейсе (перезапись при
 # каждом выборе). Сервер использует её как ориентир после перезагрузки страницы
 # или рестарта процесса: если LM Studio уже держит эту модель в VRAM — заново
@@ -403,6 +413,26 @@ def set_desired_model(model_id: Optional[str]) -> None:
 
 def get_desired_model() -> Optional[str]:
     return _desired_model_id
+
+
+def _remember_loaded(model_id: Optional[str]) -> None:
+    """Положить/обновить учётный кэш «что в VRAM» со свежей отметкой времени."""
+    global _loaded_model_id, _loaded_model_ts
+    _loaded_model_id = model_id
+    _loaded_model_ts = time.monotonic()
+
+
+def loaded_model_cached() -> Optional[str]:
+    """Учётный кэш состояния VRAM, если он ещё не протух (TTL = TTL /ai/models).
+
+    Используется горячим путём /models/select: подтверждать выбор модели,
+    которая по нашему учёту уже в памяти, можно БЕЗ опроса LM Studio — но
+    только пока отметка времени свежая. Протухший кэш hot-путь игнорирует
+    и честно идёт проверять VRAM, чтобы UI не выдавал ложвое «уже в памяти».
+    """
+    if _loaded_model_id and time.monotonic() - _loaded_model_ts < _loaded_state_ttl_s:
+        return _loaded_model_id
+    return None
 
 
 _state_listeners = []
@@ -430,17 +460,39 @@ async def reconcile_loaded_model(target: Optional[str]) -> Dict:
     запускало unload+load (тяжёлая выгрузка/загрузка весов), даже когда модель
     уже висела в памяти. Здесь мы сначала спрашиваем LM Studio
     (перебор реальных id через GET /api/v0/models/<id>): если целевая модель
-    уже загружена — возвращаем
-    changed=False и НЕ трогаем VRAM. Идемпотентно.
+    уже загружена — возвращаем changed=False и НЕ трогаем VRAM. Идемпотентно.
+
+    ВАЖНО: ensure_model_loaded под этим же model_ops_lock вызывать нельзя —
+    asyncio.Lock не реентерабелен, будет взаимоблокировка. Поэтому логика
+    unload+load продублирована здесь инлайн (лок уже удерживается).
     """
-    global _loaded_model_id
+    global _loaded_model_id, _last_ops_ts
     target = target or LM_STUDIO_MODEL
     async with model_ops_lock:
         current = await get_loaded_model()
+        _last_ops_ts = time.monotonic()
         if current == target:
-            _loaded_model_id = target
+            _remember_loaded(target)
             return {"ok": True, "loaded": target, "changed": False, "error": None}
-        return await ensure_model_loaded(target)
+        # ensure_model_loaded НЕ вызывать под этим локом — лок не реентерабелен.
+        # Инлайн та же идемпотентная логика (лок уже удерживается): unload старой
+        # + load новой модели.
+        known_ids = set(await list_models_cached())
+        try:
+            if current and current != target and current in known_ids:
+                await unload_model(current)
+            await load_model(target)
+            _remember_loaded(target)
+            invalidate_models_cache()
+            _notify_state_changed()
+            logger.info(f"reconcile: модель переключена {current!r} -> {target!r}")
+            return {"ok": True, "loaded": target, "changed": True, "error": None}
+        except Exception as e:
+            logger.error(f"reconcile '{target}': {e}")
+            _remember_loaded(None)
+            invalidate_models_cache()
+            _notify_state_changed()
+            return {"ok": False, "loaded": current, "changed": False, "error": str(e)}
 
 
 async def _reconcile_worker(target: str) -> None:
@@ -502,6 +554,11 @@ async def get_loaded_model() -> Optional[str]:
     моделей. Сейчас состояние VRAM определяется методом перебора реальных id:
     `GET /api/v0/models/<id>` — для загруженной модели LMS отвечает 200,
     для выгруженной — 404. Никаких выдуманных id не отправляем.
+
+    ОПТИМИЗАЦИЯ: если по нашему учёту модель недавно (в пределах TTL) точно
+    была в VRAM, проверяем ТОЛЬКО её — один запрос вместо волны probe'ов
+    по всему списку. Подтверждение «модель X уже в памяти» при клике
+    по X становится мгновенным и дешёвым для LM Studio.
     """
     global _loaded_model_id
     try:
@@ -510,6 +567,7 @@ async def get_loaded_model() -> Optional[str]:
         ids = []
     if not ids:
         return _loaded_model_id
+
     session = await _get_session()
     sem = asyncio.Semaphore(6)  # не заваливать локальный сервер одновременными запросами
 
@@ -527,6 +585,33 @@ async def get_loaded_model() -> Optional[str]:
                 pass
         return None
 
+    # Быстрая сверка: ожидаем увидеть в VRAM ту же модель, что и в прошлый раз.
+    # Актуально только пока учётный кэш не протух (см. loaded_model_cached).
+    expected = loaded_model_cached()
+    fast = False
+    if expected and expected in ids:
+        # Если с момента последней операции с весами (наша загрузка/выгрузка)
+        # шла генерация, LM Studio могла сама выгрузить/подменить модель —
+        # быстрой сверке не доверяем, идём полным перебором.
+        last_touch = max(_load_ts, _last_ops_ts)
+        st = await get_generation_status()
+        fast = not st.get("active") and (time.monotonic() - last_touch) < 300.0
+    if fast:
+        try:
+            if await _probe(expected):
+                _remember_loaded(expected)
+                return expected
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.debug(f"get_loaded_model(fast {expected!r}): {e}")
+        # Ожидаемая модель НЕ подтверждена → возможно, LM Studio сама
+        # переключила/выгрузила веса. Полная проверка ниже; чтобы фоновая
+        # дозарядка не грузила старое намерение, смещаем «намерение» на
+        # реальное состояние (если оно найдётся) — иначе reconcile будет
+        # бесполезно пытаться вернуть модель, которую пользователь уже
+        # перестал выбирать в другом окне.
+
     try:
         results = await asyncio.gather(*(_probe(i) for i in ids))
     except asyncio.CancelledError:
@@ -536,12 +621,16 @@ async def get_loaded_model() -> Optional[str]:
         return _loaded_model_id
     loaded = next((r for r in results if r), None)
     if loaded:
-        _loaded_model_id = loaded
+        _remember_loaded(loaded)
+        if expected and loaded != expected:
+            set_desired_model(loaded)
+            logger.info(f"VRAM: модель сменилась вне нашего контроля "
+                        f"{expected!r} -> {loaded!r}, следим за новой")
         return loaded
     # Ни одна модель не отвечает 200 → в VRAM пусто (или LMS недоступна).
     # Если учётный кэш указывал на загруженную модель — сбрасываем его,
     # чтобы следующий ensure_model_loaded корректно загрузил целевую.
-    _loaded_model_id = None
+    _remember_loaded(None)
     return None
 
 
@@ -572,7 +661,7 @@ async def ensure_model_loaded(target: Optional[str]) -> Dict:
     Идемпотентна: если целевая модель уже в VRAM — ничего не делаем.
     Вызывать ТОЛЬКО когда генерация не идёт (см. /ai/models/select).
     """
-    global _loaded_model_id, _load_ts, _preload_task
+    global _loaded_model_id, _load_ts, _last_ops_ts, _preload_task
     target = target or LM_STUDIO_MODEL
     set_desired_model(target)
     if _preload_task and not _preload_task.done():
@@ -580,17 +669,26 @@ async def ensure_model_loaded(target: Optional[str]) -> Dict:
         _preload_task = None
     async with model_ops_lock:
         current = await get_loaded_model()
+        _last_ops_ts = time.monotonic()
         if current == target:
             # Модель УЖЕ в VRAM (например, страница перезагрузилась и фронтенд
             # повторно прислал тот же выбор) — НЕ трогаем веса: никаких
             # unload/load, только сверка учёта. Это и есть защита от повторной
             # загрузки модели при каждом обновлении страницы.
-            _loaded_model_id = target
+            _remember_loaded(target)
             _notify_state_changed()
             return {"ok": True, "loaded": target, "changed": False, "error": None}
         # Реальные id моделей LM Studio — по ним сверяем «current» перед unload,
         # чтобы мусорное значение не ушло в API (ошибка «identifier not found»).
         known_ids = set(await list_models_cached())
+        # Whitelist и для целевой модели: load_model('какой-то мусор') LMS тоже
+        # не примет; раньше сюда мог долететь id, удалённый из LMS за время жизни
+        # кэша списка — проверяем свежим списком только если whitelist пустел.
+        if not known_ids:
+            known_ids = set(await list_models_cached(force=True))
+        if target not in known_ids:
+            return {"ok": False, "loaded": current, "changed": False,
+                    "error": f"Модель {target!r} не найдена в LM Studio"}
         try:
             # Страховка: в unload уходит ТОЛЬКО реальный id модели. Пустые или
             # служебные значения ('current', 'default' и т.п.) LM Studio не
@@ -598,7 +696,7 @@ async def ensure_model_loaded(target: Optional[str]) -> Dict:
             if current and current != target and current in known_ids:
                 await unload_model(current)
             await load_model(target)
-            _loaded_model_id = target
+            _remember_loaded(target)
             _load_ts = time.monotonic()
             invalidate_models_cache()
             _notify_state_changed()
@@ -608,7 +706,7 @@ async def ensure_model_loaded(target: Optional[str]) -> Dict:
             logger.error(f"Не удалось переключить модель на {target!r}: {e}")
             # состояние VRAM после сбоя неизвестно — пусть следующим шагом
             # разберётся LM Studio (загрузит по запросу сама)
-            _loaded_model_id = None
+            _remember_loaded(None)
             invalidate_models_cache()
             _notify_state_changed()
             return {"ok": False, "loaded": current, "changed": False, "error": str(e)}
@@ -639,8 +737,11 @@ def schedule_preload(target: Optional[str]) -> None:
                     break
             else:
                 return
-            async with model_ops_lock:
-                await ensure_model_loaded(target)
+            # Лок НЕ берём заранее: ensure_model_loaded идемпотентна и сама
+            # захватит model_ops_lock. Прежний «async with model_ops_lock» +
+            # вызов внутри давал взаимоблокировку (Lock не реентерабелен) —
+            # дозарядка зависала навсегда, модель так и не загружалась.
+            await ensure_model_loaded(target)
         except asyncio.CancelledError:
             pass
         except Exception as e:
