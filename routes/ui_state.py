@@ -43,6 +43,8 @@ _TOMB_TTL_MS = 30 * 86400 * 1000     # сервер помнит удалени�
 IMAGE_EXT = {'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp',
              'image/gif': '.gif'}
 _SAFE_HASH = re.compile(r'^[a-f0-9]{64}$')
+# имя файла, который пишет инструмент generate_image (GCN/internal_tools.py)
+_GENERATED_NAME = re.compile(r'^image_\d{8}_\d{6}_\d+\.png$')
 _SAFE_ID = re.compile(r'^[A-Za-z0-9_]{1,40}$')
 
 
@@ -833,6 +835,45 @@ async def get_media(name: str, user_id: str = Depends(require_auth)):
     # immutable: имя = sha256 контента, содержимое по этому имени не меняется
     return Response(content=data, media_type=mime,
                     headers={'Cache-Control': 'public, max-age=31536000, immutable'})
+
+
+@router.post('/ui-media/adopt-generated')
+async def adopt_generated_media(body: dict, user_id: str = Depends(require_auth)):
+    """Переносит сгенерированную картинку из /generated_images в медиатеку.
+
+    ИСПРАВЛЕНИЕ (картинки не показываются в мобильной версии): инструмент
+    generate_image сохраняет файл в GLOBAL_DIR generated_images и отдаёт
+    относительный URL /generated_images/<имя>. Эта папка монтируется без
+    авторизации и живёт вне снапшота пользователя; при перезагрузке истории
+    ссылка могла «висеть» на недоступном пути. Здесь байты копируются в
+    ui_media по sha256 — дальше картинка отдаётся через /ai/ui-media/<hash>.png
+    на том же HTTPS-домене и доступна всем устройствам аккаунта.
+    Принимает {path: "<имя файла>"}, полный URL тоже принимается (берётся имя).
+    """
+    import hashlib
+    from GCN.config_ai import GENERATED_IMAGES_DIR
+
+    raw_path = body.get('path') if isinstance(body, dict) else None
+    if not isinstance(raw_path, str) or not raw_path:
+        raise HTTPException(400, detail='Не указан путь к изображению')
+    name = raw_path.rstrip('/').split('/')[-1]          # допускаем и полный URL
+    if not _GENERATED_NAME.match(name):                 # traversal исключён маской
+        raise HTTPException(400, detail='Некорректное имя изображения')
+    src = GENERATED_IMAGES_DIR / name
+    if not src.is_file():
+        raise HTTPException(404, detail='Изображение не найдено')
+    data = src.read_bytes()
+    h = hashlib.sha256(data).hexdigest()
+    ext = '.png'
+    MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    dst = MEDIA_DIR / (h + ext)
+    reused = dst.exists()
+    if not reused:
+        tmp = dst.with_suffix(ext + '.tmp')
+        with open(tmp, 'wb') as f:
+            f.write(data)
+        os.replace(tmp, dst)   # атомарно: полуталых файлов нет
+    return {'url': f'/ai/ui-media/{h}{ext}', 'reused': reused}
 
 
 @router.get('/ui-state')

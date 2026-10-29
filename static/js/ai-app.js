@@ -26,6 +26,7 @@
     notify: '/ai/notifications/poll',
     health: '/health',
     media: '/ai/ui-media',
+    adoptGenerated: '/ai/ui-media/adopt-generated',
     genStatus: '/ai/gen-status',
     genLock: '/ai/gen-lock',
   };
@@ -610,8 +611,50 @@
       if (objUrl) setTimeout(() => URL.revokeObjectURL(objUrl), 2000);
     }
   }
+  // ИСПРАВЛЕНИЕ (сгенерированные картинки не показываются в мобильной версии):
+  // исторические сообщения могли содержать абсолютные URL вида
+  // http://localhost:8000/generated_images/... — с телефона localhost недоступен,
+  // а на HTTPS-сайте http-ссылка блокируется браузером как смешанный контент.
+  // Приводим любой URL, указывающий на этот же сайт (или на локальный сервер),
+  // к относительному пути — тогда картинка грузится через текущий протокол и домен.
+  function normalizeImageUrl(url) {
+    if (typeof url !== 'string' || !url) return url;
+    if (/^data:/i.test(url)) return url;              // data URL — оставляем как есть
+    let u;
+    try { u = new URL(url, location.origin); } catch { return url; }
+    const localHosts = ['localhost', '127.0.0.1', '0.0.0.0', '[::1]', '[::ffff:127.0.0.1]'];
+    if (u.host === location.host || localHosts.includes(u.hostname)) {
+      return u.pathname + u.search;                   // тот же сайт / локальный сервер → относительный путь
+    }
+    if (location.protocol === 'https:' && u.protocol === 'http:') {
+      u.protocol = 'https:';                          // смешанный контент → пробуем HTTPS
+      return u.toString();
+    }
+    return url;
+  }
+
+  // Картинки из /generated_images живут вне снапшота аккаунта и доступны только
+  // с того устройства, что их увидел. Просим сервер перенести байты в медиатеку
+  // (/ai/ui-media/<sha256>) — ссылка становится авторизованной и общей для всех
+  // устройств. Ошибку молча игнорируем: относительный URL остаётся рабочим.
+  async function adoptGeneratedImage(url) {
+    try {
+      const name = String(url || '').split('/').pop();
+      const r = await fetch(API.adoptGenerated, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ path: name }),
+      });
+      if (!r.ok) return null;
+      const j = await r.json();
+      return j && typeof j.url === 'string' ? j.url : null;
+    } catch { return null; }
+  }
+
   // Блок «изображение + кнопка сохранить под ним» (фото пользователя и картинки модели)
   function imageBlock(url, alt, baseName) {
+    url = normalizeImageUrl(url);
     const wrap = document.createElement('div');
     wrap.className = 'img-block';
     const img = new Image();
@@ -1053,7 +1096,22 @@
       m.reasoning = (m.reasoning || '') + ev.reasoning_token;
     }
     else if (ev.sources) m.sources = (m.sources || []).concat(ev.sources);
-    else if (ev.image_url) m.images = (m.images || []).concat([ev.image_url]);
+    else if (ev.image_url) {
+      // ИСПРАВЛЕНИЕ (мобильная версия): URL нормализуем сразу — абсолютные
+      // http://localhost... из старой истории больше не попадают в сообщения,
+      // и с телефона картинка грузится через текущий домен/протокол.
+      const u = normalizeImageUrl(ev.image_url);
+      m.images = (m.images || []).concat([u]);
+      // Файл лежит в /generated_images вне снапшота аккаунта: просим сервер
+      // перенести его в медиатеку и молча заменяем ссылку на постоянную.
+      if (/^\/generated_images\//.test(u)) {
+        adoptGeneratedImage(u).then((better) => {
+          if (!better) return;
+          const i = (m.images || []).indexOf(u);
+          if (i >= 0) { m.images[i] = better; persistSoon(currentId); }
+        });
+      }
+    }
     else if (ev.tool_call) m.notes = (m.notes || []).concat(['🔧 ' + ev.tool_call]);
     else if (ev.warning) m.notes = (m.notes || []).concat(['⚠ ' + ev.warning]);
     else if (ev.error) m.error = ev.error === 'generation_busy' ? 'Ответ уже пишется на другом устройстве или в другом чате. Дождитесь окончания и попробуйте снова.' : String(ev.error);
