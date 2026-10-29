@@ -85,7 +85,8 @@ from GCN.memory_graph import CognitiveMemory, Fact, Goal, GCNMemoryRouter
 from GCN.llm_client import (call_llm, call_llm_raw, call_llm_stream, list_models, llm_model_var,
                             list_models_cached, get_loaded_model, ensure_model_loaded,
                             schedule_preload, model_ops_lock,
-                            set_desired_model, get_desired_model, schedule_reconcile)
+                            set_desired_model, get_desired_model, schedule_reconcile,
+                            _MODELS_CACHE_TTL_S)
 from GCN.web_search import deep_search, is_time_sensitive_query
 from GCN.image_utils import enhance_prompt, generate_image
 from GCN.tool_router import ToolRegistry, ToolRouter, build_tool_trace_context
@@ -3592,7 +3593,18 @@ async def select_chat_model(body: ModelSelectRequest, address: str = Depends(req
     if models and target not in models:
         return JSONResponse({"detail": "unknown_model",
                              "message": "Модель не найдена в LM Studio"}, status_code=400)
+    # БЫСТРЫЙ ПУТЬ («мелкий баг»: клик по модели, которая УЖЕ в памяти,
+    # раньше каждый раз дёргал LM Studio целой волной probe-запросов и мог
+    # показать toast «в памяти сейчас X, Y загрузится автоматически», хотя
+    # грузить ничего не нужно). Если наш учёт (_loaded_model_id) совпадает с
+    # target и список моделей свежий — подтверждаем выбор БЕЗ опроса LMS.
+    from GCN import llm_client as _lc
+    hot = (_lc._loaded_model_id == target and models
+           and time.monotonic() - _lc._models_cache["ts"] < _MODELS_CACHE_TTL_S)
     if body.check_only:
+        if hot:
+            _invalidate_models_state_cache()
+            return {"ok": True, "loaded": target, "changed": False, "already_loaded": True}
         try:
             current = await get_loaded_model()
         except Exception:
@@ -3613,6 +3625,12 @@ async def select_chat_model(body: ModelSelectRequest, address: str = Depends(req
             "message": "Модель сейчас нельзя сменить: идёт генерация. "
                        "Выбранная модель будет загружена автоматически после окончания ответа.",
         }, status_code=409)
+    if hot:
+        # Модель уже реально в VRAM по нашему учёту — веса НЕ трогаем,
+        # никаких запросов в LM Studio, мгновенный ответ changed=false.
+        set_desired_model(target)
+        _invalidate_models_state_cache()
+        return {"ok": True, "loaded": target, "changed": False}
     async with model_ops_lock:
         result = await ensure_model_loaded(target)
     if not result["ok"]:

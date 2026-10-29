@@ -430,8 +430,11 @@ async def reconcile_loaded_model(target: Optional[str]) -> Dict:
     запускало unload+load (тяжёлая выгрузка/загрузка весов), даже когда модель
     уже висела в памяти. Здесь мы сначала спрашиваем LM Studio
     (перебор реальных id через GET /api/v0/models/<id>): если целевая модель
-    уже загружена — возвращаем
-    changed=False и НЕ трогаем VRAM. Идемпотентно.
+    уже загружена — возвращаем changed=False и НЕ трогаем VRAM. Идемпотентно.
+
+    ВАЖНО: ensure_model_loaded под этим же model_ops_lock вызывать нельзя —
+    asyncio.Lock не реентерабелен, будет взаимоблокировка. Поэтому логика
+    unload+load продублирована здесь инлайн (лок уже удерживается).
     """
     global _loaded_model_id
     target = target or LM_STUDIO_MODEL
@@ -440,7 +443,25 @@ async def reconcile_loaded_model(target: Optional[str]) -> Dict:
         if current == target:
             _loaded_model_id = target
             return {"ok": True, "loaded": target, "changed": False, "error": None}
-        return await ensure_model_loaded(target)
+        # ensure_model_loaded НЕ вызывать под этим локом — лок не реентерабелен.
+        # Инлайн та же идемпотентная логика (лок уже удерживается): unload старой
+        # + load новой модели.
+        known_ids = set(await list_models_cached())
+        try:
+            if current and current != target and current in known_ids:
+                await unload_model(current)
+            await load_model(target)
+            _loaded_model_id = target
+            invalidate_models_cache()
+            _notify_state_changed()
+            logger.info(f"reconcile: модель переключена {current!r} -> {target!r}")
+            return {"ok": True, "loaded": target, "changed": True, "error": None}
+        except Exception as e:
+            logger.error(f"reconcile '{target}': {e}")
+            _loaded_model_id = None
+            invalidate_models_cache()
+            _notify_state_changed()
+            return {"ok": False, "loaded": current, "changed": False, "error": str(e)}
 
 
 async def _reconcile_worker(target: str) -> None:
@@ -591,6 +612,14 @@ async def ensure_model_loaded(target: Optional[str]) -> Dict:
         # Реальные id моделей LM Studio — по ним сверяем «current» перед unload,
         # чтобы мусорное значение не ушло в API (ошибка «identifier not found»).
         known_ids = set(await list_models_cached())
+        # Whitelist и для целевой модели: load_model('какой-то мусор') LMS тоже
+        # не примет; раньше сюда мог долететь id, удалённый из LMS за время жизни
+        # кэша списка — проверяем свежим списком только если whitelist пустел.
+        if not known_ids:
+            known_ids = set(await list_models_cached(force=True))
+        if target not in known_ids:
+            return {"ok": False, "loaded": current, "changed": False,
+                    "error": f"Модель {target!r} не найдена в LM Studio"}
         try:
             # Страховка: в unload уходит ТОЛЬКО реальный id модели. Пустые или
             # служебные значения ('current', 'default' и т.п.) LM Studio не
@@ -639,8 +668,11 @@ def schedule_preload(target: Optional[str]) -> None:
                     break
             else:
                 return
-            async with model_ops_lock:
-                await ensure_model_loaded(target)
+            # Лок НЕ берём заранее: ensure_model_loaded идемпотентна и сама
+            # захватит model_ops_lock. Прежний «async with model_ops_lock» +
+            # вызов внутри давал взаимоблокировку (Lock не реентерабелен) —
+            # дозарядка зависала навсегда, модель так и не загружалась.
+            await ensure_model_loaded(target)
         except asyncio.CancelledError:
             pass
         except Exception as e:

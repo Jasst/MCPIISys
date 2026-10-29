@@ -2976,28 +2976,49 @@
       if (!models.length) return;
       modelList = data;
       const sel = $('#modelSelect');
-      const saved = localStorage.getItem(MODEL_KEY);
-      const pick = models.includes(saved) ? saved : (models.includes(data.default) ? data.default : models[0]);
+      let saved = localStorage.getItem(MODEL_KEY);
+      // САМО-ВЫЛЕЧИВАНИЕ «МЕЛКОГО БАГА»: если в сохранённом выборе лежит не id
+      // модели (класс/подпись «current», «в памяти» и т.п.), а модель с таким
+      // id реально стоит в VRAM — чиним хранилище на месте: берём реальный id.
+      // Иначе такой мусор уходил в /models/select и LM Studio ругалась.
+      if (saved && !models.includes(saved)) {
+        if (data.loaded && ((saved === 'current') || (/памят/i.test(saved)))) {
+          saved = data.loaded;
+          localStorage.setItem(MODEL_KEY, saved);
+        }
+      }
+      // КЛЮЧЕВОЕ ПРАВИЛО UI: интерфейс выбирает ту модель, которая СЕЙЧАС В
+      // ПАМЯТИ (data.loaded). Если сохранённый выбор совпадает с загруженной
+      // моделью — оставляем его; если в VRAM висит ДРУГАЯ модель, подсвечиваем
+      // реальную (она готова к работе), а не «выбранную когда-то», которую ещё
+      // надо грузить. При неизвестном состоянии loaded — прежний приоритет
+      // saved > default > первый.
+      const pick = models.includes(data.loaded) ? data.loaded
+                 : (models.includes(saved) ? saved
+                 : (models.includes(data.default) ? data.default : models[0]));
       if (sel) {
         sel.innerHTML = '';
         for (const id of models) sel.appendChild(new Option(id, id));
         sel.value = pick;
       }
+      if (pick !== saved) localStorage.setItem(MODEL_KEY, pick);
       setModelControlVisible(true);
       updateModelLabel();
       // сохранённая модель исчезла из LM Studio (удалена/выключена) — предупреждаем
       if (saved && !models.includes(saved)) toast('Сохранённая модель недоступна в LM Studio, выбран другой вариант');
-      // КЛЮЧЕВОЕ после перезагрузки страницы: СНАЧАЛА проверяем, какая модель
-      // реально загружена на сервере (data.loaded), и только если выбранная НЕ
-      // совпадает — просим её загрузить. Если в VRAM уже стоит наша модель —
-      // повторный select НЕ отправляем: никакая новая модель заново не грузится.
+      // После перезагрузки страницы: сверка идёт ТОЛЬКО если сервер знает и про
+      // выбранную, и про загруженную модель, и они различаются. Когда loaded
+      // неизвестен (пусто) — ничего не отправляем: фронтенд не должен вслепую
+      // дёргать LM Studio и получать «загрузится автоматически, как только
+      // освободится» для модели, которая уже работает.
       verifyLoadedModel(pick, data.loaded);
     } catch { /* LM Studio недоступна: контрол остаётся скрытым */ }
   }
   let startupCheckInFlight = false;
   async function verifyLoadedModel(pick, loaded) {
     if (!pick || startupCheckInFlight) return;
-    // Модель уже в памяти (или про неё ещё ничего не известно) — ничего не делаем
+    // Модель уже в памяти — ничего не делаем; состояние неизвестно — тоже
+    // (не отправляем запрос «вслепую», чтобы не словить ложный queued-toast).
     if (!loaded || loaded === pick) return;
     startupCheckInFlight = true;
     try {
@@ -3212,7 +3233,17 @@
         // на окне не отработал вторым и не закрыл список раньше времени
         e.stopPropagation();
         closeModelDd();
-        if (id !== cur) onModelPicked(id);
+        if (id === cur) {
+          // Клик по МОДЕЛИ, КОТОРАЯ УЖЕ В ПАМЯТИ: это не смена модели.
+          // Раньше такой клик всё равно слал /models/select, сервер отвечал
+          // «уже в памяти / загрузится автоматически», и пользователь видел
+          // ложный toast про ожидание LM Studio. Просто подтверждаем выбор.
+          localStorage.setItem(MODEL_KEY, id);
+          updateModelLabel();
+          if (modelList.loaded === id) toast('Модель уже в памяти — готова к работе', 2600);
+          return;
+        }
+        onModelPicked(id);
       });
       list.appendChild(b);
     }
@@ -3350,6 +3381,15 @@
         || model === 'current' || model === 'default') {
       toast('Не удалось определить выбранную модель — откройте список и выберите заново');
       loadModels();                        // подтянем актуальный список/состояние VRAM
+      return;
+    }
+    // Выбрали модель, которая УЖЕ стоит в памяти (по данным последнего
+    // /ai/models) — это НЕ смена: не дёргаем LM Studio и не показываем
+    // «загрузится автоматически, как только освободится». Просто запоминаем.
+    if (modelList.loaded === model) {
+      localStorage.setItem(MODEL_KEY, model);
+      updateModelLabel();
+      toast('Модель уже в памяти — готова к работе', 2600);
       return;
     }
     const sel = $('#modelSelect');
