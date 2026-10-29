@@ -897,6 +897,7 @@
   function refreshUI() {
     updateHeader();
     renderList();
+    if (typeof updateModelBusy === 'function') updateModelBusy();
   }
 
   function syncChips() {
@@ -2923,29 +2924,454 @@
 
   // ---- выбор модели LM Studio ----
   const MODEL_KEY = 'chatModel';
+  let modelList = [];        // последний ответ /ai/models: {models, loaded, default}
   function currentModel() {
     const sel = $('#modelSelect');
-    return sel && !sel.hidden && sel.value ? sel.value : null;
+    return sel && sel.value ? sel.value : null;
+  }
+  // Видимость контрола и подпись кнопки — теперь это кнопка-триггер, а не select:
+  // системный dropdown рисуется ОС и не совпадает со стилем приложения.
+  function setModelControlVisible(v) {
+    const btn = $('#modelSelectBtn');
+    if (btn) btn.hidden = !v;
+    const sel = $('#modelSelect');
+    if (sel) sel.hidden = !v;
+  }
+  function updateModelLabel() {
+    const name = $('#modelName');
+    if (!name) return;
+    const cur = currentModel();
+    name.textContent = cur || 'Модель…';
+    const btn = $('#modelSelectBtn');
+    if (btn) btn.title = cur ? ('Модель: ' + cur + ' — нажмите, чтобы сменить') : 'Выбрать модель';
+    // точка «модель реально в VRAM» на кнопке в шапке — тот же маркер, что и
+    // в выпадающем списке (.model-dd-dot); если LM Studio сообщает, что в
+    // памяти висит другая модель, кнопка честно показывает это, а не только галочку «выбрано»
+    if (btn) btn.classList.toggle('loaded', !!(cur && modelList.loaded === cur));
+  }
+  // Селектор НИКОГДА не блокируется через disabled (браузер закрашивает его серым,
+  // и он выглядит «мёртвым»). Вместо этого вешаем класс .busy с подсказкой:
+  // выбор остаётся возможным — сервер сам ответит 409 и поставит модель в очередь.
+  function updateModelBusy() {
+    const ctrl = $('#modelSelectBtn') || $('#modelSelect');
+    if (!ctrl) return;
+    // ВАЖНО: «занято» показывает ТОЛЬКО наша активная печать (gen).
+    // genFlagGet() — это localStorage-флаг владения локом, который снимается
+    // не сразу по окончании ответа, а только после финального commit/pushState.
+    const busy = !!gen;
+    if (busy) {
+      ctrl.classList.add('busy');
+      ctrl.title = 'Идёт генерация: смена модели применится автоматически после окончания ответа';
+    } else {
+      ctrl.classList.remove('busy');   // явное снятие: обычное состояние контрола
+      updateModelLabel();              // возвращаем обычный title с именем модели
+    }
   }
   async function loadModels() {
-    const sel = $('#modelSelect');
-    if (!sel) return;
     try {
       const r = await fetch('/ai/models', { credentials: 'same-origin', cache: 'no-store' });
       if (!r.ok) return;
       const data = await r.json();
       const models = Array.isArray(data.models) ? data.models : [];
       if (!models.length) return;
+      modelList = data;
+      const sel = $('#modelSelect');
       const saved = localStorage.getItem(MODEL_KEY);
       const pick = models.includes(saved) ? saved : (models.includes(data.default) ? data.default : models[0]);
-      sel.innerHTML = '';
-      for (const id of models) sel.appendChild(new Option(id, id));
-      sel.value = pick;
-      sel.hidden = false;
-    } catch { /* LM Studio недоступна: селектор остаётся скрытым */ }
+      if (sel) {
+        sel.innerHTML = '';
+        for (const id of models) sel.appendChild(new Option(id, id));
+        sel.value = pick;
+      }
+      setModelControlVisible(true);
+      updateModelLabel();
+      // сохранённая модель исчезла из LM Studio (удалена/выключена) — предупреждаем
+      if (saved && !models.includes(saved)) toast('Сохранённая модель недоступна в LM Studio, выбран другой вариант');
+    } catch { /* LM Studio недоступна: контрол остаётся скрытым */ }
   }
-  const modelSel = $('#modelSelect');
-  if (modelSel) modelSel.addEventListener('change', () => localStorage.setItem(MODEL_KEY, modelSel.value));
+  // ---- выпадающий список моделей в стиле приложения (.model-dd) ----
+  // Окно живёт во временном layer-контейнере на body: position:fixed внутри
+  // шапки с backdrop-filter давал бы «двойную» подложку и чужие тени.
+  let ddEl = null, ddLayer = null, ddKeyLis = null, ddScrollLis = null,
+      ddWheelLis = null, ddTouchLis = null, ddReposLis = null;
+  function closeModelDd() {
+    if (!ddEl) return;
+    const gone = ddEl;
+    ddEl = null;
+    const goneLayer = ddLayer;
+    if (ddLayer) { ddLayer.remove(); ddLayer = null; }
+    if (ddKeyLis) {
+      // слушатель вешался на само окно и терялся вместе с ним: после этого
+      // стрелки/Enter переставали работать даже при открытии списка заново
+      document.removeEventListener('keydown', ddKeyLis);
+      ddKeyLis = null;
+    }
+    // wheel/touchmove вешаются на слой-обёртку с passive:false — снимаем их
+    // явно, иначе после нескольких открытий накопятся дубли обработчиков
+    if (goneLayer) {
+      if (ddWheelLis) goneLayer.removeEventListener('wheel', ddWheelLis);
+      if (ddTouchLis) goneLayer.removeEventListener('touchmove', ddTouchLis);
+    }
+    ddWheelLis = null; ddTouchLis = null;
+    void gone;   // окно удаляется вместе со слоем; явного снятия не требует
+    // scroll-слушатель окна больше не вешается: скролл списка НЕ должен его
+    // закрывать (см. openModelDd/ddReposLis); переменная обнуляется для верности
+    ddScrollLis = null;
+    // слушатель скролла страницы/чата, перепозиционирующий окно — тоже снимаем
+    // явно: window-слушатели не «собираются» сами и после закрытия окна начали
+    // бы дублироваться при каждом новом открытии
+    if (ddReposLis) {
+      window.removeEventListener('scroll', ddReposLis, true);
+      document.removeEventListener('scroll', ddReposLis, true);
+      ddReposLis = null;
+    }
+    const btn = $('#modelSelectBtn');
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+  }
+  // Закрытие по клику вне окна — через прозрачный полноэкранный «щит» слоя, а
+  // не глобальным слушателем на document. Глобальный pointerdown в capture-фазе
+  // убивал выбор: он срабатывал РАНЬШЕ click'а, закрывал окно и снимал слой с
+  // документа → обработчик пункта уже не вызывался («список сломался, выбор не
+  // работает»). Щит лежит под окном (порядок детей в слое), поэтому тапы мимо
+  // закрывают список, а тапы по пунктам доживают до click.
+  function bindDdDismiss(d) {
+    d.addEventListener('click', (e) => {
+      // клик по окну, но мимо пункта (заголовок, отступы, пустая область) — закрыть
+      if (!e.target.closest('.model-dd-item')) closeModelDd();
+    });
+  }
+  window.addEventListener('resize', closeModelDd);
+  // имя модели в LM Studio длинное ("qwen2.5-coder-32b-instruct-q4_k_m"):
+  // режем середину для показа, полное имя всегда остаётся в title/атрибутах
+  function shortModelName(id, max = 34) {
+    if (!id || id.length <= max) return id || '';
+    const half = Math.floor((max - 1) / 2);
+    return id.slice(0, half) + '…' + id.slice(id.length - half);
+  }
+  function positionModelDd() {
+    if (!ddEl) return;
+    const btn = $('#modelSelectBtn');
+    if (!btn) return;
+    // Сначала сбрасываем зафиксированные размеры: без этого повторный вызов
+    // (после дозарядки списка, смены темы или поворота экрана) измерял бы
+    // scrollWidth пунктов внутри уже заданной ширины и список «залипал» в
+    // прежнем размере, а пункты с длинными именами обрезались и не скроллились.
+    ddEl.style.width = '';
+    ddEl.style.height = '';           // сброс «урезанной» высоты после поворота экрана
+    ddEl.style.display = '';          // и flex-режима, выставленного позиционером
+    ddEl.style.flexDirection = '';
+    const list = ddEl.querySelector('.model-dd-list');
+    if (list) { list.style.maxHeight = ''; list.style.flex = ''; }
+    // Ширина: берём РЕАЛЬНУЮ ширину содержимого (getBoundingClientRect у flex-
+    // контейнера с min-width:0 корректно возвращает полную ширину текста, в отличие
+    // от scrollWidth, который при overflow:hidden возвращал ширину видимой части).
+    // Старый расчёт по scrollWidth+PAD занижал ширину → имена обрезались, а из-за
+    // переполнения возникал «мёртвый» горизонтальный скролл внутри списка.
+    const PAD = 30;   // паддинги пункта (10+10) + окна (4+4) + полоса прокрутки (~8)
+    let natural = 0;
+    ddEl.querySelectorAll('.model-dd-item').forEach((it) => {
+      const name = it.querySelector('.model-dd-name');
+      const meta = it.querySelector('.model-dd-meta');
+      const inner = (name ? name.getBoundingClientRect().width : 0) +
+                    (meta ? meta.getBoundingClientRect().width : 0);
+      natural = Math.max(natural, inner + PAD);
+    });
+    const w = Math.min(Math.max(natural, btn.offsetWidth), window.innerWidth - 16);
+    ddEl.style.width = w + 'px';
+    // высота списка — по доступному месту вокруг кнопки, иначе при большом
+    // числе моделей окно упиралось за экран и часть списка была недостижима.
+    // Считаем её НЕ от середины экрана, а от реальной позиции окна (выше/ниже
+    // кнопки) — иначе на низких экранах max-height выходил больше фактической
+    // «урезанной» высоты окна и нижняя часть списка уходила за вьюпорт:
+    // вертикальная прокрутка как бы «не доходила» до последних пунктов.
+    const r = btn.getBoundingClientRect();
+    const below = r.bottom + 6;
+    const spaceBelow = window.innerHeight - below - 8;
+    const spaceAbove = r.top - 6 - 8;
+    const preferAbove = spaceBelow < 200 && spaceAbove > spaceBelow;
+    const avail = Math.max(120, Math.max(spaceBelow, spaceAbove));
+    if (list) list.style.maxHeight = Math.min(360, avail) + 'px';
+    const dr = ddEl.getBoundingClientRect();
+    ddEl.style.left = Math.max(8, Math.min(r.left, window.innerWidth - dr.width - 8)) + 'px';
+    // Если окно ниже кнопки не влезает целиком — поднимаем его над кнопкой,
+    // но НЕ выше верхней границы экрана: иначе верх списка (и заголовок)
+    // уходил за вьюпорт и часть пунктов становилась недостижима ни кликом,
+    // ни прокруткой («список сломался»). Вместо подъёма урезаем высоту
+    // самого окна, чтобы оно всегда помещалось под кнопкой.
+    if (preferAbove && dr.height <= spaceAbove) {
+      ddEl.style.top = (r.top - dr.height - 6) + 'px';
+    } else if (below + dr.height > window.innerHeight - 8) {
+      const fit = Math.max(140, spaceBelow);
+      if (dr.height > fit) {
+        ddEl.style.height = fit + 'px';
+        ddEl.style.display = 'flex';
+        ddEl.style.flexDirection = 'column';
+        if (list) { list.style.flex = '1 1 auto'; list.style.minHeight = '0'; }
+      }
+      ddEl.style.top = below + 'px';
+    } else {
+      ddEl.style.top = below + 'px';
+    }
+  }
+  function openModelDd() {
+    const btn = $('#modelSelectBtn');
+    if (!btn || !modelList.models || !modelList.models.length) return;
+    if (ddEl) { closeModelDd(); return; }        // повторный клик — закрыть
+    ddLayer = document.createElement('div');
+    ddLayer.style.position = 'fixed';            // дочерние .model-dd позиционируются от вьюпорта
+    ddLayer.style.inset = '0';
+    ddLayer.style.pointerEvents = 'none';        // сам слой кликов не ловит — только щит и окно
+    ddLayer.style.zIndex = '10002';
+    // прозрачный полноэкранный «щит» под окном: тап мимо списка закрывает его,
+    // не перехватывая события пунктов (см. комментарий к bindDdDismiss)
+    const shield = document.createElement('div');
+    shield.style.position = 'absolute';
+    shield.style.inset = '0';
+    shield.style.pointerEvents = 'auto';         // единственный кликабельный фон слоя
+    shield.addEventListener('pointerdown', closeModelDd);
+    ddLayer.appendChild(shield);
+    const d = document.createElement('div');
+    d.className = 'model-dd';
+    d.setAttribute('role', 'listbox');
+    d.setAttribute('aria-label', 'Модели LM Studio');
+    const head = document.createElement('div');
+    head.className = 'model-dd-head';
+    head.textContent = 'Модель LM Studio';
+    d.appendChild(head);
+    const list = document.createElement('div');
+    list.className = 'model-dd-list';
+    const cur = currentModel();
+    for (const id of modelList.models) {
+      const loaded = modelList.loaded && id === modelList.loaded;
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'model-dd-item' + (id === cur ? ' current' : '');
+      b.setAttribute('role', 'option');
+      b.setAttribute('aria-selected', String(id === cur));
+      const nm = document.createElement('span');
+      nm.className = 'model-dd-name';
+      nm.textContent = shortModelName(id);
+      nm.title = id;                              // полное имя — при наведении
+      b.appendChild(nm);
+      const meta = document.createElement('span');
+      meta.className = 'model-dd-meta';
+      if (loaded) {
+        const dot = document.createElement('span');
+        dot.className = 'model-dd-dot';
+        dot.title = 'Модель сейчас в памяти (VRAM)';
+        meta.appendChild(dot);
+        const badge = document.createElement('span');
+        badge.className = 'model-dd-badge';
+        badge.textContent = 'в памяти';
+        meta.appendChild(badge);
+      }
+      if (id === cur) {
+        const chk = document.createElement('span');
+        chk.className = 'model-dd-check';
+        chk.textContent = '✓';
+        chk.title = 'Выбранная модель';
+        meta.appendChild(chk);
+      }
+      if (meta.childNodes.length) b.appendChild(meta);
+      b.addEventListener('click', (e) => {
+        // stopPropagation — чтобы обработчик закрытия «по клику мимо пункта»
+        // на окне не отработал вторым и не закрыл список раньше времени
+        e.stopPropagation();
+        closeModelDd();
+        if (id !== cur) onModelPicked(id);
+      });
+      list.appendChild(b);
+    }
+    const sep = document.createElement('div');
+    sep.className = 'model-dd-sep';
+    list.appendChild(sep);
+    const upd = document.createElement('button');
+    upd.type = 'button';
+    upd.className = 'model-dd-item muted';
+    upd.textContent = '↻ Обновить список';
+    upd.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      closeModelDd();
+      await loadModels();
+      toast('Список моделей обновлён');
+    });
+    list.appendChild(upd);
+    d.appendChild(list);
+    ddLayer.appendChild(d);
+    document.body.appendChild(ddLayer);
+    ddEl = d;
+    btn.setAttribute('aria-expanded', 'true');
+    bindDdDismiss(d);
+    positionModelDd();
+    // Прокрутка колесом/тапом: блокируем дефолт только для событий, пришедших
+    // НЕ из прокручиваемого списка (заголовок, отступы окна) — иначе чат под
+    // выпадашкой начинал скроллиться «сквозь» неё. Внутри .model-dd-list
+    // default не отменяем: браузер сам скроллит список.
+    // Слушатели вешаем на СЛОЙ (а не на окно): прозрачный щит лежит внутри слоя
+    // и перекрывает весь экран — раньше wheel/touchmove над щитом вообще не
+    // обрабатывались, и колесо крутило чат «сквозь» открытое меню.
+    const nonListScroll = (e) => {
+      if (!ddEl) return;
+      if (!(e.target && e.target.closest && e.target.closest('.model-dd-list'))) {
+        e.preventDefault();
+      }
+    };
+    ddWheelLis = nonListScroll; ddTouchLis = nonListScroll;
+    ddLayer.addEventListener('wheel', nonListScroll, { passive: false });
+    ddLayer.addEventListener('touchmove', nonListScroll, { passive: false });
+    const first = list.querySelector('.model-dd-item.current') || list.querySelector('.model-dd-item');
+    if (first) first.focus({ preventScroll: true });
+    // Клавиатура: Esc — закрыть, стрелки — переход по пунктам (как в .ui-menu).
+    // Слушатель вешаем на document (а не на окно) и снимаем в closeModelDd():
+    // вложенные span'ы имени/бейджа не видны closest('button'), если слушать
+    // только на кнопках, а слушатель на удалённом из DOM окне терялся навсегда.
+    ddKeyLis = (e) => {
+      if (!ddEl) return;
+      // Enter/Пробел на самой кнопке-триггере: не перехватываем — иначе клик по
+      // кнопке открывал список и тут же «выбирал» первый пункт
+      if ((e.key === 'Enter' || e.key === ' ') && e.target.closest('#modelSelectBtn')) return;
+      if (e.key === 'Escape') { e.preventDefault(); closeModelDd(); btn.focus(); return; }
+      if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        const items = Array.from(ddEl.querySelectorAll('.model-dd-item'));
+        if (!items.length) return;
+        const active = e.target.closest ? e.target.closest('.model-dd-item') : null;
+        let i = items.indexOf(active);
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          (active || items[0]).click();
+          return;
+        }
+        e.preventDefault();
+        if (i < 0) i = e.key === 'ArrowUp' ? items.length - 1 : 0;
+        else i = (i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+        items[i].focus({ preventScroll: true });
+        keepItemVisible(items[i]);
+        return;
+      }
+      // Tab уводит фокус из списка — закрываем, как системные меню
+      if (e.key === 'Tab') closeModelDd();
+    };
+    document.addEventListener('keydown', ddKeyLis);
+    // Скролл страницы/чата при открытом списке: раньше любое scroll-событие
+    // закрывал окно: прокрутка чата под выпадашкой мгновенно её захлопывала.
+    // Теперь окно остаётся открытым и перепозиционируется вслед за кнопкой.
+    // ВАЖНО: скролл самого списка (.model-dd-list) игнорируем — иначе
+    // перепозиционирование сбрасывало бы его scrollTop (окно «прыгало» на
+    // первый пункт, а нижняя часть списка становилась недостижимой).
+    ddReposLis = (e) => {
+      if (!ddEl) return;
+      const t = e && e.target;
+      if (t && t.closest && t.closest('.model-dd')) return;   // внутренний скролл окна
+      positionModelDd();
+    };
+    window.addEventListener('scroll', ddReposLis, true);
+  }
+  // Доводимый до видимости пункт при стрелочной навигации: focus() с
+  // preventScroll сам ничего не прокручивает, а без этого последний пункт
+  // можно было «потерять» за нижней границей списка. Прокручиваем именно
+  // контейнер списка (а не window.scrollIntoView, который мог прокрутить и
+  // страницу под меню): если пункт ушёл выше верхней или ниже нижней границы
+  // .model-dd-list — подтягиваем его в зону видимости минимальным сдвигом.
+  function keepItemVisible(it) {
+    if (!it || !ddEl) return;
+    const list = ddEl.querySelector('.model-dd-list');
+    if (!list) return;
+    const lr = list.getBoundingClientRect(), ir = it.getBoundingClientRect();
+    if (ir.top < lr.top) list.scrollTop -= (lr.top - ir.top) + 4;
+    else if (ir.bottom > lr.bottom) list.scrollTop += (ir.bottom - lr.bottom) + 4;
+  }
+  function ddSetStatus(text, isErr) {
+    // строка-статус внутри открытого списка («Загрузка модели в память…», ошибки)
+    if (!ddEl) return;
+    let s = ddEl.querySelector('.model-dd-status');
+    if (!s) {
+      s = document.createElement('div');
+      s.className = 'model-dd-item spin model-dd-status';
+      const sp = document.createElement('span');
+      sp.className = 'model-dd-spinner';
+      s.appendChild(sp);
+      s.appendChild(document.createElement('span'));
+      ddEl.querySelector('.model-dd-list').appendChild(s);
+    }
+    s.classList.toggle('err', !!isErr);
+    s.classList.toggle('spin', !isErr);
+    s.lastChild.textContent = text;
+  }
+  function onModelPicked(model) {
+    const sel = $('#modelSelect');
+    const prev = sel ? sel.value : null;
+    if (sel) sel.value = model;
+    updateModelLabel();
+    selectModel(model, prev);
+  }
+  let modelSwitching = false;
+  async function selectModel(model, previous) {
+    const sel = $('#modelSelect');
+    // Смена модели = выгрузка текущей и загрузка выбранной в LM Studio.
+    // Пока модель участвует в генерации (наша печать или чужой стрим на этом
+    // аккаунте), сервер ответит 409 и поставит модель в очередь дозарядки.
+    if (gen || genFlagGet()) {
+      if (sel) sel.value = previous;              // откатываем выбор: сейчас нельзя
+      localStorage.setItem(MODEL_KEY, model);     // запомнили намерение
+      updateModelLabel();
+      try {
+        const r = await fetch('/ai/models/select', {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model }),
+        });
+        if (r.status === 409) {
+          toast('Модель нельзя сменить: идёт генерация. Она будет загружена автоматически после окончания ответа.', 4200);
+          return;
+        }
+      } catch { /* сеть недоступна — намерение осталось в localStorage */ }
+      return;
+    }
+    if (modelSwitching) return;
+    modelSwitching = true;
+    // НЕ ставим disabled — браузер закрасит контрол серым и он будет выглядеть
+    // мёртвым. Вместо этого подсветка .busy + подсказка в title.
+    const ctrl = $('#modelSelectBtn') || sel;
+    if (ctrl) { ctrl.classList.add('busy'); ctrl.title = 'Загрузка модели в память…'; }
+    ddSetStatus('Загрузка модели в память…');
+    try {
+      const r = await fetch('/ai/models/select', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok) {
+        localStorage.setItem(MODEL_KEY, model);
+        toast(data.changed ? `Модель ${model} загружена` : `Модель ${model} уже в памяти`, 3200);
+        loadModels();                              // обновим пометку «в VRAM»
+      } else if (r.status === 409) {
+        localStorage.setItem(MODEL_KEY, model);
+        toast(data.message || 'Идёт генерация — модель загрузится автоматически после ответа.', 4200);
+      } else {
+        if (sel) { sel.value = previous; updateModelLabel(); }   // откат значения при отказе сервера
+        const em = data.message || data.error || 'Не удалось переключить модель';
+        ddSetStatus(em, true);   // красный текст без спиннера: ошибка, а не загрузка
+        toast(em, 4200);
+      }
+    } catch {
+      if (sel) { sel.value = previous; updateModelLabel(); }
+      toast('Сервер недоступен: модель не переключена');
+    } finally {
+      modelSwitching = false;
+      updateModelBusy();   // снимает .busy/title, вернёт обычный вид (или «занято», если печать началась)
+    }
+  }
+  const modelBtn = $('#modelSelectBtn');
+  if (modelBtn) {
+    modelBtn.addEventListener('click', openModelDd);
+    modelBtn.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        openModelDd();
+      }
+    });
+  }
   loadModels();
 
   window.addEventListener('online', async () => {

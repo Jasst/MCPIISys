@@ -82,7 +82,9 @@ from GCN.mcp_client_manager import MCPToolManager
 from GCN.GCN import KnowledgeObject, KnowledgeType, MemoryScope
 from GCN.memory_graph import CognitiveMemory, Fact, Goal, GCNMemoryRouter
 
-from GCN.llm_client import call_llm, call_llm_raw, call_llm_stream, list_models, llm_model_var
+from GCN.llm_client import (call_llm, call_llm_raw, call_llm_stream, list_models, llm_model_var,
+                            list_models_cached, get_loaded_model, ensure_model_loaded,
+                            schedule_preload, model_ops_lock)
 from GCN.web_search import deep_search, is_time_sensitive_query
 from GCN.image_utils import enhance_prompt, generate_image
 from GCN.tool_router import ToolRegistry, ToolRouter, build_tool_trace_context
@@ -2627,7 +2629,6 @@ class CognitiveController:
                               reasoning: bool = False, char_by_char: bool = None,
                               gen_key: Optional[str] = None,
                               chat_id: Optional[str] = None, user_msg_id: Optional[str] = None, model: Optional[str] = None):
-        llm_model_var.set(model)
         """
         Тонкая обёртка над StreamingResponse. Реальная генерация выполняется в
         self._stream_response_worker, запущенном как отдельная asyncio.Task
@@ -2662,6 +2663,7 @@ class CognitiveController:
                     image_base64=image_base64, image_mime=image_mime,
                     reasoning=reasoning, char_by_char=char_by_char,
                     chat_id=chat_id, user_msg_id=user_msg_id, bot_id=gen_key,
+                    model=model,
                 ),
                 name=f"stream:{gen_id}",
             )
@@ -2777,7 +2779,7 @@ class CognitiveController:
                                        image_base64: str = None, image_mime: str = None,
                                        reasoning: bool = False, char_by_char: bool = None,
                                        chat_id: Optional[str] = None, user_msg_id: Optional[str] = None,
-                                       bot_id: Optional[str] = None):
+                                       bot_id: Optional[str] = None, model: Optional[str] = None):
         """
         Фактическая генерация ответа. Запускается как ОТДЕЛЬНАЯ asyncio.Task
         (см. stream_response ниже) — а не как тело async-генератора, который
@@ -2802,6 +2804,14 @@ class CognitiveController:
         и всегда дописывает историю/память до конца.
         """
         timer = StageTimer(f"gen={gen_id[:8]}")
+        # ВАЖНО (контекстная переменная модели): llm_model_var ОБЯЗАТЕЛЬНО
+        # ставить здесь, внутри этой фоновой Task, а не в HTTP-обработчике.
+        # ContextVar копируется в задачу в момент create_task; если задать её
+        # в теле async-генератора stream_response, значение «протечёт» в
+        # запрос Starlette и параллельные генерации разных пользователей
+        # наследовали бы чужую модель. Один set() в начале воркера фиксирует
+        # выбранную модель для всех call_llm* этого ответа.
+        llm_model_var.set(model)
         # Ранний ack В САМОМ НАЧАЛЕ воркера (до пайплайна памяти, реестра MCP и
         # подготовки сообщений): клиент получает первое событие потока мгновенно,
         # как только фоновая задача стартовала. Без этого первые секунды запроса
@@ -3463,15 +3473,78 @@ async def chat_with_ai(body: AIRequest, address: str = Depends(require_auth)):
     )
     return {"reply": response, "meta": meta}
 
+async def any_active_generation() -> Dict:
+    """Есть ли сейчас живая генерация хотя бы у одного пользователя?
+
+    Смена модели (выгрузка/загрузка весов в LM Studio) допустима только когда
+    модель никто не использует: иначе посреди стрима выгрузим веса из-под LLM.
+    Возвращает {"active": bool, "gen_id": str|None}.
+    """
+    for uid, assistant in list(_assistants.items()):
+        st = assistant._active_stream
+        if st is not None and not st.get("done"):
+            return {"active": True, "gen_id": st.get("gen_id")}
+    return {"active": False, "gen_id": None}
+
+
 @router.get("/models")
 async def list_chat_models(address: str = Depends(require_auth)):
-    """Модели LM Studio для выбора в чате. Если LM Studio недоступна — пустой список."""
+    """Модели LM Studio для выбора в чате. Если LM Studio недоступна — пустой список.
+
+    Кэш с TTL (list_models_cached): страницу открывает каждый клиент, а список
+    меняется редко. В ответе дополнительно отдаём `loaded` — модель, фактически
+    стоящая в VRAM, чтобы UI подсвечивал реальное состояние, а не только выбор.
+    """
+    models = await list_models_cached()
+    loaded = None
     try:
-        models = await list_models()
+        loaded = await get_loaded_model()
     except Exception as e:
-        logger.warning(f"/ai/models: {e}")
-        return {"models": [], "default": LM_STUDIO_MODEL}
-    return {"models": models, "default": LM_STUDIO_MODEL}
+        logger.debug(f"/ai/models loaded: {e}")
+    return {"models": models, "default": LM_STUDIO_MODEL, "loaded": loaded or LM_STUDIO_MODEL}
+
+
+class ModelSelectRequest(BaseModel):
+    model: Optional[str] = Field(None, max_length=200)
+
+
+@router.post("/models/select")
+async def select_chat_model(body: ModelSelectRequest, address: str = Depends(require_auth)):
+    """Реально переключить модель в LM Studio: выгрузить текущую, загрузить выбранную.
+
+    Правила:
+      * id проверяется по whitelist списка моделей LM Studio (иначе 400) —
+        раньше произвольная строка уходила в запрос и давала мутную ошибку от LMS;
+      * если прямо сейчас идёт генерация (любого пользователя/устройства) —
+        сменить модель нельзя: возвращаем 409 generation_busy, но выбранную
+        модель ставим в очередь фоновой дозарядки (schedule_preload) — она
+        загрузится автоматически, как только печать закончится;
+      * иначе выполняем ensure_model_loaded под глобальным model_ops_lock.
+    """
+    target = (body.model or "").strip() or LM_STUDIO_MODEL
+    models = await list_models_cached()
+    # Whitelist: если LM Studio недоступна (кэш пуст) — не блокируем выбор
+    # дефолтной модели; про неизвестный id при известном списке — ошибка.
+    if models and target not in models:
+        return JSONResponse({"detail": "unknown_model",
+                             "message": "Модель не найдена в LM Studio"}, status_code=400)
+    busy = await any_active_generation()
+    if busy["active"]:
+        schedule_preload(target)
+        logger.info(f"/ai/models/select: генерация идёт ({busy['gen_id']}), "
+                    f"'{target}' поставлена в очередь дозарядки")
+        return JSONResponse({
+            "detail": "generation_busy",
+            "queued": target,
+            "message": "Модель сейчас нельзя сменить: идёт генерация. "
+                       "Выбранная модель будет загружена автоматически после окончания ответа.",
+        }, status_code=409)
+    async with model_ops_lock:
+        result = await ensure_model_loaded(target)
+    if not result["ok"]:
+        return JSONResponse({"detail": "lm_studio_error", "error": result["error"]},
+                            status_code=502)
+    return {"ok": True, "loaded": result["loaded"], "changed": result["changed"]}
 
 @router.get("/chat/attach")
 async def attach_to_active_stream(watch: bool = False, key: Optional[str] = None,

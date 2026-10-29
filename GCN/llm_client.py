@@ -1,6 +1,7 @@
 import asyncio
 import aiohttp
 import logging
+import time
 from typing import List, Dict, Optional
 import contextvars
 from GCN.config_ai import LM_STUDIO_URL, LM_STUDIO_API_KEY, LM_STUDIO_TIMEOUT, LM_STUDIO_STREAM_TIMEOUT, DEFAULT_MAX_TOKENS, LM_STUDIO_MODEL
@@ -12,6 +13,13 @@ llm_model_var: contextvars.ContextVar = contextvars.ContextVar("llm_model", defa
 
 def _model_name() -> str:
     return llm_model_var.get() or LM_STUDIO_MODEL
+
+
+def _api_base_url() -> str:
+    """http://host:port/v1 из LM_STUDIO_URL (.../v1/chat/completions)."""
+    return LM_STUDIO_URL.replace("/chat/completions", "")
+
+
 import json
 
 logger = logging.getLogger(__name__)
@@ -322,3 +330,188 @@ async def list_models() -> List[str]:
         data = await resp.json()
     ids = [m.get("id") for m in data.get("data", []) if isinstance(m, dict) and m.get("id")]
     return [i for i in ids if "embed" not in i.lower()]
+
+
+# ===== Кэш списка моделей =====
+# /ai/models опрашивается каждым клиентом при открытии страницы; список в
+# LM Studio меняется редко, поэтому отдаём закешированное значение (TTL ниже),
+# а фоновые операции с моделью (проверка загрузки, выгрузка) бьют в кассу.
+_MODELS_CACHE_TTL_S = 60.0
+_models_cache: Dict = {"ids": None, "ts": 0.0}
+_models_cache_lock = asyncio.Lock()
+
+
+async def list_models_cached(force: bool = False) -> List[str]:
+    """Как list_models(), но с коротким кэшем. Ошибку гасит в пустой список —
+    вызывающий код сам решает, что делать с недоступной LM Studio."""
+    now = time.monotonic()
+    if not force and _models_cache["ids"] is not None and now - _models_cache["ts"] < _MODELS_CACHE_TTL_S:
+        return _models_cache["ids"]
+    async with _models_cache_lock:
+        # двойная проверка: пока ждали лок, кэш мог обновить сосед
+        now = time.monotonic()
+        if not force and _models_cache["ids"] is not None and now - _models_cache["ts"] < _MODELS_CACHE_TTL_S:
+            return _models_cache["ids"]
+        try:
+            ids = await list_models()
+        except Exception as e:
+            logger.warning(f"list_models_cached: {e}")
+            # устаревший кэш лучше пустого списка: UI не «сломается» на минуту
+            return _models_cache["ids"] or []
+        _models_cache["ids"] = ids
+        _models_cache["ts"] = time.monotonic()
+        return ids
+
+
+def invalidate_models_cache() -> None:
+    _models_cache["ids"] = None
+    _models_cache["ts"] = 0.0
+
+
+# ===== Управление загрузкой моделей в LM Studio (нативный API /api/v0) =====
+# Выбор модели в чате должен не просто подставлять id в запрос, а реально
+# выгружать прежнюю и загружать выбранную модель: иначе первая же отправка
+# упирается в медленную «холодную» загрузкуWeight'ов посреди генерации.
+_LMS_API_BASE = LM_STUDIO_URL.replace("/v1/chat/completions", "") + "/api/v0"
+_LMS_HEADERS = {"Authorization": f"Bearer {LM_STUDIO_API_KEY}"}
+
+# id модели, которая по нашему учёту сейчас в VRAM (None — неизвестно);
+# timestamp последней успешной загрузки — для блокировки смены модели
+# сразу после старта/финала генерации.
+_loaded_model_id: Optional[str] = None
+_load_ts: float = 0.0
+# глобальная блокировка: выгрузка/загрузка weights — эксклюзивная операция,
+# во время неё нельзя запускать генерацию и вторую смену модели
+model_ops_lock = asyncio.Lock()
+# фоновая задача дозарядки модели после смены (отменяется при новой смене)
+_preload_task: Optional[asyncio.Task] = None
+
+
+async def get_loaded_model() -> Optional[str]:
+    """id модели, фактически стоящей в VRAM LM Studio (по данным самого LMS)."""
+    global _loaded_model_id
+    url = f"{_LMS_API_BASE}/models/current"
+    try:
+        session = await _get_session()
+        async with session.get(url, headers=_LMS_HEADERS,
+                               timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status == 404:      # API недоступно (старая версия LM Studio)
+                return _loaded_model_id
+            if resp.status != 200:
+                raise RuntimeError(f"LM Studio /models/current: HTTP {resp.status}")
+            data = await resp.json()
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.debug(f"get_loaded_model: {e} (использую учётный кэш)")
+        return _loaded_model_id
+    _loaded_model_id = data.get("key") or data.get("id") or None
+    return _loaded_model_id
+
+
+async def unload_model(model_id: str) -> None:
+    url = f"{_LMS_API_BASE}/models/unload"
+    session = await _get_session()
+    async with session.post(url, headers=_LMS_HEADERS, json={"key": model_id},
+                            timeout=aiohttp.ClientTimeout(total=30)) as resp:
+        if resp.status >= 400:
+            text = await resp.text()
+            raise RuntimeError(f"LM Studio unload '{model_id}': HTTP {resp.status}: {text[:150]}")
+
+
+async def load_model(model_id: str) -> None:
+    url = f"{_LMS_API_BASE}/models/load"
+    session = await _get_session()
+    async with session.post(url, headers=_LMS_HEADERS, json={"key": model_id},
+                            timeout=aiohttp.ClientTimeout(total=180)) as resp:
+        if resp.status >= 400:
+            text = await resp.text()
+            raise RuntimeError(f"LM Studio load '{model_id}': HTTP {resp.status}: {text[:150]}")
+
+
+async def ensure_model_loaded(target: Optional[str]) -> Dict:
+    """Выгрузить текущую модель и загрузить выбранную (target=None — дефолт).
+
+    Возвращает {"ok": bool, "loaded": id, "changed": bool, "error": str|None}.
+    Идемпотентна: если целевая модель уже в VRAM — ничего не делаем.
+    Вызывать ТОЛЬКО когда генерация не идёт (см. /ai/models/select).
+    """
+    global _loaded_model_id, _load_ts, _preload_task
+    target = target or LM_STUDIO_MODEL
+    if _preload_task and not _preload_task.done():
+        _preload_task.cancel()
+        _preload_task = None
+    async with model_ops_lock:
+        current = await get_loaded_model()
+        if current == target:
+            _loaded_model_id = target
+            return {"ok": True, "loaded": target, "changed": False, "error": None}
+        try:
+            if current:
+                await unload_model(current)
+            await load_model(target)
+            _loaded_model_id = target
+            _load_ts = time.monotonic()
+            invalidate_models_cache()
+            logger.info(f"Модель переключена: {current!r} -> {target!r}")
+            return {"ok": True, "loaded": target, "changed": True, "error": None}
+        except Exception as e:
+            logger.error(f"Не удалось переключить модель на {target!r}: {e}")
+            # состояние VRAM после сбоя неизвестно — пусть следующим шагом
+            # разберётся LM Studio (загрузит по запросу сама)
+            _loaded_model_id = None
+            invalidate_models_cache()
+            return {"ok": False, "loaded": current, "changed": False, "error": str(e)}
+
+
+def schedule_preload(target: Optional[str]) -> None:
+    """Фоновая дозарядка выбранной модели (после того как генерация закончится).
+
+    Смена модели во время печати запрещена, поэтому новая модель грузится
+    сразу, как только поток освободился: следующий запрос не тратит секунды
+    на холодную загрузку. Старая задача дозарядки отменяется — актуальна
+    только последняя выбранная модель.
+    """
+    global _preload_task
+    target = target or LM_STUDIO_MODEL
+    if _preload_task and not _preload_task.done():
+        _preload_task.cancel()
+
+    async def _worker():
+        try:
+            # дождаться завершения текущей генерации (см. /gen-status)
+            for _ in range(900):          # максимум ~15 минут
+                await asyncio.sleep(1.0)
+                if model_ops_lock.locked():
+                    continue
+                st = await get_generation_status()
+                if not st.get("active"):
+                    break
+            else:
+                return
+            async with model_ops_lock:
+                await ensure_model_loaded(target)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.debug(f"preload '{target}': {e}")
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _preload_task = loop.create_task(_worker(), name=f"model-preload:{target}")
+
+
+async def get_generation_status() -> Dict:
+    """Есть ли активная генерация хотя бы у одного пользователя?
+
+    Используется дозарядкой и эндпоинтом смены модели: менять модель можно
+    только когда LM Studio простаивает. Реализовано ленивым импортом, чтобы
+    не создавать цикл llm_client <-> routes.ai_assistant.
+    """
+    try:
+        from routes.ai_assistant import any_active_generation
+        return await any_active_generation()
+    except Exception:
+        return {"active": False}
