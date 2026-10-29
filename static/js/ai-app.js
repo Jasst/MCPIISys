@@ -2992,21 +2992,34 @@
   // ---- выпадающий список моделей в стиле приложения (.model-dd) ----
   // Окно живёт во временном layer-контейнере на body: position:fixed внутри
   // шапки с backdrop-filter давал бы «двойную» подложку и чужие тени.
-  let ddEl = null, ddLayer = null, ddCloseOnScroll = false;
+  let ddEl = null, ddLayer = null, ddKeyLis = null, ddScrollLis = null;
   function closeModelDd() {
     if (!ddEl) return;
+    const gone = ddEl;
     ddEl = null;
     if (ddLayer) { ddLayer.remove(); ddLayer = null; }
-    if (ddCloseOnScroll) {
-      ddCloseOnScroll = false;
-      document.removeEventListener('scroll', closeModelDd, true);
+    if (ddKeyLis) {
+      // слушатель вешался на само окно и терялся вместе с ним: после этого
+      // стрелки/Enter переставали работать даже при открытии списка заново
+      document.removeEventListener('keydown', ddKeyLis);
+      ddKeyLis = null;
     }
+    if (ddScrollLis) { gone.removeEventListener('scroll', ddScrollLis, true); ddScrollLis = null; }
     const btn = $('#modelSelectBtn');
     if (btn) btn.setAttribute('aria-expanded', 'false');
   }
-  document.addEventListener('pointerdown', (e) => {
-    if (ddEl && !ddEl.contains(e.target) && !e.target.closest('#modelSelectBtn')) closeModelDd();
-  }, true);
+  // Закрытие по клику вне окна — через прозрачный полноэкранный «щит» слоя, а
+  // не глобальным слушателем на document. Глобальный pointerdown в capture-фазе
+  // убивал выбор: он срабатывал РАНЬШЕ click'а, закрывал окно и снимал слой с
+  // документа → обработчик пункта уже не вызывался («список сломался, выбор не
+  // работает»). Щит лежит под окном (порядок детей в слое), поэтому тапы мимо
+  // закрывают список, а тапы по пунктам доживают до click.
+  function bindDdDismiss(d) {
+    d.addEventListener('click', (e) => {
+      // клик по окну, но мимо пункта (заголовок, отступы, пустая область) — закрыть
+      if (!e.target.closest('.model-dd-item')) closeModelDd();
+    });
+  }
   window.addEventListener('resize', closeModelDd);
   // имя модели в LM Studio длинное ("qwen2.5-coder-32b-instruct-q4_k_m"):
   // режем середину для показа, полное имя всегда остаётся в title/атрибутах
@@ -3019,15 +3032,34 @@
     if (!ddEl) return;
     const btn = $('#modelSelectBtn');
     if (!btn) return;
-    // ширина: по самому длинному пункту, но не шире экрана и не уже кнопки
-    const items = ddEl.querySelectorAll('.model-dd-item');
+    // Сначала сбрасываем зафиксированные размеры: без этого повторный вызов
+    // (после дозарядки списка, смены темы или поворота экрана) измерял бы
+    // scrollWidth пунктов внутри уже заданной ширины и список «залипал» в
+    // прежнем размере, а пункты с длинными именами обрезались и не скроллились.
+    ddEl.style.width = '';
+    const list = ddEl.querySelector('.model-dd-list');
+    if (list) list.style.maxHeight = '';
+    // ширина: по самому длинному пункту, но не шире экрана и не уже кнопки.
+    // scrollWidth у flex-пункта равен его же ширине (пункт width:100%), поэтому
+    // измеряем внутренний блок: имя + мета-маркеры. Справа — отступы пункта
+    // (padding 10+10) и окна (4+4) плюс запас на полосу прокрутки списка.
+    const PAD = 28;
     let natural = 0;
-    items.forEach((it) => { natural = Math.max(natural, it.scrollWidth); });
-    const w = Math.min(Math.max(natural + 4, btn.offsetWidth), window.innerWidth - 16);
+    ddEl.querySelectorAll('.model-dd-item').forEach((it) => {
+      const name = it.querySelector('.model-dd-name');
+      const meta = it.querySelector('.model-dd-meta');
+      const inner = (name ? name.scrollWidth : 0) + (meta ? meta.offsetWidth : 0);
+      natural = Math.max(natural, inner + PAD);
+    });
+    const w = Math.min(Math.max(natural, btn.offsetWidth), window.innerWidth - 16);
     ddEl.style.width = w + 'px';
-    const maxH = Math.min(320, Math.floor(window.innerHeight * 0.5));
-    ddEl.querySelector('.model-dd-list').style.maxHeight = maxH + 'px';
+    // высота списка — по доступному месту вокруг кнопки, иначе при большом
+    // числе моделей окно упиралось за экран и часть списка была недостижима
     const r = btn.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - r.bottom - 14;
+    const spaceAbove = r.top - 14;
+    const avail = Math.max(120, Math.max(spaceBelow, spaceAbove));
+    if (list) list.style.maxHeight = Math.min(360, avail) + 'px';
     const dr = ddEl.getBoundingClientRect();
     ddEl.style.left = Math.max(8, Math.min(r.left, window.innerWidth - dr.width - 8)) + 'px';
     ddEl.style.top = (r.bottom + 6 + dr.height > window.innerHeight - 8)
@@ -3041,8 +3073,16 @@
     ddLayer = document.createElement('div');
     ddLayer.style.position = 'fixed';            // дочерние .model-dd позиционируются от вьюпорта
     ddLayer.style.inset = '0';
-    ddLayer.style.pointerEvents = 'none';        // клики «сквозь» слой — обработчик закрытия на документе
+    ddLayer.style.pointerEvents = 'none';        // сам слой кликов не ловит — только щит и окно
     ddLayer.style.zIndex = '10002';
+    // прозрачный полноэкранный «щит» под окном: тап мимо списка закрывает его,
+    // не перехватывая события пунктов (см. комментарий к bindDdDismiss)
+    const shield = document.createElement('div');
+    shield.style.position = 'absolute';
+    shield.style.inset = '0';
+    shield.style.pointerEvents = 'auto';         // единственный кликабельный фон слоя
+    shield.addEventListener('pointerdown', closeModelDd);
+    ddLayer.appendChild(shield);
     const d = document.createElement('div');
     d.className = 'model-dd';
     d.setAttribute('role', 'listbox');
@@ -3086,7 +3126,10 @@
         meta.appendChild(chk);
       }
       if (meta.childNodes.length) b.appendChild(meta);
-      b.addEventListener('click', () => {
+      b.addEventListener('click', (e) => {
+        // stopPropagation — чтобы обработчик закрытия «по клику мимо пункта»
+        // на окне не отработал вторым и не закрыл список раньше времени
+        e.stopPropagation();
         closeModelDd();
         if (id !== cur) onModelPicked(id);
       });
@@ -3099,23 +3142,57 @@
     upd.type = 'button';
     upd.className = 'model-dd-item muted';
     upd.textContent = '↻ Обновить список';
-    upd.addEventListener('click', () => { closeModelDd(); loadModels(); toast('Список моделей обновлён'); });
+    upd.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      closeModelDd();
+      await loadModels();
+      toast('Список моделей обновлён');
+    });
     list.appendChild(upd);
     d.appendChild(list);
     ddLayer.appendChild(d);
     document.body.appendChild(ddLayer);
     ddEl = d;
     btn.setAttribute('aria-expanded', 'true');
-    // скролл любой прокручиваемой области — закрываем окно (как системные меню):
-    // fixed-позиция не «приклеена» к кнопке, иначе список улетит вверх
-    document.addEventListener('scroll', closeModelDd, true);
-    ddCloseOnScroll = true;
+    bindDdDismiss(d);
     positionModelDd();
+    // прокрутка колесом/тапом: window.addEventListener('scroll', ..., true) не
+    // ловит scroll у элементов, поэтому слушатель вешаем на само окно и снимаем
+    // в closeModelDd() (иначе после N открытий накопится N дублей обработчика).
+    ddScrollLis = () => closeModelDd();
+    d.addEventListener('scroll', ddScrollLis, true);
     const first = list.querySelector('.model-dd-item.current') || list.querySelector('.model-dd-item');
     if (first) first.focus({ preventScroll: true });
-    d.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') { closeModelDd(); btn.focus(); }
-    });
+    // Клавиатура: Esc — закрыть, стрелки — переход по пунктам (как в .ui-menu).
+    // Слушатель вешаем на document (а не на окно) и снимаем в closeModelDd():
+    // вложенные span'ы имени/бейджа не видны closest('button'), если слушать
+    // только на кнопках, а слушатель на удалённом из DOM окне терялся навсегда.
+    ddKeyLis = (e) => {
+      if (!ddEl) return;
+      // Enter/Пробел на самой кнопке-триггере: не перехватываем — иначе клик по
+      // кнопке открывал список и тут же «выбирал» первый пункт
+      if ((e.key === 'Enter' || e.key === ' ') && e.target.closest('#modelSelectBtn')) return;
+      if (e.key === 'Escape') { e.preventDefault(); closeModelDd(); btn.focus(); return; }
+      if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        const items = Array.from(ddEl.querySelectorAll('.model-dd-item'));
+        if (!items.length) return;
+        const active = e.target.closest ? e.target.closest('.model-dd-item') : null;
+        let i = items.indexOf(active);
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          (active || items[0]).click();
+          return;
+        }
+        e.preventDefault();
+        if (i < 0) i = e.key === 'ArrowUp' ? items.length - 1 : 0;
+        else i = (i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+        items[i].focus();
+        return;
+      }
+      // Tab уводит фокус из списка — закрываем, как системные меню
+      if (e.key === 'Tab') closeModelDd();
+    };
+    document.addEventListener('keydown', ddKeyLis);
   }
   function ddSetStatus(text, isErr) {
     // строка-статус внутри открытого списка («Загрузка модели в память…», ошибки)
