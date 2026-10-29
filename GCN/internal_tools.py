@@ -351,8 +351,13 @@ def _register_image(registry: ToolRegistry, controller) -> None:
             filename = output_dir / f"image_{timestamp}.png"
             with open(filename, "wb") as f:
                 f.write(base64.b64decode(image_b64))
-            BASE_URL = os.getenv("SERVER_BASE_URL", "http://localhost:8000")
-            image_url = f"{BASE_URL}/generated_images/{filename.name}"
+            # ИСПРАВЛЕНИЕ (картинки не показываются в мобильной версии):
+            # раньше URL строился от SERVER_BASE_URL с дефолтом
+            # http://localhost:8000 — с телефона localhost недоступен, а на
+            # HTTPS-сайте http-ссылка блокировалась браузером как смешанный
+            # контент. Отдаём относительный путь: фронтенд сам допишет текущий
+            # протокол и хост (см. normalizeImageUrl в static/js/ai-app.js).
+            image_url = f"/generated_images/{filename.name}"
             return {"status": "ok", "image_url": image_url, "prompt": prompt}
         return {"status": "error", "message": "Не удалось сгенерировать изображение."}
 

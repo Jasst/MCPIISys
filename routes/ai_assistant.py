@@ -1677,7 +1677,30 @@ class CognitiveController:
         # инструментами. Пишем именно stored_response (без <thought>-блока),
         # чтобы будущий контекст модели не содержал служебный reasoning.
         if stored_response:
-            self.history.append({"role": "assistant", "content": stored_response})
+            _msg = {"role": "assistant", "content": stored_response}
+            # ИСПРАВЛЕНИЕ (картинки исчезают после перезагрузки/на другом
+            # устройстве): URL сгенерированных изображений уходил во фронтенд
+            # отдельным SSE-событием и в history не попадал — при восстановлении
+            # разговора картинки терялись. Сохраняем их рядом с текстом.
+            try:
+                _imgs: List[str] = []
+                for t in tool_trace or []:
+                    if t.get("tool") != "internal__generate_image":
+                        continue
+                    _r = t.get("result")
+                    if isinstance(_r, str):
+                        try:
+                            _r = json.loads(_r)
+                        except (json.JSONDecodeError, TypeError):
+                            _r = None
+                    if isinstance(_r, dict) and isinstance(_r.get("image_url"), str) \
+                            and _r["image_url"]:
+                        _imgs.append(_r["image_url"])
+                if _imgs:
+                    _msg["images"] = _imgs
+            except Exception as _ie:
+                logger.warning(f"[finalize] не удалось сохранить images в историю: {_ie}")
+            self.history.append(_msg)
         await self._save_history_async()
 
         if response:
@@ -2448,8 +2471,13 @@ class CognitiveController:
         messages = [{"role": "system", "content": system_content}]
 
         for item in self.history[-self.max_history:]:
-            if item.get("role") != "system":
-                messages.append(item)
+            if item.get("role") == "system":
+                continue
+            # Сообщения в истории могут содержать поле "images" (см. _finalize_answer).
+            # В LLM уходит только текстовая часть: лишние ключи ломают схему OpenAI-совместимых API.
+            if "content" in item and len(item) > 1:
+                item = {"role": item.get("role"), "content": item["content"]}
+            messages.append(item)
 
         user_blocks = []
         identity_block = self._get_identity_block()
