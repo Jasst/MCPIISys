@@ -77,6 +77,10 @@
         <button class="model-select" id="modelSelectBtn" type="button"
                 aria-haspopup="listbox" aria-expanded="false" title="Выбрать модель" hidden>
           <span class="model-name" id="modelName"></span>
+          <!-- подпись «в памяти: …»: показывается, когда выбрана одна модель,
+               а в VRAM сейчас держится другая (грузится в фоне / переключили
+               вручную). Управляется JS (updateModelLabel), по умолчанию скрыта -->
+          <span class="model-status" id="modelStatus" hidden></span>
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
         </button>
         <select id="modelSelect" aria-hidden="true" style="display:none"></select>
