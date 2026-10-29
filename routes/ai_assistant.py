@@ -82,7 +82,9 @@ from GCN.mcp_client_manager import MCPToolManager
 from GCN.GCN import KnowledgeObject, KnowledgeType, MemoryScope
 from GCN.memory_graph import CognitiveMemory, Fact, Goal, GCNMemoryRouter
 
-from GCN.llm_client import call_llm, call_llm_raw, call_llm_stream, list_models, llm_model_var
+from GCN.llm_client import (call_llm, call_llm_raw, call_llm_stream, list_models, llm_model_var,
+                            list_models_cached, get_loaded_model, ensure_model_loaded,
+                            schedule_preload, model_ops_lock)
 from GCN.web_search import deep_search, is_time_sensitive_query
 from GCN.image_utils import enhance_prompt, generate_image
 from GCN.tool_router import ToolRegistry, ToolRouter, build_tool_trace_context
@@ -2627,7 +2629,6 @@ class CognitiveController:
                               reasoning: bool = False, char_by_char: bool = None,
                               gen_key: Optional[str] = None,
                               chat_id: Optional[str] = None, user_msg_id: Optional[str] = None, model: Optional[str] = None):
-        llm_model_var.set(model)
         """
         Тонкая обёртка над StreamingResponse. Реальная генерация выполняется в
         self._stream_response_worker, запущенном как отдельная asyncio.Task
