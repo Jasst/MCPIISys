@@ -52,16 +52,30 @@
 .ui-menu-sep { height: 1px; margin: 4px 2px; background: var(--border-color); }
 
 /* выбор модели в шапке чата */
+/* Стиль синхронизирован с соседними .icon-btn шапки (ai.css): те же высота и
+   прозрачный фон. Раньше здесь стоял --bg-tertiary — глухой серый «заглушённый»
+   цвет, из-за чего контрол выглядел выключенным («всегда серый»), даже когда
+   он полностью активен. Теперь это живой элемент панели как остальные кнопки. */
 .model-select {
-  max-width: 220px; padding: 6px 8px; border-radius: 8px; font: inherit; font-size: 13px;
-  background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border-color);
-  cursor: pointer;
+  max-width: 220px; height: 34px; padding: 0 8px; border-radius: 9px;
+  font: inherit; font-size: 13px; box-sizing: border-box;
+  background: transparent; color: var(--text-secondary);
+  border: 1px solid transparent;
+  cursor: pointer; transition: background var(--transition-fast);
 }
-/* серая «неактивная» заливка браузера больше не используется: селектор всегда кликабелен,
-   а занятость (идёт генерация) показывается акцентной рамкой + подсказкой.
-   ВАЖНО: без opacity — затемнённый селектор выглядит как «всегда серый / мёртвый». */
+@media (hover: hover) {
+  .model-select:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-main); }
+}
+.model-select:focus-visible { outline: none; border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-glow); }
+/* Селектор никогда не блокируется через disabled (браузер закрасил бы его
+   «мёртвым» серым). Занятость показывается только акцентной рамкой:
+   во время генерации или загрузки модели выбор остаётся возможным — сервер
+   сам ответит 409 и поставит модель в очередь дозарядки. */
 .model-select:disabled { opacity: 1; cursor: wait; }
 .model-select.busy { border-color: var(--accent-color); cursor: progress; }
+@media (max-width: 900px) {
+  .model-select { height: 44px; font-size: 16px; }  /* как мобильные .ui-input/.ui-btn; 16px — чтобы iOS не зумил */
+}
 
 /* ---------- мобильные устройства ---------- */
 /* долгое нажатие не вызывает системное меню и выделение на списке чатов, меню и графе */

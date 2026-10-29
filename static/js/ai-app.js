@@ -2934,11 +2934,20 @@
   function updateModelBusy() {
     const sel = $('#modelSelect');
     if (!sel) return;
-    const busy = !!(gen || genFlagGet());
-    sel.classList.toggle('busy', busy);
-    sel.title = busy
-      ? 'Идёт генерация: смена модели применится автоматически после окончания ответа'
-      : 'Модель LM Studio';
+    // ВАЖНО: «занято» показывает ТОЛЬКО наша активная печать (gen).
+    // genFlagGet() — это localStorage-флаг владения локом, который снимается
+    // не сразу по окончании ответа, а только после финального commit/pushState
+    // (см. releaseGenLock в finally). Если учитывать его здесь, рамка .busy
+    // залипала бы и без реальной генерации — плюс на каждой перерисовке
+    // менялся title, что выглядело как «кнопка всегда серая/подсвеченная».
+    const busy = !!gen;
+    if (busy) {
+      sel.classList.add('busy');
+      sel.title = 'Идёт генерация: смена модели применится автоматически после окончания ответа';
+    } else {
+      sel.classList.remove('busy');   // явное снятие: обычное состояние контрола
+      sel.removeAttribute('title');
+    }
   }
   async function loadModels() {
     const sel = $('#modelSelect');
