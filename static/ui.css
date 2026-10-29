@@ -124,11 +124,19 @@
   border-bottom: 1px solid var(--border-color); margin: 0 2px 4px;
 }
 .model-dd-list { overflow-y: auto; overscroll-behavior: contain; }
+/* тонкий скроллбар в стиле приложения (как .messages), а не системный */
+.model-dd-list::-webkit-scrollbar { width: 8px; }
+.model-dd-list::-webkit-scrollbar-thumb {
+  background: var(--bg-active); border-radius: 4px;
+  border: 2px solid transparent; background-clip: content-box;
+}
+.model-dd-list::-webkit-scrollbar-track { background: transparent; }
 .model-dd-item {
   display: flex; align-items: center; gap: 8px; width: 100%;
   padding: 8px 10px; border: 0; border-radius: 6px;
   text-align: left; font: inherit; font-size: 13px; cursor: pointer;
   background: transparent; color: var(--text-primary);
+  transition: background var(--transition-fast);
 }
 .model-dd-item:hover:not(:disabled), .model-dd-item:focus-visible {
   background: var(--bg-hover); outline: none;
