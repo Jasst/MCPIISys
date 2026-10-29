@@ -405,6 +405,22 @@ def get_desired_model() -> Optional[str]:
     return _desired_model_id
 
 
+_state_listeners = []
+
+
+def on_model_state_changed(fn) -> None:
+    """Регистрация колбэка инвалидации внешних кэшей состояния (см. /ai/models)."""
+    _state_listeners.append(fn)
+
+
+def _notify_state_changed() -> None:
+    for fn in list(_state_listeners):
+        try:
+            fn()
+        except Exception:
+            pass
+
+
 async def reconcile_loaded_model(target: Optional[str]) -> Dict:
     """Проверить, какая модель ФАКТИЧЕСКИ в VRAM, и загрузить target только
     если её там нет.
@@ -413,7 +429,8 @@ async def reconcile_loaded_model(target: Optional[str]) -> Dict:
     вызывает /ai/models/select с сохранённой моделью. Раньше это каждый раз
     запускало unload+load (тяжёлая выгрузка/загрузка весов), даже когда модель
     уже висела в памяти. Здесь мы сначала спрашиваем LM Studio
-    (/models/current): если целевая модель уже загружена — возвращаем
+    (перебор реальных id через GET /api/v0/models/<id>): если целевая модель
+    уже загружена — возвращаем
     changed=False и НЕ трогаем VRAM. Идемпотентно.
     """
     global _loaded_model_id
@@ -469,41 +486,6 @@ def schedule_reconcile(target: Optional[str]) -> None:
                                        name=f"model-reconcile:{target}")
 
 
-def _extract_loaded_key(data) -> Optional[str]:
-    """Вытащить id загруженной модели из ответа нативного API LM Studio.
-
-    Ответы разных версий LMS различаются по форме:
-      * GET /api/v0/models/current (новые сборки) — объект модели с "key";
-      * список ["model-a", "model-b"] — первая загруженная;
-      * {"loaded_models": [...]} / {"models": [...]} — список объектов/строк;
-      * {"key": ...} / {"id": ...} / {"model": ...}.
-    Если распознать ничего не удалось — None (состояние неизвестно).
-    """
-    def _key_of(item):
-        if isinstance(item, str):
-            return item or None
-        if isinstance(item, dict):
-            return item.get("key") or item.get("id") or item.get("model") or None
-        return None
-
-    if data is None:
-        return None
-    if isinstance(data, list):
-        return _key_of(data[0]) if data else None
-    if isinstance(data, dict):
-        for field in ("loaded_models", "models", "instances"):
-            lst = data.get(field)
-            if isinstance(lst, list) and lst:
-                k = _key_of(lst[0])
-                if k:
-                    return k
-        for field in ("key", "id", "model"):
-            v = data.get(field)
-            if isinstance(v, str) and v:
-                return v
-    return None
-
-
 async def get_loaded_model() -> Optional[str]:
     """id модели, фактически стоящей в VRAM LM Studio (по данным самого LMS).
 
@@ -512,28 +494,55 @@ async def get_loaded_model() -> Optional[str]:
     УЧЁТНЫЙ КЭШ _loaded_model_id, а НЕ выдуманные значения вроде 'current' —
     иначе это «id» уходит в unload/load и LM Studio отвечает
     `Model with identifier 'current' not found`.
+
+    ИСТОРИЯ БАГА: раньше здесь использовался путь `/models/current`, которого
+    в REST API LM Studio (/api/v0) НЕ СУЩЕСТВУЕТ. Логика внутри LMS разобрала
+    сегмент "current" как идентификатор модели и писала в свой лог ERROR
+    `Model with identifier 'current' not found` при КАЖДОМ запросе списка
+    моделей. Сейчас состояние VRAM определяется методом перебора реальных id:
+    `GET /api/v0/models/<id>` — для загруженной модели LMS отвечает 200,
+    для выгруженной — 404. Никаких выдуманных id не отправляем.
     """
     global _loaded_model_id
-    url = f"{_LMS_API_BASE}/models/current"
     try:
-        session = await _get_session()
-        async with session.get(url, headers=_LMS_HEADERS,
-                               timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            if resp.status != 200:      # нет эндпоинта / ошибка — опора на учётный кэш
-                return _loaded_model_id
+        ids = await list_models_cached()
+    except Exception:
+        ids = []
+    if not ids:
+        return _loaded_model_id
+    session = await _get_session()
+    sem = asyncio.Semaphore(6)  # не заваливать локальный сервер одновременными запросами
+
+    async def _probe(model_id: str) -> Optional[str]:
+        url = f"{_LMS_API_BASE}/models/{model_id}"
+        async with sem:
             try:
-                data = await resp.json(content_type=None)
+                async with session.get(url, headers=_LMS_HEADERS,
+                                       timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        return model_id
+            except asyncio.CancelledError:
+                raise
             except Exception:
-                return _loaded_model_id   # вместо JSON пришёл HTML/текст — не разваливаем выбор
+                pass
+        return None
+
+    try:
+        results = await asyncio.gather(*(_probe(i) for i in ids))
     except asyncio.CancelledError:
         raise
     except Exception as e:
         logger.debug(f"get_loaded_model: {e} (использую учётный кэш)")
         return _loaded_model_id
-    key = _extract_loaded_key(data)
-    if key:
-        _loaded_model_id = key
-    return _loaded_model_id
+    loaded = next((r for r in results if r), None)
+    if loaded:
+        _loaded_model_id = loaded
+        return loaded
+    # Ни одна модель не отвечает 200 → в VRAM пусто (или LMS недоступна).
+    # Если учётный кэш указывал на загруженную модель — сбрасываем его,
+    # чтобы следующий ensure_model_loaded корректно загрузил целевую.
+    _loaded_model_id = None
+    return None
 
 
 async def unload_model(model_id: str) -> None:
@@ -577,6 +586,7 @@ async def ensure_model_loaded(target: Optional[str]) -> Dict:
             # unload/load, только сверка учёта. Это и есть защита от повторной
             # загрузки модели при каждом обновлении страницы.
             _loaded_model_id = target
+            _notify_state_changed()
             return {"ok": True, "loaded": target, "changed": False, "error": None}
         # Реальные id моделей LM Studio — по ним сверяем «current» перед unload,
         # чтобы мусорное значение не ушло в API (ошибка «identifier not found»).
@@ -591,6 +601,7 @@ async def ensure_model_loaded(target: Optional[str]) -> Dict:
             _loaded_model_id = target
             _load_ts = time.monotonic()
             invalidate_models_cache()
+            _notify_state_changed()
             logger.info(f"Модель переключена: {current!r} -> {target!r}")
             return {"ok": True, "loaded": target, "changed": True, "error": None}
         except Exception as e:
@@ -599,6 +610,7 @@ async def ensure_model_loaded(target: Optional[str]) -> Dict:
             # разберётся LM Studio (загрузит по запросу сама)
             _loaded_model_id = None
             invalidate_models_cache()
+            _notify_state_changed()
             return {"ok": False, "loaded": current, "changed": False, "error": str(e)}
 
 
