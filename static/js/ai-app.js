@@ -897,6 +897,7 @@
   function refreshUI() {
     updateHeader();
     renderList();
+    if (typeof updateModelBusy === 'function') updateModelBusy();
   }
 
   function syncChips() {
@@ -2927,6 +2928,18 @@
     const sel = $('#modelSelect');
     return sel && !sel.hidden && sel.value ? sel.value : null;
   }
+  // Селектор НИКОГДА не блокируется через disabled (браузер закрашивает его серым,
+  // и он выглядит «мёртвым»). Вместо этого вешаем класс .busy с подсказкой:
+  // выбор остаётся возможным — сервер сам ответит 409 и поставит модель в очередь.
+  function updateModelBusy() {
+    const sel = $('#modelSelect');
+    if (!sel) return;
+    const busy = !!(gen || genFlagGet());
+    sel.classList.toggle('busy', busy);
+    sel.title = busy
+      ? 'Идёт генерация: смена модели применится автоматически после окончания ответа'
+      : 'Модель LM Studio';
+  }
   async function loadModels() {
     const sel = $('#modelSelect');
     if (!sel) return;
@@ -2976,7 +2989,9 @@
     }
     if (modelSwitching) return;
     modelSwitching = true;
-    if (sel) { sel.disabled = true; sel.title = 'Загрузка модели…'; }
+    // НЕ ставим sel.disabled — браузер закрасит селектор серым и он будет
+    // выглядеть мёртвым. Вместо этого подсветка .busy + подсказка в title.
+    if (sel) { sel.classList.add('busy'); sel.title = 'Загрузка модели в память…'; }
     try {
       const r = await fetch('/ai/models/select', {
         method: 'POST', credentials: 'same-origin',
@@ -3000,7 +3015,7 @@
       toast('Сервер недоступен: модель не переключена');
     } finally {
       modelSwitching = false;
-      if (sel) { sel.disabled = false; sel.title = ''; }
+      updateModelBusy();   // снимает .busy/title, вернёт обычный вид (или «занято», если печать началась)
     }
   }
   const modelSel = $('#modelSelect');

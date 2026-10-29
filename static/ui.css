@@ -55,7 +55,12 @@
 .model-select {
   max-width: 220px; padding: 6px 8px; border-radius: 8px; font: inherit; font-size: 13px;
   background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border-color);
+  cursor: pointer;
 }
+/* серая «неактивная» заливка браузера больше не используется: селектор всегда кликабелен,
+   а занятость (идёт генерация) показывается пунктирной рамкой + подсказкой */
+.model-select:disabled { opacity: 1; cursor: wait; }
+.model-select.busy { border-style: dashed; opacity: 0.75; }
 
 /* ---------- мобильные устройства ---------- */
 /* долгое нажатие не вызывает системное меню и выделение на списке чатов, меню и графе */
