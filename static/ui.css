@@ -145,13 +145,22 @@ body.light-theme .model-dd { background: rgba(255, 255, 255, 0.92); }
    visible → CSS превращает её в auto: при любом переполнении (ширину задаёт JS,
    и она может не совпасть с реальной) у окна появлялся «мёртвый» второй
    скроллбар. Запрещаем его явно. */
-.model-dd-list { overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
+/* max-height обязателен и в CSS: JS задаёт его как уточнение, но если скрипт
+   не дошёл до позиционирования (или позиция вернула 0), без значения по
+   умолчанию список рос во весь экран и прокрутка не появлялась вовсе. */
+.model-dd-list {
+  overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain;
+  max-height: min(360px, calc(100vh - 120px));
+}
 /* Тап-цели, колесо мыши и перетаскивание полос прокрутки должны работать на
    самом окне списка. Слой-обёртка раньше имел pointer-events:none «чтобы клики
    шли сквозь него» — но тогда не срабатывали ни выбор пункта, ни прокрутка.
    Теперь сквозь слой не кликаем: под окном лежит прозрачный щит (см. ai-app.js),
-   который и закрывает список по тапу мимо. */
-.model-dd { pointer-events: auto; touch-action: manipulation; }
+   который и закрывает список по тапу мимо. touch-action: pan-y разрешает
+   вертикальную прокрутку списка на тач-устройствах (manipulation при
+   overflow-y:auto в ряде браузеров отдаёт жест панорамирования родителю —
+   список «не скроллился» пальцем). */
+.model-dd { pointer-events: auto; touch-action: pan-y; }
 /* тонкий скроллбар в стиле приложения (как .messages), а не системный */
 .model-dd-list::-webkit-scrollbar { width: 8px; }
 .model-dd-list::-webkit-scrollbar-thumb {

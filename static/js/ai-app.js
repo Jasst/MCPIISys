@@ -2992,7 +2992,8 @@
   // ---- выпадающий список моделей в стиле приложения (.model-dd) ----
   // Окно живёт во временном layer-контейнере на body: position:fixed внутри
   // шапки с backdrop-filter давал бы «двойную» подложку и чужие тени.
-  let ddEl = null, ddLayer = null, ddKeyLis = null, ddScrollLis = null;
+  let ddEl = null, ddLayer = null, ddKeyLis = null, ddScrollLis = null,
+      ddWheelLis = null, ddTouchLis = null;
   function closeModelDd() {
     if (!ddEl) return;
     const gone = ddEl;
@@ -3005,6 +3006,10 @@
       ddKeyLis = null;
     }
     if (ddScrollLis) { gone.removeEventListener('scroll', ddScrollLis, true); ddScrollLis = null; }
+    // wheel/touchmove вешаются на само окно с passive:false — снимаем их
+    // явно, иначе после нескольких открытий накопятся дубли обработчиков
+    if (ddWheelLis) { gone.removeEventListener('wheel', ddWheelLis); ddWheelLis = null; }
+    if (ddTouchLis) { gone.removeEventListener('touchmove', ddTouchLis); ddTouchLis = null; }
     const btn = $('#modelSelectBtn');
     if (btn) btn.setAttribute('aria-expanded', 'false');
   }
@@ -3037,8 +3042,11 @@
     // scrollWidth пунктов внутри уже заданной ширины и список «залипал» в
     // прежнем размере, а пункты с длинными именами обрезались и не скроллились.
     ddEl.style.width = '';
+    ddEl.style.height = '';           // сброс «урезанной» высоты после поворота экрана
+    ddEl.style.display = '';          // и flex-режима, выставленного позиционером
+    ddEl.style.flexDirection = '';
     const list = ddEl.querySelector('.model-dd-list');
-    if (list) list.style.maxHeight = '';
+    if (list) { list.style.maxHeight = ''; list.style.flex = ''; }
     // ширина: по самому длинному пункту, но не шире экрана и не уже кнопки.
     // scrollWidth у flex-пункта равен его же ширине (пункт width:100%), поэтому
     // измеряем внутренний блок: имя + мета-маркеры. Справа — отступы пункта
@@ -3062,9 +3070,29 @@
     if (list) list.style.maxHeight = Math.min(360, avail) + 'px';
     const dr = ddEl.getBoundingClientRect();
     ddEl.style.left = Math.max(8, Math.min(r.left, window.innerWidth - dr.width - 8)) + 'px';
-    ddEl.style.top = (r.bottom + 6 + dr.height > window.innerHeight - 8)
-      ? Math.max(8, r.top - dr.height - 6) + 'px'
-      : (r.bottom + 6) + 'px';
+    const below = r.bottom + 6;
+    // Если окно ниже кнопки не влезает целиком — поднимаем его над кнопкой,
+    // но НЕ выше верхней границы экрана: иначе верх списка (и заголовок)
+    // уходил за вьюпорт и часть пунктов становилась недостижима ни кликом,
+    // ни прокруткой («список сломался»). Вместо подъёма урезаем высоту
+    // самого окна, чтобы оно всегда помещалось под кнопкой.
+    if (below + dr.height > window.innerHeight - 8) {
+      const above = r.top - dr.height - 6;
+      if (above >= 8) {
+        ddEl.style.top = above + 'px';
+      } else {
+        const fit = Math.max(140, window.innerHeight - below - 8);
+        if (dr.height > fit) {
+          ddEl.style.height = fit + 'px';
+          ddEl.style.display = 'flex';
+          ddEl.style.flexDirection = 'column';
+          if (list) list.style.flex = '1 1 auto';   // остальное место — списку
+        }
+        ddEl.style.top = below + 'px';
+      }
+    } else {
+      ddEl.style.top = below + 'px';
+    }
   }
   function openModelDd() {
     const btn = $('#modelSelectBtn');
@@ -3163,6 +3191,20 @@
     d.addEventListener('scroll', ddScrollLis, true);
     const first = list.querySelector('.model-dd-item.current') || list.querySelector('.model-dd-item');
     if (first) first.focus({ preventScroll: true });
+    // Прокрутка колесом/тапом: блокируем дефолт только для событий, пришедших
+    // НЕ из прокручиваемого списка (заголовок, отступы окна) — иначе чат под
+    // выпадашкой начинал скроллиться «сквозь» неё. Внутри .model-dd-list
+    // default не отменяем: браузер сам скроллит список (слушатели passive:false
+    // на всё окно раньше перехватывали wheel и убивали прокрутку entirely).
+    const nonListScroll = (e) => {
+      if (!ddEl) return;
+      if (!(e.target && e.target.closest && e.target.closest('.model-dd-list'))) {
+        e.preventDefault();
+      }
+    };
+    ddWheelLis = nonListScroll; ddTouchLis = nonListScroll;
+    d.addEventListener('wheel', nonListScroll, { passive: false });
+    d.addEventListener('touchmove', nonListScroll, { passive: false });
     // Клавиатура: Esc — закрыть, стрелки — переход по пунктам (как в .ui-menu).
     // Слушатель вешаем на document (а не на окно) и снимаем в closeModelDd():
     // вложенные span'ы имени/бейджа не видны closest('button'), если слушать
