@@ -3488,6 +3488,22 @@ async def any_active_generation() -> Dict:
     return {"active": False, "gen_id": None}
 
 
+_MODELS_STATE_TTL_S = 10.0   # смена модели — редкая операция, 10с точности достаточно
+_models_state_cache = None   # {"loaded": id|None, "ts": float}
+
+
+def _invalidate_models_state_cache() -> None:
+    global _models_state_cache
+    _models_state_cache = None
+
+
+try:
+    from GCN.llm_client import on_model_state_changed as _on_msc
+    _on_msc(_invalidate_models_state_cache)   # любое real переключение весов сбрасывает кэш состояния
+except Exception:
+    pass
+
+
 @router.get("/models")
 async def list_chat_models(address: str = Depends(require_auth)):
     """Модели LM Studio для выбора в чате. Если LM Studio недоступна — пустой список.
@@ -3504,10 +3520,21 @@ async def list_chat_models(address: str = Depends(require_auth)):
     """
     models = await list_models_cached()
     loaded = None
-    try:
-        loaded = await get_loaded_model()
-    except Exception as e:
-        logger.debug(f"/ai/models loaded: {e}")
+    # Опрос состояния VRAM (get_loaded_model) отправляет по одному лёгкому
+    # запросу на модель — кэшируем результат на короткое время, чтобы каждый
+    # F5 страницы у каждого клиента не создавал волну запросов в LM Studio.
+    global _models_state_cache
+    now = time.monotonic()
+    cache_valid = (_models_state_cache is not None
+                   and now - _models_state_cache["ts"] < _MODELS_STATE_TTL_S)
+    if cache_valid:
+        loaded = _models_state_cache["loaded"]
+    else:
+        try:
+            loaded = await get_loaded_model()
+        except Exception as e:
+            logger.debug(f"/ai/models loaded: {e}")
+        _models_state_cache = {"loaded": loaded, "ts": now}
     # Если LM Studio не смогла сообщить реальную модель (старая версия API,
     # сетевой сбой) — НЕ отдаём в UI ничего кроме настоящего id из whitelist;
     # иначе фронтенд может подставить это «значение» в /models/select и LMS
