@@ -801,11 +801,19 @@ function endPinch() {
   cv.classList.remove("grabbing");
 }
 
+/* меню записи: одно на правый клик (ПК), долгое нажатие (телефон) и системное contextmenu */
+function openNodeMenu(x, y, id) {
+  UI.menu(x, y, [
+    {label: "Открыть", onClick: () => selectNode(id)},
+    {label: "Отозвать запись", danger: true, disabled: S.readonly, onClick: () => retractNode(id)},
+  ]);
+}
 cv.addEventListener("pointerdown", (ev) => {
   const [sx, sy] = localPos(ev);
   S.pointers.set(ev.pointerId, [sx, sy]);
   cv.setPointerCapture(ev.pointerId);
   if (S.pointers.size === 2) {
+    clearTimeout(S.lpTimer);
     const pts = [...S.pointers.values()];
     S.pinch = {d: Math.hypot(pts[0][0] - pts[1][0], pts[0][1] - pts[1][1]) || 1};
     S.drag = null; // узел, схваченный первым пальцем, остаётся закреплённым
@@ -816,6 +824,19 @@ cv.addEventListener("pointerdown", (ev) => {
   if (id) {
     S.drag = {type: "node", id, moved: false, sx, sy};
     S.pos.get(id).pinned = true;
+    // долгое нажатие на записи (телефон): меню, если палец не сдвинулся и не масштабирует
+    if (ev.pointerType === "touch") {
+      clearTimeout(S.lpTimer);
+      const cx = ev.clientX, cy = ev.clientY;
+      S.lpTimer = setTimeout(() => {
+        const d = S.drag;
+        if (!d || d.type !== "node" || d.id !== id || d.moved || S.pinch) return;
+        S.pos.get(id).pinned = false;
+        S.drag = null;   // отпускание после меню не выберет запись
+        if (navigator.vibrate) navigator.vibrate(15);
+        openNodeMenu(cx, cy, id);
+      }, 500);
+    }
   } else {
     S.drag = {type: "pan", sx, sy, vx: S.view.x, vy: S.view.y};
     cv.classList.add("grabbing");
@@ -841,7 +862,7 @@ cv.addEventListener("pointermove", (ev) => {
     }
     return;
   }
-  if (Math.hypot(sx - S.drag.sx, sy - S.drag.sy) > 6) S.drag.moved = true;
+  if (Math.hypot(sx - S.drag.sx, sy - S.drag.sy) > 6) { S.drag.moved = true; clearTimeout(S.lpTimer); }
   if (S.drag.type === "node") {
     const w = worldAt(sx, sy);
     const p = S.pos.get(S.drag.id);
@@ -869,6 +890,7 @@ cv.addEventListener("pointerup", (ev) => {
   cv.classList.remove("grabbing");
 });
 cv.addEventListener("pointercancel", (ev) => {
+  clearTimeout(S.lpTimer);
   S.pointers.delete(ev.pointerId);
   if (S.pinch && S.pointers.size < 2) endPinch();
   if (!S.pinch) { S.drag = null; cv.classList.remove("grabbing"); }
@@ -1833,10 +1855,11 @@ cv.addEventListener("contextmenu", (ev) => {
   const [sx, sy] = localPos(ev);
   const id = hitNode(sx, sy);
   if (!id) return;
-  UI.menu(ev.clientX, ev.clientY, [
-    {label: "Открыть", onClick: () => selectNode(id)},
-    {label: "Отозвать запись", danger: true, disabled: S.readonly, onClick: () => retractNode(id)},
-  ]);
+  // на Android долгое нажатие присылает contextmenu: снимаем перетаскивание и таймер
+  clearTimeout(S.lpTimer);
+  if (S.drag && S.drag.type === "node") { S.pos.get(S.drag.id).pinned = false; }
+  S.drag = null;
+  openNodeMenu(ev.clientX, ev.clientY, id);
 });
 function retractNode(id) {
   return UI.confirm("Отозвать запись? Это сохранится в истории.", {title: "Отозвать запись", okText: "Отозвать", danger: true})
