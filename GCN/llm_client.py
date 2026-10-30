@@ -664,8 +664,12 @@ async def ensure_model_loaded(target: Optional[str]) -> Dict:
     global _loaded_model_id, _load_ts, _last_ops_ts, _preload_task
     target = target or LM_STUDIO_MODEL
     set_desired_model(target)
-    if _preload_task and not _preload_task.done():
+    # Не отменяем самих себя: ensure_model_loaded вызывается и из задачи дозарядки
+    # (schedule_preload._worker). Раньше cancel() на текущей задаче прерывал загрузку.
+    _cur = asyncio.current_task()
+    if _preload_task and _preload_task is not _cur and not _preload_task.done():
         _preload_task.cancel()
+    if _preload_task is not _cur:
         _preload_task = None
     async with model_ops_lock:
         current = await get_loaded_model()

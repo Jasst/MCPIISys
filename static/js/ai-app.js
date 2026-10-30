@@ -1127,6 +1127,12 @@
       const ex = await r.json();
       if (ex && ex.assistant && (!userText || ex.user === userText)) {
         bot.text = ex.assistant;
+        // картинки, сгенерированные пока вкладка была закрыта, приходят вместе с текстом
+        if (Array.isArray(ex.images) && ex.images.length) {
+          const have = new Set(bot.images || []);
+          const add = ex.images.map(normalizeImageUrl).filter((u) => u && !have.has(u));
+          bot.images = (bot.images || []).concat(add);
+        }
         return true;
       }
       // сервер знает причину (ответ не сохранился): показываем её сразу
