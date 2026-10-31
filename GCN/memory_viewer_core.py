@@ -89,9 +89,16 @@ def _build_snapshot_locked(store, readonly, max_nodes, with_pca):
     edges = []
     degree = defaultdict(int)
     adj = defaultdict(set)
+    contra_pairs = set()
     for src, lst in g._edges.items():
         for rel, tgt in lst:
             if src in objs and tgt in objs:
+                # противоречие хранится в двух направлениях: рисуем и считаем его один раз
+                if rel in CONTRADICT_RELATIONS:
+                    pk = (min(src, tgt), max(src, tgt), rel)
+                    if pk in contra_pairs:
+                        continue
+                    contra_pairs.add(pk)
                 w = g.get_relation_weight(src, rel, tgt) or 1.0
                 edges.append({"s": src, "r": rel, "t": tgt, "w": round(float(w), 3)})
                 degree[src] += 1
@@ -480,6 +487,33 @@ def apply_edit(store, op, args, actor=ACTOR):
         store.link(src, dst, "DUPLICATE_OF", actor, weight=1.0)
         store.retract(src, actor, reason=f"merged_into:{dst}"[:200])
         return {"merged_into": dst, "moved_edges": moved}
+    elif op == "group":
+        # объединение записей в группу: новая запись-группа и связь PART_OF от каждой участницы к ней.
+        # участницы не меняются; группа — обычная запись, её можно переименовать, проверить или распустить.
+        raw = args.get("ids")
+        if not isinstance(raw, list) or not (2 <= len(raw) <= 50):
+            raise ValueError("для группы нужно от 2 до 50 записей")
+        members = []
+        for v in raw:
+            if not isinstance(v, str) or not ID_RE.match(v) or v not in store._objects:
+                raise ValueError("в группе есть некорректная или отсутствующая запись")
+            if v not in members:
+                members.append(v)
+        if len(members) < 2:
+            raise ValueError("для группы нужно минимум 2 разные записи")
+        name = text("subject", 200)
+        gid = store.add_fact(name, "group", actor, confidence=0.8)
+        for m in members:
+            store.link(m, gid, "PART_OF", actor, weight=1.0)
+        return {"id": gid, "members": len(members)}
+    elif op == "ungroup":
+        # распад группы: сама группа снимается вместе со своими связями, записи-участницы остаются
+        gid = need("id")
+        meta = store._objects[gid].object
+        if not isinstance(meta, dict) or meta.get("fact_type") != "group":
+            raise ValueError("распадается только группа")
+        store.retract(gid, actor, reason="ungrouped")
+        return {"ungrouped": gid}
     elif op == "link":
         r = rel()
         if r in CONTRADICT_RELATIONS:

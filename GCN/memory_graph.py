@@ -949,21 +949,62 @@ class CognitiveMemory:
         return max(SYNAPSE_MIN_WEIGHT, syn.weight * decay)
 
     def _apply_decay(self):
+        """Затухание весов синапсов пропорционально времени с прошлого прохода.
+
+        ИСПРАВЛЕНИЕ: раньше множитель считался от возраста связи и применялся на КАЖДОМ
+        проходе консолидации, поэтому давно неиспользуемая связь затухала ступенчато и
+        заметно быстрее заявленной скорости SYNAPSE_DECAY_RATE. Теперь каждый проход
+        применяет затухание только за интервал, прошедший с предыдущего прохода.
+        """
         now = time.time()
+        last = getattr(self, "_last_decay_ts", None)
+        self._last_decay_ts = now
+        if last is None:
+            return  # первый проход после старта: только фиксируем время
+        elapsed_days = min(30.0, max(0.0, (now - last) / 86400.0))
+        if elapsed_days <= 0:
+            return
         changed = 0
         for (src, tgt), syn in self.synapses.items():
-            age = now - syn.last_activation
-            if age < 3600:
+            if now - syn.last_activation < 3600:
                 continue
-            decay = 1.0 - SYNAPSE_DECAY_RATE * min(1.0, age / 86400)
-            new_weight = max(SYNAPSE_MIN_WEIGHT, syn.weight * decay)
-            if abs(new_weight - syn.weight) > 1e-6:
+            factor = 1.0 - SYNAPSE_DECAY_RATE * elapsed_days
+            new_weight = max(SYNAPSE_MIN_WEIGHT, syn.weight * factor)
+            if abs(new_weight - syn.weight) > 1e-9:
                 syn.weight = new_weight
-                syn.confidence = max(0.1, syn.confidence * decay)
+                syn.confidence = max(0.1, syn.confidence * factor)
                 self._sync_synapse_to_gcn(src, tgt)
                 changed += 1
         if changed:
             self._dirty = True
+
+    def reinforce_coactivation(self, seed_ids: List[int], delta: float = 0.03) -> int:
+        """Усиливает связи между одновременно активными фактами в обоих направлениях.
+
+        Вызывается при высокой ошибке прогноза. ИСПРАВЛЕНИЕ: раньше эта ветка вызывала
+        spread_activation(decay=...) с несуществующим аргументом (TypeError проглатывался)
+        и отбрасывала результат, то есть не меняла ни одного синапса.
+        """
+        now = time.time()
+        valid = [s for s in dict.fromkeys(seed_ids or []) if s in self.facts_by_id]
+        touched = 0
+        for i, a in enumerate(valid):
+            for b in valid[i + 1:]:
+                for src, tgt in ((a, b), (b, a)):
+                    syn = self.synapses.get((src, tgt))
+                    if syn is None:
+                        self._create_synapse(src, tgt, weight=SYNAPSE_INITIAL_WEIGHT + delta)
+                    else:
+                        syn.weight = min(SYNAPSE_MAX_WEIGHT, syn.weight + delta)
+                        syn.last_activation = now
+                        syn.last_coactivation = now
+                        syn.coactivation_count += 1
+                        syn.confidence = min(1.0, syn.confidence + 0.01)
+                        self._sync_synapse_to_gcn(src, tgt)
+                    touched += 1
+        if touched:
+            self._dirty = True
+        return touched
 
     def _sync_synapse_to_gcn(self, src: int, tgt: int):
         syn = self.synapses.get((src, tgt))
@@ -981,7 +1022,8 @@ class CognitiveMemory:
 
     # ==================== SPREADING ACTIVATION ====================
     async def spread_activation(self, seed_ids: List[int], max_depth: int = SPREADING_MAX_DEPTH,
-                               max_nodes: int = SPREADING_MAX_NODES) -> Dict[int, float]:
+                               max_nodes: int = SPREADING_MAX_NODES,
+                               decay: float = SPREADING_DECAY) -> Dict[int, float]:
         """Распространение активации по графу синапсов (локально).
 
         ИСПРАВЛЕНИЕ (потеря конвергентной активации): раньше сосед помечался
@@ -1001,9 +1043,11 @@ class CognitiveMemory:
         друга.
         """
         now = time.time()
-        # Обнуляем активации
-        for f in self.semantic_facts:
-            f.activation = 0.0
+        # Сбрасываем только то, что было активировано в прошлый раз: O(активные), а не O(все факты)
+        for fid in getattr(self, "_last_activated", ()):
+            fact = self.facts_by_id.get(fid)
+            if fact is not None:
+                fact.activation = 0.0
 
         valid_seeds = [sid for sid in seed_ids if sid in self.facts_by_id]
         for sid in valid_seeds:
@@ -1022,7 +1066,7 @@ class CognitiveMemory:
                         continue
                     syn = self.synapses.get((fid, neighbor))
                     weight = self._get_effective_weight(syn, now) if syn else 0.5
-                    level_contrib[neighbor] += act * weight * SPREADING_DECAY
+                    level_contrib[neighbor] += act * weight * decay
 
             new_frontier = []
             for neighbor, total_act in level_contrib.items():
@@ -1039,6 +1083,7 @@ class CognitiveMemory:
         for fid, act in activation_map.items():
             if fid in self.facts_by_id:
                 self.facts_by_id[fid].activation = act
+        self._last_activated = set(activation_map)
         return activation_map
 
     def _prune_weak_synapses(self, min_age: float = 3 * 86400) -> int:
@@ -1111,6 +1156,47 @@ class CognitiveMemory:
         return [gcn_id for gcn_id, _ in scored_facts[:top_k]]
 
     # ==================== ГИБРИДНЫЙ ПОИСК ====================
+    def _graph_expansions(self, have_gcn_ids, activation_map, exclude=None) -> List[Dict]:
+        """Связанные через синапсы факты, которых не нашёл семантический поиск.
+
+        ИСПРАВЛЕНИЕ: раньше активация только переставляла уже найденных кандидатов и не могла
+        ввести в ответ новый факт. Теперь до GRAPH_EXPANSION_MAX сильно активированных соседей
+        (не ниже GRAPH_EXPANSION_MIN_ACTIVATION) добавляются в выдачу с пометкой via=graph.
+        Seed-факты рабочей памяти (exclude) сами себя не расширяют: они уже в контексте.
+        """
+        out: List[Dict] = []
+        have = set(have_gcn_ids or ())
+        skip = set(exclude or ())
+        for fid, act in sorted(activation_map.items(), key=lambda kv: -kv[1]):
+            if len(out) >= GRAPH_EXPANSION_MAX or act < GRAPH_EXPANSION_MIN_ACTIVATION:
+                break
+            if fid in skip:
+                continue
+            fact = self.facts_by_id.get(fid)
+            if fact is None or not fact.gcn_id or fact.gcn_id in have:
+                continue
+            obj = self.gcn_store.get(fact.gcn_id)
+            if obj is None or obj.type != KnowledgeType.CLAIM:
+                continue
+            meta = obj.object if isinstance(obj.object, dict) else {}
+            have.add(fact.gcn_id)
+            out.append({
+                "id": fid,
+                "text": obj.subject,
+                "type": meta.get("fact_type", "claim"),
+                "timestamp": obj.created.timestamp(),
+                "score": HYBRID_WEIGHT_GRAPH * act,
+                "relevance": max(GRAPH_EXPANSION_RELEVANCE, MEMORY_MIN_RELEVANCE),
+                "semantic_sim": 0.0,
+                "confidence": obj.confidence,
+                "importance": meta.get("importance", 1.0),
+                "activation": act,
+                "gcn_id": obj.id,
+                "scope": obj.scope.value,
+                "via": "graph",
+            })
+        return out
+
     async def retrieve_hybrid(self, query: str, top_k: int = 5, use_graph: bool = True) -> List[Dict]:
         """
         Гибридный поиск по слою памяти.
@@ -1222,6 +1308,10 @@ class CognitiveMemory:
 
         result.sort(key=lambda x: x["score"], reverse=True)
         result = result[:top_k]
+        if activation_map:
+            result.extend(self._graph_expansions(
+                {r["gcn_id"] for r in result}, activation_map,
+                exclude=set(seed_local_ids)))
 
         self._cache[cache_key] = (result, time.time())
         if len(self._cache) > self._cache_maxsize:

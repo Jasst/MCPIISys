@@ -449,3 +449,28 @@ body.compact .bubble { padding: 8px 12px; }
   color: #fff; font-size: 13px; opacity: 0.8;
 }
 html.lb-open, html.lb-open body { overflow: hidden; }
+.act.on{color:var(--accent-color)}
+
+
+/* голосовой ввод: кнопка такого же размера и формы, как «Отправить»;
+   во время записи — красная и пульсирует (как «стоп» у отправки) */
+.mic{width:36px;height:36px;flex:0 0 36px;border-radius:11px;border:1px solid var(--border-color);
+  background:var(--bg-tertiary);color:var(--text-secondary);cursor:pointer;display:grid;place-items:center;
+  transition:transform var(--transition-fast),background var(--transition-fast),color var(--transition-fast)}
+.mic:hover{transform:scale(1.05);color:var(--text-main)}
+.mic[hidden]{display:none}
+.mic.on{background:var(--danger-color);color:#fff;border-color:transparent;animation:micPulse 1.2s ease-in-out infinite}
+@keyframes micPulse{0%,100%{box-shadow:0 0 0 0 rgba(229,84,79,.55)}50%{box-shadow:0 0 0 6px rgba(229,84,79,0)}}
+@media (prefers-reduced-motion: reduce){.mic.on{animation:none}}
+
+/* кнопки панели: одинаковые иконки на всех экранах; подписи на компьютере — мелкие и бледные,
+   на телефоне скрыты, остаётся только иконка размером как «Отправить» */
+.tools .tool .ti { display: block; flex: none; }
+.tools .tool .ti-emoji,
+.tools .tool .ico { display: none; }
+.tools .tool .tl { font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
+.tools .tool:hover .tl { color: var(--text-main); }
+@media (max-width: 860px) {
+  .tools .tool { width: 36px; height: 36px; padding: 0; gap: 0; justify-content: center; border-radius: 11px; }
+  .tools .tool .tl { display: none; }
+}

@@ -19,6 +19,10 @@ import numpy as np # Убедитесь, что numpy импортирован �
 
 
 from mcp.server.fastmcp import FastMCP, Context
+try:
+    from mcp.server.fastmcp import Image as MCPImage   # картинка уходит клиенту как изображение, а не только ссылка
+except ImportError:
+    MCPImage = None
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import Field
 
@@ -1307,8 +1311,8 @@ async def generate_image(
         enhance_prompt: bool = Field(True, description="Улучшить промпт через LLM перед генерацией"),
         user_id: Optional[str] = Field(default=None, description=_USER_ID_DESC),
         ctx: Context = None
-) -> Dict[str, Any]:
-    """Генерирует изображение. Возвращает ссылку на файл."""
+) -> Any:
+    """Генерирует изображение. Возвращает ссылку на файл и само изображение."""
     if not EASYDIFFUSION_ENABLED:
         return {"status": "error", "message": "Генерация отключена."}
 
@@ -1350,7 +1354,7 @@ async def generate_image(
         image_url = None
         message = "⚠️ Изображение сгенерировано, но не удалось сохранить на диск."
 
-    return {
+    result = {
         "status": "ok",
         "file_path": file_path,
         "url": image_url,
@@ -1358,6 +1362,10 @@ async def generate_image(
         "original_prompt": prompt,
         "enhanced_prompt": final_prompt if enhance_prompt else None
     }
+    if MCPImage is not None:
+        # изображение возвращаем как блок содержимого: клиент (и модель) видит саму картинку
+        return [MCPImage(data=base64.b64decode(image_b64), format="png"), result]
+    return result
 
 
 @mcp.tool()

@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from GCN.llm_client import call_llm
 from GCN.tool_router import _looks_compound
 from GCN.web_search import domain_trust
+from GCN.config_ai import MOTIVATION_MAX_ACTIVE, MOTIVATION_MAX_PER_DAY
 
 try:
     from GCN.config_ai import (
@@ -61,26 +62,26 @@ class SelfState:
         # Медленный распад: коэффициент нормирован на минуты (не секунды)
         # 0.001 × минуты: стресс спадает до 0 за ~17 минут бездействия
         decay = 0.001 * ((now - self.last_update) / 60)
-        
+
         if success is True:
             self.confidence = min(1.0, self.confidence + 0.05)
             self.stress = max(0.0, self.stress - 0.03)
         elif success is False:
             self.confidence = max(0.2, self.confidence - 0.08)
             self.stress = min(1.0, self.stress + 0.1)
-        
+
         # Неопределённость снижает уверенность, но повышает любопытство
         self.confidence = max(0.2, self.confidence - uncertainty * 0.1)
         self.curiosity = min(1.0, self.curiosity + uncertainty * 0.15)
-        
+
         # Нагрузка увеличивает стресс
         self.stress = min(1.0, self.stress + load_factor * 0.05)
-        
+
         # Естественный распад
         self.confidence = max(0.3, self.confidence - decay * 0.5)
         self.stress = max(0.0, self.stress - decay)
         self.curiosity = max(0.2, self.curiosity - decay * 0.3)
-        
+
         self.last_update = now
 
 
@@ -98,14 +99,14 @@ class ActionRecord:
 class SelfModel:
     """
     Динамическая модель «Я» когнитивного ассистента.
-    
+
     Хранится в user_dir/self_model.json и переживает перезапуски.
     """
-    
+
     def __init__(self, user_dir: Path):
         self.user_dir = Path(user_dir)
         self._path = self.user_dir / "self_model.json"
-        
+
         # Базовые возможности системы (статичные)
         self.capabilities: List[str] = [
             "поиск информации в интернете",
@@ -116,7 +117,7 @@ class SelfModel:
             "решение многошаговых задач",
             "проактивное исследование тем",
         ]
-        
+
         # Известные ограничения
         self.limitations: List[str] = [
             "зависимость от качества локальной LLM",
@@ -124,15 +125,15 @@ class SelfModel:
             "отсутствие реального понимания (симуляция)",
             "задержки при работе с внешними сервисами",
         ]
-        
+
         # Динамические компоненты
         self.state = SelfState()
         self.active_goals: List[Dict[str, Any]] = []
         self.action_history: List[ActionRecord] = []
         self.self_concept: Dict[str, Any] = {}  # абстрактная самоконцепция
-        
+
         self._load()
-    
+
     def _load(self) -> None:
         """Загружает сохранённую модель."""
         try:
@@ -152,7 +153,7 @@ class SelfModel:
         except Exception as e:
             logger.warning(f"[SelfModel] ошибка загрузки: {e}")
             self.state = SelfState()
-    
+
     def save(self) -> None:
         """Сохраняет модель."""
         try:
@@ -168,7 +169,7 @@ class SelfModel:
             self._path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as e:
             logger.warning(f"[SelfModel] ошибка сохранения: {e}")
-    
+
     def record_action(self, action_type: str, description: str,
                       success: bool, confidence: float,
                       metadata: Dict[str, Any] = None) -> None:
@@ -181,64 +182,64 @@ class SelfModel:
             metadata=metadata or {},
         )
         self.action_history.append(record)
-        
+
         # Обрезаем историю
         if len(self.action_history) > 100:
             self.action_history = self.action_history[-100:]
-        
+
         # Обновляем состояние
         uncertainty = 1.0 - confidence if not success else 0.0
         self.state.update(success=success, uncertainty=uncertainty)
-        
+
         # Обновляем самоконцепцию на основе паттернов
         self._update_self_concept(action_type, success)
-        
+
         # === НОВОЕ: Калибровка уверенности (Brier score buckets) ===
         self._record_calibration(confidence, success, action_type)
-        
+
         self.save()
-    
+
     def _record_calibration(self, predicted_confidence: float, actual_success: bool, action_type: str = None) -> None:
         """Записывает результат в бакет калибровки для последующей коррекции уверенности.
-        
+
         ИСПРАВЛЕНИЕ: ключ включает action_type для разделения статистики по типам действий.
         """
         bucket = round(predicted_confidence * 10) / 10  # 0.0, 0.1, ..., 1.0
         action_prefix = action_type if action_type else "generic"
         bucket_key = f"calib_{action_prefix}_bucket_{bucket}"
-        
+
         if bucket_key not in self.self_concept:
             self.self_concept[bucket_key] = {"n": 0, "success": 0}
-        
+
         b = self.self_concept[bucket_key]
         b["n"] += 1
         b["success"] += int(actual_success)
-    
+
     def get_calibrated_confidence(self, predicted: float, action_type: str = None) -> float:
         """
         Возвращает калиброванную вероятность успеха для заявленной уверенности.
-        
+
         Если модель говорит «уверен 0.9», но в этом бакете успех только 60% —
         вернёт 0.6. Это радикально улучшает метакогницию.
-        
+
         Использует Bayesian-сглаживание для плавного перехода при малом количестве данных.
-        
+
         ИСПРАВЛЕНИЕ: использует отдельные бакеты для каждого типа действия.
         """
         bucket = round(predicted * 10) / 10
         action_prefix = action_type if action_type else "generic"
         bucket_key = f"calib_{action_prefix}_bucket_{bucket}"
-        
+
         b = self.self_concept.get(bucket_key, {"n": 0, "success": 0})
-        
+
         # Bayesian-сглаживание: смешиваем prior (0.5) с наблюдениями
         # n=0 → 0.5, n=1 success=1 → 0.58, n=5 success=5 → 0.75
         prior_n = 5
         prior_success = 2.5  # prior mean = 0.5
         smoothed_rate = (prior_success + b["success"]) / (prior_n + b["n"])
-        
+
         return smoothed_rate
-    
+
     def get_calibration_stats(self) -> Dict[str, Any]:
         """Возвращает статистику калибровки по всем бакетам.
 
@@ -492,38 +493,50 @@ class SelfModel:
 # SECTION 2: MotivationEngine
 # ============================================================
 
+# Источники целей, которые порождает сам движок мотивации (а не пользователь и не декомпозиция)
+ENDOGENOUS_GOAL_SOURCES = {
+    "curiosity_uncertainty", "curiosity_skill_improvement", "novelty_exploration",
+    "gap_stalled_goal", "quality_improvement", "quality_confidence_boost",
+}
+
+
+def _is_endogenous_source(src: str) -> bool:
+    src = str(src or "")
+    return src in ENDOGENOUS_GOAL_SOURCES or src.startswith("identity_")
+
+
 class MotivationEngine:
     """
     Генератор внутренних целей на основе психо-метафорических драйверов.
-    
+
     Не является источником «настоящего» сознания, но создаёт иллюзию
     внутренней жизни системы через автогенерацию целей без внешнего запроса.
     """
-    
+
     def __init__(self, self_model: SelfModel, memory_service=None):
         self.self_model = self_model
         self.memory = memory_service
-        
+
         # Параметры мотивации
         self.curiosity_threshold = 0.6      # порог любопытства для генерации цели
         self.novelty_threshold = 0.5        # порог новизны
         self.gap_detection_enabled = True   # искать пробелы в знаниях
         self.quality_standards_enabled = True  # стремиться к улучшению
-        
+
         # История сгенерированных целей для избежания повторений
         self._generated_topics: List[str] = []
         self._last_generation: float = 0.0
         self._generation_cooldown: float = 300.0  # 5 минут между целями
-    
+
     def _is_cooldown(self) -> bool:
         """Проверяет, не истёк ли кулдаун между генерациями."""
         return (time.time() - self._last_generation) < self._generation_cooldown
-    
+
     def _normalize_topic(self, topic: str) -> str:
         """Нормализует тему для сравнения."""
         import re
         return re.sub(r'\s+', ' ', topic.lower()).strip()[:150]
-    
+
     def _is_duplicate(self, topic: str) -> bool:
         """Проверяет, не была ли тема уже сгенерирована недавно."""
         normalized = self._normalize_topic(topic)
@@ -531,33 +544,33 @@ class MotivationEngine:
             if normalized in existing or existing in normalized:
                 return True
         return False
-    
+
     def _record_generated(self, topic: str) -> None:
         """Запоминает сгенерированную тему."""
         self._generated_topics.append(self._normalize_topic(topic))
         if len(self._generated_topics) > 50:
             self._generated_topics = self._generated_topics[-50:]
         self._last_generation = time.time()
-    
+
     def generate_curiosity_goal(self) -> Optional[Dict[str, Any]]:
         """
         Генерирует цель на основе любопытства.
-        
+
         Ищет области с высокой неопределённостью в памяти или недавних действиях.
         """
         if self.self_model.state.curiosity < self.curiosity_threshold:
             return None
-        
+
         # Вариант 1: используем высокую неопределённость из последних действий
         recent_uncertain = [
             r for r in self.self_model.action_history[-30:]
             if r.confidence < 0.5 and not r.success
         ]
-        
+
         if recent_uncertain:
             record = random.choice(recent_uncertain)
             topic = f"Исследовать тему: {record.description}"
-            
+
             if not self._is_duplicate(topic):
                 self._record_generated(topic)
                 return {
@@ -569,18 +582,18 @@ class MotivationEngine:
                         "confidence": record.confidence,
                     }
                 }
-        
+
         # Вариант 2: случайная область с низкой уверенностью в self_concept
         low_skills = [
             (k, v) for k, v in self.self_model.self_concept.items()
             if k.startswith("skill_") and v < 0.5
         ]
-        
+
         if low_skills and random.random() < 0.4:
             skill_key, skill_level = random.choice(low_skills)
             action_type = skill_key.replace("skill_", "")
             topic = f"Улучшить навык: {action_type}"
-            
+
             if not self._is_duplicate(topic):
                 self._record_generated(topic)
                 return {
@@ -592,21 +605,21 @@ class MotivationEngine:
                         "current_level": skill_level,
                     }
                 }
-        
+
         return None
-    
+
     def generate_novelty_goal(self) -> Optional[Dict[str, Any]]:
         """
         Генерирует цель на основе стремления к новизне.
-        
+
         Предлагает исследовать темы, которые система ещё не затрагивала.
         """
         if not self.memory:
             return None
-        
+
         # Ищем концепты/темы, которые редко упоминаются
         # (в реальной реализации — анализ частотности в памяти)
-        
+
         # Простая эвристика: если любопытство высокое, предложить случайную
         # тему из широкой области
         broad_domains = [
@@ -618,11 +631,11 @@ class MotivationEngine:
             "этика ИИ",
             "философия разума",
         ]
-        
+
         if self.self_model.state.curiosity > 0.6 and random.random() < 0.3:
             domain = random.choice(broad_domains)
             topic = f"Изучить новую область: {domain}"
-            
+
             if not self._is_duplicate(topic):
                 self._record_generated(topic)
                 return {
@@ -633,21 +646,21 @@ class MotivationEngine:
                         "domain": domain,
                     }
                 }
-        
+
         return None
-    
+
     def generate_gap_filling_goal(self) -> Optional[Dict[str, Any]]:
         """
         Генерирует цель для заполнения пробелов в знаниях.
-        
+
         Обнаруживает противоречия или отсутствующие данные в памяти.
         """
         if not self.gap_detection_enabled or not self.memory:
             return None
-        
+
         # Вариант 1: поиск противоречий в памяти
         # (в реальной реализации — вызов memory.detect_contradictions())
-        
+
         # Вариант 2: проверка активных целей на отсутствие прогресса
         #
         # ПАТЧ (fact_cc5a3a86): раньше сюда попадали ЛЮБЫЕ застопорившиеся
@@ -669,7 +682,7 @@ class MotivationEngine:
         if stalled_goals and random.random() < 0.5:
             goal = random.choice(stalled_goals)
             topic = f"Разблокировать застопорившуюся цель: {goal['goal'][:50]}"
-            
+
             if not self._is_duplicate(topic):
                 self._record_generated(topic)
                 return {
@@ -682,24 +695,24 @@ class MotivationEngine:
                         "stalled_hours": (time.time() - goal["added_at"]) / 3600,
                     }
                 }
-        
+
         return None
-    
+
     def generate_quality_goal(self) -> Optional[Dict[str, Any]]:
         """
         Генерирует цель на основе внутренних стандартов качества.
-        
+
         Стремление улучшить метрики системы (уверенность, успешность).
         """
         if not self.quality_standards_enabled:
             return None
-        
+
         # Проверка на высокий процент неудач
         failure_rate = self.self_model.self_concept.get("recent_failure_rate", 0)
-        
+
         if failure_rate > 0.25:
             topic = "Повысить качество ответов: снизить процент неудач"
-            
+
             if not self._is_duplicate(topic):
                 self._record_generated(topic)
                 return {
@@ -710,11 +723,11 @@ class MotivationEngine:
                         "failure_rate": failure_rate,
                     }
                 }
-        
+
         # Проверка на низкую общую уверенность
         if self.self_model.state.confidence < 0.4:
             topic = "Восстановить уверенность: выполнить успешные задачи"
-            
+
             if not self._is_duplicate(topic):
                 self._record_generated(topic)
                 return {
@@ -725,7 +738,7 @@ class MotivationEngine:
                         "current_confidence": self.self_model.state.confidence,
                     }
                 }
-        
+
         return None
 
     def generate_identity_consolidation_goal(self) -> Optional[Dict[str, Any]]:
@@ -825,6 +838,22 @@ class MotivationEngine:
         Пытается сгенерировать новую цель и добавляет её в SelfModel.
         Возвращает сгенерированную цель или None.
         """
+        # Ограничения: эндогенных целей одновременно не больше MOTIVATION_MAX_ACTIVE и не больше
+        # MOTIVATION_MAX_PER_DAY за сутки. ИСПРАВЛЕНИЕ: раньше ограничения не было, и цели
+        # копились, пока autonomy вызывал tick каждые 10 минут. Проверка до генерации —
+        # чтобы не тратить LLM-вызовы на цели, которые всё равно не будут добавлены.
+        now = time.time()
+        endo = [g for g in self.self_model.active_goals if _is_endogenous_source(g.get("source", ""))]
+        if len(endo) >= MOTIVATION_MAX_ACTIVE:
+            return None
+        # Дневной лимит считается по журналу добавлений, а не по active_goals: выполненные
+        # и удалённые цели из списка пропадают, а лимит на сутки должен их учитывать.
+        # Журнал в памяти процесса: после перезапуска счётчик начинается заново.
+        log = [t for t in getattr(self, "_endo_added_log", []) if now - t < 86400]
+        self._endo_added_log = log
+        if len(log) >= MOTIVATION_MAX_PER_DAY:
+            return None
+
         goal = self.generate_endogenous_goal()
 
         if goal:
@@ -833,6 +862,7 @@ class MotivationEngine:
                 priority=goal["priority"],
                 source=goal["source"],
             )
+            self._endo_added_log = getattr(self, "_endo_added_log", []) + [time.time()]
             return goal
 
         return None

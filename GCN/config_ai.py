@@ -643,3 +643,10 @@ DEFER_POSTPROCESS = True          # plan_critic/verify/identity ПОСЛЕ [DONE
 DEFER_MIN_RESPONSE_LEN = 400      # короткие ответы без поиска/инструментов вообще не проверяются
 BG_LLM_MAX_WAIT = 300.0           # макс. ожидание «тишины» фоновым LLM-вызовом, сек
 BG_LLM_COOLDOWN = 3.0             # сколько секунд тишины после ответа нужно фону, сек
+
+# ===== Граф: графовое расширение выдачи, эндогенные цели (см. memory_graph, cognition) =====
+GRAPH_EXPANSION_MAX = int(os.getenv("GRAPH_EXPANSION_MAX", "2"))
+GRAPH_EXPANSION_MIN_ACTIVATION = float(os.getenv("GRAPH_EXPANSION_MIN_ACTIVATION", "0.15"))
+GRAPH_EXPANSION_RELEVANCE = float(os.getenv("GRAPH_EXPANSION_RELEVANCE", "0.30"))
+MOTIVATION_MAX_ACTIVE = int(os.getenv("MOTIVATION_MAX_ACTIVE", "3"))
+MOTIVATION_MAX_PER_DAY = int(os.getenv("MOTIVATION_MAX_PER_DAY", "4"))

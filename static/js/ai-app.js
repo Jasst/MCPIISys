@@ -769,6 +769,46 @@
     return b;
   }
 
+  // ---- озвучка ответа браузером (Web Speech API): без сервера и без зависимостей ----
+  const ICON_SPEAK = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a10 10 0 0 1 0 14"/></svg>';
+  let speakingBtn = null;
+
+  // убирает разметку, чтобы синтезатор не читал «звёздочки» и «решётки»; блоки кода пропускаем
+  function speechPlainText(md) {
+    return String(md)
+      .replace(/```[\s\S]*?```/g, ' ')
+      .replace(/`([^`]*)`/g, '$1')
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+      .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .replace(/^#{1,6}\s*/gm, '')
+      .replace(/[*_~>|]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  // повторное нажатие на ту же кнопку останавливает чтение; новое чтение прерывает прошлое
+  function toggleSpeak(text, btn) {
+    const synth = window.speechSynthesis;
+    if (!synth) return;
+    const wasThis = speakingBtn === btn;
+    synth.cancel();
+    if (speakingBtn) speakingBtn.classList.remove('on');
+    speakingBtn = null;
+    if (wasThis) return;
+    const plain = speechPlainText(text);
+    if (!plain) return;
+    const u = new SpeechSynthesisUtterance(plain);
+    u.lang = 'ru-RU';
+    const ru = synth.getVoices().find((v) => /^ru/i.test(v.lang || ''));
+    if (ru) u.voice = ru;
+    const done = () => { if (speakingBtn === btn) { speakingBtn = null; btn.classList.remove('on'); } };
+    u.onend = done;
+    u.onerror = done;
+    speakingBtn = btn;
+    btn.classList.add('on');
+    synth.speak(u);
+  }
+
   function buildMessage(m, idx) {
     const root = document.createElement('div');
     root.className = 'msg ' + (m.role === 'user' ? 'user' : 'bot') + (m.error ? ' error' : '');
@@ -795,6 +835,9 @@
     foot.appendChild(time);
     if (m.text && !m.pending) foot.appendChild(actBtn('copy', 'Копировать', '/static/icons/Copy.png'));
     if (m.role !== 'user' && !m.pending) foot.appendChild(actBtn('regen', 'Получить другой ответ', ICON_REFRESH));
+    if (m.role !== 'user' && m.text && !m.pending && 'speechSynthesis' in window) {
+      foot.appendChild(actBtn('speak', 'Озвучить ответ', ICON_SPEAK));
+    }
     body.appendChild(foot);
 
     root.appendChild(body);
@@ -1127,6 +1170,12 @@
       const ex = await r.json();
       if (ex && ex.assistant && (!userText || ex.user === userText)) {
         bot.text = ex.assistant;
+        // картинки, сгенерированные пока вкладка была закрыта, приходят вместе с текстом
+        if (Array.isArray(ex.images) && ex.images.length) {
+          const have = new Set(bot.images || []);
+          const add = ex.images.map(normalizeImageUrl).filter((u) => u && !have.has(u));
+          bot.images = (bot.images || []).concat(add);
+        }
         return true;
       }
       // сервер знает причину (ответ не сохранился): показываем её сразу
@@ -1841,6 +1890,70 @@
 
   els.hintBtn.addEventListener('click', () => { if (gen) selectSession(gen.sessionId); });
 
+  // ---- голосовой ввод: одна кнопка-значок; состояния видны сразу ----
+  // ожидание → запись (кнопка пульсирует, поле говорит «Говорите…», текст появляется по мере речи)
+  // → остановка (повторный клик) → текст в поле, отправку нажимаете вы
+  const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const micBtn = $('#micBtn');
+  if (SpeechRec && micBtn) {
+    micBtn.hidden = false;
+    const idlePlaceholder = els.input.placeholder;
+    let rec = null, msgTimer = null;
+
+    // короткое сообщение об ошибке прямо в поле ввода, затем возврат подсказки
+    function flashMessage(text) {
+      clearTimeout(msgTimer);
+      els.input.placeholder = text;
+      msgTimer = setTimeout(() => { els.input.placeholder = idlePlaceholder; }, 3000);
+    }
+    const ERROR_TEXT = {
+      'not-allowed': 'Нет доступа к микрофону: разрешите его в настройках браузера',
+      'service-not-allowed': 'Нет доступа к микрофону: разрешите его в настройках браузера',
+      'no-speech': 'Речь не распознана, попробуйте ещё раз',
+      'audio-capture': 'Микрофон не найден',
+      'network': 'Нет связи с сервисом распознавания речи',
+    };
+
+    micBtn.addEventListener('click', () => {
+      if (rec) { try { rec.stop(); } catch (_) { /* уже остановлено */ } return; }
+      const base = els.input.value ? els.input.value.replace(/\s*$/, ' ') : '';
+      let finalText = '';
+      rec = new SpeechRec();
+      rec.lang = 'ru-RU';
+      rec.continuous = true;
+      rec.interimResults = true;
+      rec.onresult = (ev) => {
+        let interim = '';
+        // resultIndex: финальные куски из прошлых событий уже учтены в finalText
+        for (let i = ev.resultIndex; i < ev.results.length; i++) {
+          const r = ev.results[i];
+          if (r.isFinal) finalText += r[0].transcript; else interim += r[0].transcript;
+        }
+        els.input.value = base + finalText + interim;
+        autoSize(); setSendState();
+      };
+      rec.onerror = (ev) => {
+        if (ev.error === 'aborted') return;          // остановка пользователем — не ошибка
+        flashMessage(ERROR_TEXT[ev.error] || 'Ошибка голосового ввода');
+      };
+      rec.onend = () => {
+        rec = null;
+        micBtn.classList.remove('on');
+        micBtn.setAttribute('aria-pressed', 'false');
+        micBtn.title = 'Голосовой ввод: нажмите и говорите';
+        if (!msgTimer) els.input.placeholder = idlePlaceholder;
+        autoSize(); setSendState();
+        els.input.focus();
+      };
+      micBtn.classList.add('on');
+      micBtn.setAttribute('aria-pressed', 'true');
+      micBtn.title = 'Остановить запись';
+      els.input.placeholder = 'Говорите…';
+      try { rec.start(); }
+      catch (_) { rec = null; micBtn.classList.remove('on'); micBtn.setAttribute('aria-pressed', 'false'); els.input.placeholder = idlePlaceholder; }
+    });
+  }
+
   els.send.addEventListener('click', onSendButton);
   els.input.addEventListener('input', () => { autoSize(); setSendState(); });
   els.input.addEventListener('keydown', (e) => {
@@ -2115,6 +2228,7 @@
     if (!m) return;
     if (btn.dataset.act === 'copy') copyText(m.text || '');
     if (btn.dataset.act === 'regen') regenerate(idx);
+    if (btn.dataset.act === 'speak') toggleSpeak(m.text || '', btn);
   });
 
   // Показывает уже выданный код (не выпускает новый, поэтому не отключает другие устройства).
