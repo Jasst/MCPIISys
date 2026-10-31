@@ -123,6 +123,13 @@ a.back:hover{text-decoration:underline}
 .explain{font-size:12px;line-height:1.5;background:var(--bg-tertiary);border:1px solid var(--border-color);
   border-left:3px solid var(--accent-color);border-radius:var(--radius-md);padding:8px 10px;margin:4px 0 8px}
 .explain .mono{margin:2px 0;word-break:normal}
+#multibar{position:absolute;top:8px;left:50%;transform:translateX(-50%);z-index:6;display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:center;max-width:calc(100% - 24px);padding:6px 10px;background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:12px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);font-size:12px;box-shadow:var(--shadow-md)}
+#multibar[hidden]{display:none}
+#howto{position:absolute;left:8px;bottom:8px;z-index:4;max-width:min(520px,calc(100% - 90px));display:flex;gap:8px;align-items:flex-start;padding:7px 10px;font-size:11.5px;line-height:1.45;color:var(--text-secondary);background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:10px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
+#howto[hidden]{display:none}
+#howto button{padding:0 7px;flex:none}
+#multi.on{background:var(--accent-gradient-strong);color:#fff;border-color:transparent}
+@media (max-width:900px){#howto{display:none}}
 /* на десктопе экран занимает ровно высоту окна: граф не уезжает вниз из-за длинной панели записи */
 @media (min-width:901px){
   body{height:100vh;height:100dvh;display:flex;flex-direction:column;overflow:hidden}
@@ -162,12 +169,16 @@ a.back:hover{text-decoration:underline}
   <button id="live" title="обновлять каждые 2 секунды">Live: вкл</button>
   <label>вид
     <select id="layout">
-      <option value="graph">граф связей</option>
+      <option value="rings">иерархия (кольца)</option>
+      <option value="graph">силовая сеть</option>
       <option value="pca">векторы (2D проекция)</option>
     </select>
   </label>
+  <button id="multi" title="выбирать несколько записей (Shift+клик тоже работает)">☑ Выбор</button>
   <input id="q" type="search" placeholder="поиск по тексту…" size="22">
   <label>тип <select id="ftype"><option value="">все</option></select></label>
+  <label>связи <select id="rfilter" title="«synapse» — связь, возникшая когда записи использовались вместе">
+    <option value="">все</option><option value="nosyn">без «synapse»</option></select></label>
   <label>доверие ≥ <input id="minc" type="range" min="0" max="100" value="0"><span id="minc-v">0%</span></label>
   <button id="fit" title="вписать в экран">Вписать</button>
   <button id="add" title="добавить запись в память">＋ Запись</button>
@@ -195,6 +206,8 @@ a.back:hover{text-decoration:underline}
     </div>
   </aside>
   <section id="stage"><canvas id="cv"></canvas>
+    <div id="multibar" hidden></div>
+    <div id="howto"><span>Главные записи и группы — ближе к центру, их соседи — дальше. Линия = связь «откуда → куда» (стрелка — направление, цвет — тип связи). Кольцо у записи — доверие, размер — важность. Клик — детали, клик по линии — связь. Shift+клик или «☑ Выбор» — несколько записей, их можно объединить в группу.</span><button id="howto-x" class="small" title="скрыть подсказку">✕</button></div>
     <div id="zoombar">
       <button id="zin" title="приблизить">＋</button>
       <button id="zout" title="отдалить">－</button>
@@ -216,21 +229,23 @@ const API = "/ai/memory";
 /* палитра графа в приглушённых «графитовых» тонах основного чата */
 const TYPE_COLORS = {claim:"#8fa1bd", concept:"#7fb8a4", observation:"#c9a06a", goal:"#a695c8",
   evidence:"#86b6ac", hypothesis:"#c2b478", episode:"#93a8d0", notification:"#cf9276",
-  identity_core:"#c77f8e", entity:"#a7afbc", procedure:"#bda3d6", relationship:"#9dbdd6"};
+  identity_core:"#c77f8e", entity:"#a7afbc", procedure:"#bda3d6", relationship:"#9dbdd6", group:"#d9b44a"};
 const REL_COLORS = {CONTRADICTS:"#e5544f", CONTRADICT:"#e5544f", GROUNDS_IN:"#787e89", CAUSES:"#e0a458",
-  ENABLES:"#4cc38a", PREVENTS:"#e5544f", INHIBITS:"#e5544f", REQUIRES:"#a695c8"};
+  ENABLES:"#4cc38a", PREVENTS:"#e5544f", INHIBITS:"#e5544f", REQUIRES:"#a695c8", PART_OF:"#c9a86a"};
 const REP = 2600, SPRING = 0.03, GRAV = 0.0025, DAMP = 0.82;
 const CELL = 200;   // размер ячейки сетки для отталкивания
 
 const S = {
   memory: null, readonly: false, snap: null, version: null,
   byId: new Map(), pos: new Map(), selected: null, visible: new Set(), visibleEdges: [],
-  alpha: 1, layout: "graph", live: true, view: {x: 0, y: 0, k: 1},
+  alpha: 1, layout: "rings", live: true, view: {x: 0, y: 0, k: 1},
   drag: null, hover: null, degreeRank: new Set(), dirtyDetail: false,
   pointers: new Map(), pinch: null, tap: null,
   redraw: true, cw: 0, ch: 0,
   insights: [], highlight: new Set(),
   selEdge: null,   // выбранная связь: {s, r, t}
+  multi: new Set(), multiMode: false,           // несколько записей для группы
+  target: new Map(), hoverEdge: null, edgeSlot: new Map(),   // цели колец, связь под курсором, номер параллельной связи
 };
 
 /* ---------- тема — как в основном чате (тёмная по умолчанию, светлая по классу) ---------- */
@@ -366,9 +381,14 @@ function fillTypeFilter(byType) {
 function syncPositions() {
   const keep = new Set(S.byId.keys());
   for (const id of [...S.pos.keys()]) if (!keep.has(id)) S.pos.delete(id);
+  // цели пересчитываем при каждом изменении памяти: новая запись сразу встаёт на своё место
+  S.target = S.snap ? computeRings(S.snap) : new Map();
   for (const id of keep) {
     if (!S.pos.has(id)) {
-      S.pos.set(id, {x: (Math.random() - 0.5) * 320, y: (Math.random() - 0.5) * 320, vx: 0, vy: 0, pinned: false});
+      const t = S.target.get(id);
+      S.pos.set(id, t
+        ? {x: t[0], y: t[1], vx: 0, vy: 0, pinned: false}
+        : {x: (Math.random() - 0.5) * 320, y: (Math.random() - 0.5) * 320, vx: 0, vy: 0, pinned: false});
     }
   }
   if (S.layout === "pca") applyPca();
@@ -395,11 +415,189 @@ function applyFilter() {
     if (q && !(n.subject.toLowerCase().includes(q) || (n.predicate || "").toLowerCase().includes(q))) continue;
     S.visible.add(n.id);
   }
-  S.visibleEdges = (S.snap ? S.snap.edges : []).filter((e) => S.visible.has(e.s) && S.visible.has(e.t));
+  const rf = $("#rfilter").value;
+  S.visibleEdges = (S.snap ? S.snap.edges : []).filter((e) =>
+    S.visible.has(e.s) && S.visible.has(e.t) && !(rf === "nosyn" && e.r === "synapse"));
+  // параллельные связи между одной парой записей расходятся дугами, а не накладываются
+  S.edgeSlot = new Map();
+  const pairCount = new Map(), pairSeen = new Map();
+  const pairKey = (e) => (e.s < e.t ? e.s + "|" + e.t : e.t + "|" + e.s);
+  for (const e of S.visibleEdges) pairCount.set(pairKey(e), (pairCount.get(pairKey(e)) || 0) + 1);
+  for (const e of S.visibleEdges) {
+    const pk = pairKey(e), i = pairSeen.get(pk) || 0;
+    pairSeen.set(pk, i + 1);
+    S.edgeSlot.set(edgeKey(e), {i, n: pairCount.get(pk)});
+  }
   const total = S.snap ? S.snap.total_nodes : 0, shown = S.snap ? S.snap.shown_nodes : 0;
   $("#counts").textContent = `${S.visible.size}/${shown} узлов · ${S.visibleEdges.length} рёбер · всего ${total}`;
   if (S.layout === "graph") S.alpha = Math.max(S.alpha, 0.4);
   S.redraw = true;
+}
+
+
+/* ---------- раскладка «кольца»: иерархия вместо слипшегося клубка ----------
+   Главные записи (группы и самые связанные) — в центре, их соседи — кольцами дальше.
+   Каждая ветка получает угловой сектор пропорционально размеру поддерева,
+   поэтому связи идут от родителя наружу, а группы видны как отдельные «лучи».
+   Изолированные записи стоят внешним кольцом, сгруппированные по типу. */
+const RING_GAP = 120, RING_SPACE = 38, ISO_SPACING = 26, RELAX_CELL = 48;
+
+function computeRings(snap) {
+  const nodes = snap.nodes;
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const adj = new Map(nodes.map((n) => [n.id, new Set()]));
+  for (const e of snap.edges) {
+    if (e.s === e.t || !adj.has(e.s) || !adj.has(e.t)) continue;
+    adj.get(e.s).add(e.t); adj.get(e.t).add(e.s);
+  }
+  const linked = nodes.filter((n) => adj.get(n.id).size > 0);
+  const isolated = nodes.filter((n) => adj.get(n.id).size === 0);
+
+  // корни: сначала группы, потом самые связанные записи
+  const order = linked.slice().sort((a, b) =>
+    (b.type === "group") - (a.type === "group") || (b.degree || 0) - (a.degree || 0) || (a.id < b.id ? -1 : 1));
+  const depth = new Map(), kids = new Map(), roots = [], bfs = [];
+  for (const root of order) {
+    if (depth.has(root.id)) continue;
+    roots.push(root.id);
+    depth.set(root.id, 0); kids.set(root.id, []);
+    const q = [root.id];
+    for (let qi = 0; qi < q.length; qi++) {
+      const v = q[qi];
+      const nb = [...adj.get(v)].filter((u) => !depth.has(u))
+        .sort((a, b) => (byId.get(b).degree || 0) - (byId.get(a).degree || 0) || (a < b ? -1 : 1));
+      for (const u of nb) {
+        depth.set(u, depth.get(v) + 1); kids.set(u, []); kids.get(v).push(u); q.push(u);
+      }
+    }
+    bfs.push(...q);
+  }
+
+  // размер поддерева (обход снизу вверх: потомки в BFS идут после предков)
+  const size = new Map();
+  for (let i = bfs.length - 1; i >= 0; i--) {
+    const v = bfs[i];
+    let s = 1;
+    for (const c of kids.get(v)) s += size.get(c);
+    size.set(v, s);
+  }
+
+  const forest = roots.length > 1;            // несколько деревьев — корни уходят на первое кольцо
+  // радиус каждого кольца растёт так, чтобы на его окружности хватало места для всех его записей
+  const maxD = Math.max(0, ...depth.values());
+  const cnt = new Array(maxD + 1).fill(0);
+  for (const d of depth.values()) cnt[d]++;
+  const radii = new Array(maxD + 1).fill(0);
+  radii[0] = forest ? Math.max(RING_GAP, (cnt[0] * RING_SPACE) / (Math.PI * 2)) : 0;
+  for (let d = 1; d <= maxD; d++) {
+    radii[d] = Math.max(radii[d - 1] + RING_GAP, (cnt[d] * RING_SPACE) / (Math.PI * 2));
+  }
+  const rOf = (d) => radii[d];
+  const pts = new Map();
+  // вес ветки — корень из размера: большие ветки получают больше места, но листья не сжимаются в щель
+  const wOf = (v) => Math.sqrt(size.get(v));
+  const total = roots.reduce((s, r) => s + wOf(r), 0) || 1;
+  const stack = [];
+  let a = 0;
+  for (const r of roots) {
+    const w = (wOf(r) / total) * Math.PI * 2;
+    stack.push([r, a, a + w]);
+    a += w;
+  }
+  while (stack.length) {
+    const [v, a0, a1] = stack.pop();
+    const th = (a0 + a1) / 2, rad = rOf(depth.get(v));
+    pts.set(v, [Math.cos(th) * rad, Math.sin(th) * rad]);
+    const ks = kids.get(v), span = a1 - a0;
+    const tot = ks.reduce((s, c) => s + wOf(c), 0) || 1;
+    let cur = a0;
+    for (const c of ks) {
+      const w = (wOf(c) / tot) * span;
+      stack.push([c, cur, cur + w]);
+      cur += w;
+    }
+  }
+
+  if (isolated.length) {
+    let maxR = 0;
+    for (const p of pts.values()) maxR = Math.max(maxR, Math.hypot(p[0], p[1]));
+    const iso = isolated.slice().sort((x, y) =>
+      (x.type < y.type ? -1 : x.type > y.type ? 1 : x.subject.localeCompare(y.subject)));
+    const R = Math.max(maxR + RING_GAP * 1.2, (iso.length * ISO_SPACING) / (Math.PI * 2));
+    iso.forEach((n, i) => {
+      const th = (i / iso.length) * Math.PI * 2 - Math.PI / 2;
+      pts.set(n.id, [Math.cos(th) * R, Math.sin(th) * R]);
+    });
+  }
+
+  relaxOverlaps(pts, (id) => nodeRadius(byId.get(id)) * 0.9 + 2, 200);
+  return pts;
+}
+
+/* разводит перекрывающиеся записи, не меняя общую структуру колец */
+function relaxOverlaps(pts, rad, iters) {
+  const ids = [...pts.keys()];
+  const C = RELAX_CELL;
+  for (let it = 0; it < iters; it++) {
+    const grid = new Map();
+    for (const id of ids) {
+      const p = pts.get(id), k = Math.floor(p[0] / C) + "," + Math.floor(p[1] / C);
+      let cell = grid.get(k);
+      if (!cell) grid.set(k, cell = []);
+      cell.push(id);
+    }
+    let moved = 0;
+    for (const id of ids) {
+      const p = pts.get(id), r1 = rad(id);
+      const cx = Math.floor(p[0] / C), cy = Math.floor(p[1] / C);
+      for (let ox = -1; ox <= 1; ox++) for (let oy = -1; oy <= 1; oy++) {
+        const cell = grid.get((cx + ox) + "," + (cy + oy));
+        if (!cell) continue;
+        for (const jd of cell) {
+          if (jd <= id) continue;
+          const q = pts.get(jd);
+          let dx = p[0] - q[0], dy = p[1] - q[1];
+          let d = Math.hypot(dx, dy);
+          const min = r1 + rad(jd);
+          if (d >= min) continue;
+          if (d < 0.01) { const th = Math.random() * Math.PI * 2; dx = Math.cos(th); dy = Math.sin(th); d = 1; }
+          const push = (min - d) / 2;
+          p[0] += (dx / d) * push; p[1] += (dy / d) * push;
+          q[0] -= (dx / d) * push; q[1] -= (dy / d) * push;
+          moved++;
+        }
+      }
+    }
+    if (!moved) break;
+  }
+}
+
+/* узлы плавно доходят до своих мест; закреплённые перетаскиванием не двигаются */
+function stepRings() {
+  let moving = false;
+  for (const [id, p] of S.pos) {
+    if (p.pinned) continue;
+    const t = S.target.get(id);
+    if (!t) continue;
+    const dx = t[0] - p.x, dy = t[1] - p.y;
+    if (Math.abs(dx) < 0.3 && Math.abs(dy) < 0.3) { p.x = t[0]; p.y = t[1]; continue; }
+    p.x += dx * 0.16; p.y += dy * 0.16;
+    moving = true;
+  }
+  return moving;
+}
+
+/* дуга связи: одна формула и для рисования, и для поиска мышью по линии */
+function edgeCtrl(e, x1, y1, x2, y2) {
+  const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy) || 1;
+  const sl = S.edgeSlot.get(edgeKey(e)) || {i: 0, n: 1};
+  // встречные связи изгибаются в разные стороны, параллельные расходятся веером
+  const bend = Math.min(40, len * 0.10) * (e.s < e.t ? 1 : -1) + (sl.i - (sl.n - 1) / 2) * 16;
+  return [(x1 + x2) / 2 - (dy / len) * bend, (y1 + y2) / 2 + (dx / len) * bend];
+}
+function curvePt(x1, y1, cx, cy, x2, y2, t) {
+  const u = 1 - t;
+  return [u * u * x1 + 2 * u * t * cx + t * t * x2, u * u * y1 + 2 * u * t * cy + t * t * y2];
 }
 
 /* ---------- физика и отрисовка ---------- */
@@ -458,7 +656,8 @@ function tick() {
 /* размер узла = связи + важность; яркость (globalAlpha в draw) = доверие; см. также salience на сервере */
 function nodeRadius(n) {
   const s = Number.isFinite(n.salience) ? n.salience : 0.5;
-  return 4 + Math.min(8, Math.sqrt(n.degree || 0) * 2.0) + Math.min(6, s * 6);
+  const base = 4 + Math.min(8, Math.sqrt(n.degree || 0) * 2.0) + Math.min(6, s * 6);
+  return n.type === "group" ? base + 4 : base;
 }
 
 function resize() {
@@ -475,7 +674,7 @@ function toScreen(p) {
 }
 
 /* ---------- оформление: нейроны и синапсы ---------- */
-const DRAW = {danger: "#e5544f", focus: "#b6bec9", amber: "#f0b35a"};
+const DRAW = {danger: "#e5544f", focus: "#b6bec9", amber: "#f0b35a", multi: "#7fa8ff"};
 
 function hexRgb(hex) {
   const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || "");
@@ -533,10 +732,7 @@ function drawEdge(e, x1, y1, x2, y2, t, k) {
   const sel = isSelEdge(e);
   const involved = S.selected && (e.s === S.selected || e.t === S.selected);
   const flow = sel || e.r.startsWith("CONTRADICT");       // бегущий пунктир для противоречий и выбранной связи
-  const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy) || 1;
-  // лёгкий изгиб; знак от порядка id, чтобы встречные связи не сливались в одну линию
-  const bend = Math.min(40, len * 0.10) * (e.s < e.t ? 1 : -1);
-  const cx = (x1 + x2) / 2 - (dy / len) * bend, cy = (y1 + y2) / 2 + (dx / len) * bend;
+  const [cx, cy] = edgeCtrl(e, x1, y1, x2, y2);
   const dimmed = S.selected ? (involved ? 1 : 0.12) : S.selEdge ? (sel ? 1 : 0.18) : 1;
   const base = 0.35 + Math.min(1, e.w) * 0.35;
   const relCol = REL_COLORS[e.r];
@@ -598,13 +794,15 @@ function drawNode(id, n, p, k, t, dimOn) {
   const conf = Math.max(0, Math.min(1, n.confidence));
   const isSel = id === S.selected;
   const hub = S.degreeRank.has(id);
+  const isGroup = n.type === "group";
   const a = dimOn ? 0.16 : 0.45 + 0.55 * conf;
 
   // тело с бликом
   ctx.save();
   ctx.globalAlpha = a;
   ctx.shadowColor = rgba(col, isSel ? 0.9 : 0.25 + 0.45 * conf);
-  ctx.shadowBlur = dimOn ? 0 : isSel ? 22 : hub ? 14 : 3 + 9 * conf;
+  // свечение только у выбранной и главных записей: иначе сотни ореолов сливаются в туман
+  ctx.shadowBlur = dimOn || !(isSel || hub || isGroup) ? 0 : isSel ? 22 : 12;
   const g = ctx.createRadialGradient(x - rad * 0.35, y - rad * 0.4, rad * 0.1, x, y, rad);
   g.addColorStop(0, tint(col, 0.55));
   g.addColorStop(0.55, rgba(col, 1));
@@ -658,6 +856,15 @@ function drawNode(id, n, p, k, t, dimOn) {
     ctx.restore();
   }
 
+  if (S.multi.has(id)) {
+    ctx.save();
+    ctx.strokeStyle = DRAW.multi;
+    ctx.lineWidth = 2.2;
+    ctx.beginPath();
+    ctx.arc(x, y, rad + 9, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
   if (isSel) {
     ctx.save();
     ctx.shadowColor = "rgba(255,255,255,0.5)";
@@ -691,8 +898,20 @@ function draw() {
     drawEdge(e, x1, y1, x2, y2, t, k);
   }
 
+  // подпись связи под курсором: «что с чем и как»
+  if (S.hoverEdge && !S.selEdge) {
+    const he = S.hoverEdge, p = S.pos.get(he.s), q = S.pos.get(he.t);
+    if (p && q && S.visible.has(he.s) && S.visible.has(he.t)) {
+      const [x1, y1] = toScreen(p), [x2, y2] = toScreen(q);
+      const [cx, cy] = edgeCtrl(he, x1, y1, x2, y2);
+      const mx = 0.25 * x1 + 0.5 * cx + 0.25 * x2, my = 0.25 * y1 + 0.5 * cy + 0.25 * y2;
+      const a = S.byId.get(he.s), b = S.byId.get(he.t);
+      pill(`${REL_RU[he.r] || he.r}: ${short(a ? a.subject : "", 26)} → ${short(b ? b.subject : "", 26)}`, mx + 6, my - 4, false);
+    }
+  }
+
   // нейроны и подписи
-  const showLabels = k > 1.3;
+  const showLabels = k > 1.6;
   for (const id of S.visible) {
     const n = S.byId.get(id), p = S.pos.get(id);
     if (!n || !p) continue;
@@ -703,7 +922,7 @@ function draw() {
     const [x, y] = toScreen(p);
     if (id === S.selected || id === S.hover || S.highlight.has(id)) {
       pill(label, x + rad + 6, y + 4, true);
-    } else if ((showLabels || S.degreeRank.has(id)) && !dimOn) {
+    } else if ((showLabels || S.degreeRank.has(id) || n.type === "group") && !dimOn) {
       ctx.save();
       ctx.globalAlpha = 0.95;
       ctx.fillStyle = S.labelColor;
@@ -762,18 +981,21 @@ function hitEdge(sx, sy) {
     const p = S.pos.get(e.s), q = S.pos.get(e.t);
     if (!p || !q) continue;
     const [x1, y1] = toScreen(p), [x2, y2] = toScreen(q);
-    const dx = x2 - x1, dy = y2 - y1;
-    const len2 = dx * dx + dy * dy || 1;
-    const t = Math.max(0, Math.min(1, ((sx - x1) * dx + (sy - y1) * dy) / len2));
-    const d = Math.hypot(sx - (x1 + t * dx), sy - (y1 + t * dy));
+    const [cx, cy] = edgeCtrl(e, x1, y1, x2, y2);
+    let d = Infinity;
+    for (let i = 0; i <= 16; i++) {
+      const [px, py] = curvePt(x1, y1, cx, cy, x2, y2, i / 16);
+      d = Math.min(d, Math.hypot(sx - px, sy - py));
+    }
     if (d < bestD) { bestD = d; best = e; }
   }
   return best;
 }
 
 function loop() {
-  const hot = S.layout === "graph" && S.alpha >= 0.003;   // раскладка ещё «горячая»
-  if (hot) tick();
+  let hot = false;
+  if (S.layout === "graph" && S.alpha >= 0.003) { tick(); hot = true; }   // силовая раскладка ещё «горячая»
+  if (S.layout === "rings") hot = stepRings();                           // кольца плавно встают на место
   const anim = animating();   // пульсация и бегущий пунктир требуют кадров
   if (hot || S.redraw || anim) { S.redraw = false; draw(); }
   requestAnimationFrame(loop);
@@ -856,9 +1078,12 @@ cv.addEventListener("pointermove", (ev) => {
   if (!S.drag) {
     if (ev.pointerType !== "touch") {
       const hid = hitNode(sx, sy);
-      const onEdge = !hid && !!hitEdge(sx, sy);
-      if (hid !== S.hover) S.hover = hid;
-      cv.style.cursor = hid || onEdge ? "pointer" : "grab";
+      const he = hid ? null : hitEdge(sx, sy);
+      const hk = he ? edgeKey(he) : null;
+      const prevK = S.hoverEdge ? edgeKey(S.hoverEdge) : null;
+      if (hk !== prevK) { S.hoverEdge = he ? {s: he.s, r: he.r, t: he.t} : null; S.redraw = true; }
+      if (hid !== S.hover) { S.hover = hid; S.redraw = true; }
+      cv.style.cursor = hid || he ? "pointer" : "grab";
     }
     return;
   }
@@ -880,7 +1105,11 @@ cv.addEventListener("pointerup", (ev) => {
     return;
   }
   if (S.drag && S.drag.type === "node") {
-    if (!S.drag.moved) selectNode(S.drag.id);
+    if (!S.drag.moved) {
+      // Shift/Ctrl/⌘ или режим «☑ Выбор» — добавить запись в набор, иначе обычный выбор
+      if (ev.shiftKey || ev.ctrlKey || ev.metaKey || S.multiMode) toggleMulti(S.drag.id);
+      else { S.multi.clear(); renderMultiBar(); selectNode(S.drag.id); }
+    }
   } else if (S.drag && S.drag.type === "pan" && !S.drag.moved) {
     const [px, py] = localPos(ev);
     const edge = hitEdge(px, py);
@@ -928,6 +1157,51 @@ function fitView() {
   S.redraw = true;
 }
 
+/* ---------- выбор нескольких записей и группы ---------- */
+function toggleMulti(id) {
+  if (S.multi.has(id)) S.multi.delete(id); else S.multi.add(id);
+  S.redraw = true;
+  renderMultiBar();
+}
+function setMultiMode(on) {
+  S.multiMode = on;
+  if (!on) S.multi.clear();
+  const b = $("#multi");
+  b.classList.toggle("on", on);
+  b.textContent = on ? "☑ Выбор: вкл" : "☑ Выбор";
+  S.redraw = true;
+  renderMultiBar();
+}
+function renderMultiBar() {
+  const bar = $("#multibar"), n = S.multi.size;
+  bar.hidden = !(S.multiMode || n >= 2);
+  bar.innerHTML = "";
+  if (bar.hidden) return;
+  if (n >= 2) {
+    bar.append(
+      h("span", {}, `Выбрано: ${n}`),
+      h("button", {class: "primary small", disabled: S.readonly ? "" : null, onclick: groupSelected}, "Объединить в группу"),
+      h("button", {class: "small", onclick: () => { S.multi.clear(); renderMultiBar(); S.redraw = true; }}, "снять выбор"));
+    if (S.multiMode) bar.append(h("button", {class: "small", onclick: () => setMultiMode(false)}, "выключить выбор"));
+  } else {
+    bar.append(
+      h("span", {}, `Режим выбора: нажимай записи, чтобы добавить их в группу (выбрано: ${n})`),
+      h("button", {class: "small", onclick: () => setMultiMode(false)}, "готово"));
+  }
+}
+async function groupSelected() {
+  if (S.readonly) { log("режим только чтение: группировка отключена", "bad"); return; }
+  const ids = [...S.multi].filter((id) => S.byId.has(id));
+  if (ids.length < 2) return;
+  const hint = ids.slice(0, 3).map((id) => short(S.byId.get(id).subject, 24)).join(" · ");
+  const name = await UI.prompt(
+    `Группа из ${ids.length} записей: ${hint}${ids.length > 3 ? " …" : ""}\n\nНазвание группы — короткое понятие, которое их объединяет:`,
+    {title: "Объединить в группу", okText: "Объединить", required: true});
+  if (!name || !name.trim()) return;
+  const res = await edit("group", {ids, subject: name.trim()});
+  if (res) setMultiMode(false);
+}
+
 /* ---------- выбор и детали ---------- */
 const TOUCH_MODE = () => matchMedia("(max-width: 900px)").matches;
 function openSheet() { document.body.classList.add("sheet-open"); }
@@ -937,7 +1211,8 @@ function closeSheet() { document.body.classList.remove("sheet-open"); }
 const REL_RU = {
   RELATED_TO: "связана с", GROUNDS_IN: "опирается на", CAUSES: "вызывает",
   ENABLES: "делает возможным", REQUIRES: "требует", PREVENTS: "мешает",
-  PART_OF: "часть", DUPLICATE_OF: "дубликат", CONTRADICTS: "противоречит",
+  PART_OF: "входит в", DUPLICATE_OF: "дубликат", CONTRADICTS: "противоречит",
+  synapse: "вместе вспоминается", replied_with: "ответ в диалоге", in_response_to: "отвечает на",
 };
 const VERDICT_RU = {ok: "верно", dubious: "сомнительно", wrong: "неверно", duplicate: "дубликат", unclear: "неясно"};
 const EDGE_VERDICT_RU = {keep: "связь верна", remove: "связь лишняя", change: "нужен другой тип связи", unclear: "неясно"};
@@ -1036,6 +1311,24 @@ function renderDetail(d) {
       h("span", {class: "badge"}, `v${d.version}`)),
     h("div", {class: "mono"}, d.id),
     ...(ro ? [h("div", {class: "ro-note"}, "режим только чтение: правки отключены")] : []));
+
+  // группа: состав и распад; участник: в какую группу входит
+  const members = d.in_edges.filter((e) => e.r === "PART_OF");
+  const parents = d.out_edges.filter((e) => e.r === "PART_OF");
+  if (d.type === "group") {
+    box.append(h("h3", {}, `Группа: состав (${members.length})`),
+      h("div", {class: "hint"}, "Группа — объединение записей. Записи остаются на месте; распад снимает только саму группу."),
+      ...members.map((m) => h("div", {class: "edge"},
+        h("span", {class: "nb", onclick: () => selectNode(m.s)}, m.subject || m.s))),
+      h("div", {class: "row"}, h("button", {class: "small danger", disabled: ro ? "" : null, onclick: () =>
+        UI.confirm(`Распустить группу «${short(d.subject, 40)}»? Записи останутся, сама группа исчезнет.`,
+          {title: "Распад группы", okText: "Распустить", danger: true})
+          .then((ok) => (ok ? edit("ungroup", {id: d.id}) : null))}, "распустить группу")));
+  } else if (parents.length) {
+    box.append(h("div", {class: "explain"}, h("strong", {}, "Входит в группу"),
+      ...parents.map((p) => h("div", {class: "edge"},
+        h("span", {class: "nb", onclick: () => selectNode(p.t)}, p.subject || p.t)))));
+  }
 
   // 1. текст
   const subj = h("textarea", {disabled: ro ? "" : null}, d.subject);
@@ -1174,8 +1467,8 @@ async function edit(op, args) {
     const res = await api(API + "/edit", {op, args});
     log(`${op}: готово`, "ok");
     await refresh(false);
-    if (op === "retract") { S.selected = null; clearDetail(); closeSheet(); }
-    else if (op === "create" && res.id) selectNode(res.id);
+    if (op === "retract" || op === "ungroup") { S.selected = null; clearDetail(); closeSheet(); }
+    else if ((op === "create" || op === "group") && res.id) selectNode(res.id);
     else if (S.selected) loadDetail(S.selected);
     return res;
   } catch (e) {
@@ -1434,7 +1727,10 @@ const REL_HELP = {
   ENABLES: "делает возможным",
   REQUIRES: "требует для выполнения",
   PREVENTS: "мешает или предотвращает",
-  PART_OF: "является частью",
+  PART_OF: "входит в группу (объединение записей)",
+  synapse: "связь Хебба: записи использовались вместе, сила — вес связи",
+  replied_with: "в диалоге: реплика пользователя → ответ ассистента",
+  in_response_to: "в диалоге: ответ ассистента → реплика, на которую он отвечает",
   DUPLICATE_OF: "дубликат: одна из записей лишняя",
   CONTRADICTS: "противоречит (на графе пунктиром)",
 };
@@ -1462,7 +1758,8 @@ function renderInsights(list) {
     h("div", {class: "mono"}, "2. Объедини повторы: одна запись вместо нескольких одинаковых."),
     h("div", {class: "mono"}, "3. Свяжи уверенные записи без связей с родственными: так ассистент найдёт цепочки."),
     h("div", {class: "mono"}, "4. Подтверди важное (доверие ↑) и отметь сомнительное (доверие ↓)."),
-    h("div", {class: "mono"}, "5. Новые знания добавляй через «＋ Запись», а не через чат, если хочешь точно их зафиксировать.")));
+    h("div", {class: "mono"}, "5. Новые знания добавляй через «＋ Запись», а не через чат, если хочешь точно их зафиксировать."),
+    h("div", {class: "mono"}, "6. Связанные записи объедини в группу: «☑ Выбор» → выдели несколько → «Объединить в группу». Распад группы не трогает записи.")));
 
   if (!list.length) {
     box.append(h("div", {class: "hint", style: "margin-top:8px"},
@@ -1843,12 +2140,16 @@ $("#layout").addEventListener("change", async (e) => {
       log("у узлов нет эмбеддингов: проекция недоступна, оставлен граф", "bad");
       S.layout = "graph"; e.target.value = "graph";
     } else { applyPca(); fitView(); }
-  } else { S.alpha = 1; fitView(); }
+  } else if (S.layout === "graph") { S.alpha = 1; fitView(); }
+  else { syncPositions(); fitView(); }   // кольца: узлы плавно уйдут на место
 });
 $("#q").addEventListener("input", applyFilter);
 $("#ftype").addEventListener("change", applyFilter);
+$("#rfilter").addEventListener("change", applyFilter);
 $("#minc").addEventListener("input", applyFilter);
 $("#fit").addEventListener("click", fitView);
+$("#multi").addEventListener("click", () => setMultiMode(!S.multiMode));
+$("#howto-x").addEventListener("click", () => { $("#howto").hidden = true; });
 /* правый клик по записи на графе: открыть или отозвать (без поиска по панели) */
 cv.addEventListener("contextmenu", (ev) => {
   ev.preventDefault();
@@ -1883,7 +2184,11 @@ if (themeBtn) themeBtn.addEventListener("click", () => {
 window.addEventListener("resize", resize);
 // блок графа может менять размер после загрузки (раскладка, панели): следим за ним
 if (window.ResizeObserver) new ResizeObserver(() => resize()).observe($("#stage"));
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeSheet(); selectNode(null); } });
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  closeSheet(); selectNode(null);
+  if (S.multiMode || S.multi.size) setMultiMode(false);
+});
 
 setInterval(() => {
   if (document.hidden) return;
