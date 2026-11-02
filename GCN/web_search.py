@@ -16,7 +16,7 @@ web_search.py v3 — улучшенный веб-поиск для BlockcoinWitr
      улучшен (BM25-стиль TF-сатурация + бонус за точную фразу).
 
   2. Порядок бэкендов настраивается (env SEARCH_BACKENDS_ORDER,
-     по умолчанию "searxng,brave,ddg"). Если поднят self-hosted SearXNG,
+     по умолчанию "searxng,ddg"). Если поднят self-hosted SearXNG,
      имеет смысл поставить его первым — DDG часто отдаёт капчу, и логично
      сначала пробовать собственный стабильный бэкенд.
 
@@ -124,16 +124,17 @@ RERANK_TOP_N = int(os.getenv("RERANK_TOP_N", "10"))
 RERANK_MAX_CHARS = int(os.getenv("RERANK_MAX_CHARS", "2048"))
 
 SEARXNG_URL = os.getenv("SEARXNG_URL", "").rstrip("/")
-BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "")
 
 REFINEMENT_SCORE_THRESHOLD = float(os.getenv("REFINEMENT_SCORE_THRESHOLD", "0.30"))
 MAX_REFINEMENTS = int(os.getenv("MAX_REFINEMENTS", "1"))
+# Таймаут LLM-уточнителя: дольше — отказ от уточнения, поиск идёт дальше без него
+REFINER_TIMEOUT = float(os.getenv("REFINER_TIMEOUT", "8"))
 SIMHASH_DEDUP_BITS = int(os.getenv("SIMHASH_DEDUP_BITS", "8"))
 
 # v3: порядок бэкендов. Если SearXNG поднят — разумно поставить его первым:
-# SEARCH_BACKENDS_ORDER="searxng,ddg,brave"
+# Только бесплатные бэкенды: SearXNG (self-hosted) и DuckDuckGo. Платных API нет.
 SEARCH_BACKENDS_ORDER = [
-    s.strip() for s in os.getenv("SEARCH_BACKENDS_ORDER", "searxng,brave,ddg").split(",")
+    s.strip() for s in os.getenv("SEARCH_BACKENDS_ORDER", "searxng,ddg").split(",")
     if s.strip()
 ]
 # v3: общий бюджет времени на deep_search (секунды)
@@ -877,6 +878,28 @@ def inject_query_date(query: str) -> str:
     return f"{q} {date_str}"
 
 
+def sanitize_refined_query(original: str, candidate: str) -> str:
+    """Проверяет формулировку от LLM-уточнителя. Возвращает её или "" (отказ).
+
+    Отказ, если: пусто, слишком длинно, есть URL, совпадает с исходным запросом,
+    либо теряет ключевые слова исходного (признак дрейфа темы). Слова сравниваются
+    по основе (первые 5 букв), поэтому «курса» и «курс» считаются одним словом.
+    """
+    cand = " ".join((candidate or "").split()).strip().strip("\"'«»`").strip()
+    if not cand or len(cand) > max(60, 2 * len(original) + 20):
+        return ""
+    if URL_RE.search(cand) or cand.lower() == original.strip().lower():
+        return ""
+    key = [w for w in _tokenize(original) if len(w) >= 4 and not w.isdigit()]
+    if not key:
+        return cand
+    cand_tokens = _tokenize(cand)
+    kept = sum(1 for w in key if any(c[:5] == w[:5] for c in cand_tokens))
+    if kept / len(key) < 0.5:
+        return ""
+    return cand
+
+
 def hash_query(q: str) -> str:
     return hashlib.sha256(q.lower().strip().encode()).hexdigest()[:32]
 
@@ -903,7 +926,7 @@ def content_has_currency_numbers(text: str) -> bool:
 
 
 # =====================================================================
-# Поисковые бэкенды: DDG / SearXNG / Brave
+# Поисковые бэкенды: DDG / SearXNG (бесплатные)
 # =====================================================================
 _search_cache = SearchCache()
 _fetcher = WebPageFetcher()
@@ -972,42 +995,9 @@ async def search_searxng(query: str, max_results: int = 5) -> List[Dict]:
         return []
 
 
-async def search_brave(query: str, max_results: int = 5) -> List[Dict]:
-    if not BRAVE_API_KEY:
-        return []
-    try:
-        session = await _fetcher._get_session()
-        async with session.get(
-            "https://api.search.brave.com/res/v1/web/search",
-            params={"q": query, "count": min(max_results, 20)},
-            headers={"Accept": "application/json", "X-Subscription-Token": BRAVE_API_KEY},
-            timeout=aiohttp.ClientTimeout(total=15),
-        ) as resp:
-            if resp.status != 200:
-                logger.debug(f"Brave status {resp.status}")
-                return []
-            data = await resp.json(content_type=None)
-            out = []
-            for r in (data.get("web", {}) or {}).get("results", []):
-                url = r.get("url")
-                if not url:
-                    continue
-                out.append({
-                    "title": r.get("title", ""),
-                    "url": url,
-                    "snippet": r.get("description", "") or "",
-                    "published": (r.get("page_age") or "")[:10] or None,
-                })
-            return out[:max_results]
-    except Exception as e:
-        logger.debug(f"Brave error: {e}")
-        return []
-
-
 _BACKENDS = {
     "ddg": search_ddg,
     "searxng": search_searxng,
-    "brave": search_brave,
 }
 
 
@@ -1110,9 +1100,12 @@ async def _process_pages(
     items = list(zip(deduped, bm_scores))
 
     # Cross-encoder реранк топ-N (по убыванию релевантности)
-    if Reranker._get() is not None and len(items) > 1:
+    # Модель грузится и считается в потоке: синхронная загрузка (до нескольких ГБ)
+    # раньше блокировала event loop и весь сервер для всех пользователей.
+    reranker_ready = await asyncio.to_thread(Reranker._get)
+    if reranker_ready is not None and len(items) > 1:
         top_n = min(RERANK_TOP_N, len(items))
-        order = Reranker.rerank(query, texts[:top_n])
+        order = await asyncio.to_thread(Reranker.rerank, query, texts[:top_n])
         items = [items[i] for i in order] + items[top_n:]
 
     for (url, text, links), base_score in items:
@@ -1339,21 +1332,28 @@ async def deep_search(
         )
 
     # === ИТЕРАТИВНОЕ УТОЧНЕНИЕ ===
+    # Уточнение принимается, только если (1) формулировка сохраняет ключевые слова
+    # исходного запроса и (2) новые страницы дают score выше текущего. Иначе откат.
     refinements_done = 0
     current_query = query
     while (
         best_score < REFINEMENT_SCORE_THRESHOLD
         and refinements_done < max_refinements
-        and (deadline - _loop_time()) > 8.0  # v3: только если есть время на полный круг
+        and (deadline - _loop_time()) > 8.0  # только если есть время на полный круг
     ):
         found_titles = [s.get("title", "") for s in sources]
+        refined = ""
         if query_refiner is not None:
             try:
-                refined = (await query_refiner(current_query, found_titles) or "").strip()
+                raw = await asyncio.wait_for(query_refiner(current_query, found_titles),
+                                             timeout=REFINER_TIMEOUT)
+                refined = sanitize_refined_query(query, raw or "")
             except Exception as e:
                 logger.debug(f"query_refiner failed: {e}")
-                refined = ""
-        else:
+            if not refined:
+                logger.info("[Search] уточнение LLM отклонено (пусто, дрейф темы или таймаут)")
+        if not refined:
+            # запасной вариант: без LLM добавляем год, если его нет в запросе
             refined = current_query if _YEAR_RE.search(current_query) else f"{current_query} {time.localtime().tm_year}"
 
         if not refined or refined == current_query:
@@ -1386,13 +1386,17 @@ async def deep_search(
         new_fetched = await _fetcher.fetch_many_with_links(
             new_urls, limit=PARALLEL_FETCH_LIMIT, deadline=deadline - 1.0
         )
+        # score считаем по исходному запросу: только так он сравним с best_score
         new_sources, new_parts, new_best, _ = await _process_pages(
-            refined, new_fetched, url_to_title, url_to_snippet, url_to_published,
+            query, new_fetched, url_to_title, url_to_snippet, url_to_published,
             time_sensitive, 0, deadline=deadline - 1.0,
         )
+        if new_best <= best_score:
+            logger.info(f"[Search] уточнение не улучшило результат ({new_best:.2f} <= {best_score:.2f}), отброшено")
+            break
         sources.extend(new_sources)
         context_parts.extend(new_parts)
-        best_score = max(best_score, new_best)
+        best_score = new_best
 
     context = "\n\n---\n\n".join(context_parts)
     result = {
@@ -1427,7 +1431,6 @@ __all__ = [
     'content_has_currency_numbers',
     'search_ddg',
     'search_searxng',
-    'search_brave',
     'search_backends',
     'deep_search',
     'fetch_url',

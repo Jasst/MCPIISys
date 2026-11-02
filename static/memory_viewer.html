@@ -206,13 +206,14 @@ a.back:hover{text-decoration:underline}
       <div id="legend-rel"></div>
     </div>
   </aside>
-  <section id="stage"><canvas id="cv"></canvas>
+  <section id="stage"><canvas id="cv" role="img" aria-label="Граф записей памяти. Список записей и связей — на панелях слева и справа"></canvas>
     <div id="multibar" hidden></div>
-    <div id="howto"><span>Главные записи и группы — ближе к центру, их соседи — дальше. Линия = связь «откуда → куда» (стрелка — направление, цвет — тип связи). Связи по умолчанию видны только у выбранной или наведённой записи; противоречия — всегда. Полный вид — в списке «связи». Кольцо у записи — доверие, размер — важность. Наведи курсор — видны связи и соседи записи. Клик — детали, клик по линии — связь. Shift+клик или «☑ Выбор» — несколько записей, их можно объединить в группу.</span><button id="howto-x" class="small" title="скрыть подсказку">✕</button></div>
+    <div id="howto" hidden><span>Главные записи и группы — ближе к центру, их соседи — дальше. Линия = связь «откуда → куда» (стрелка — направление, цвет — тип связи). Связи по умолчанию видны только у выбранной или наведённой записи; противоречия — всегда. Полный вид — в списке «связи». Кольцо у записи — доверие, размер — важность. Наведи курсор — видны связи и соседи записи. Клик — детали, клик по линии — связь. Shift+клик или «☑ Выбор» — несколько записей, их можно объединить в группу.</span><button id="howto-x" class="small" title="скрыть подсказку" aria-label="скрыть подсказку">✕</button></div>
     <div id="zoombar">
-      <button id="zin" title="приблизить">＋</button>
-      <button id="zout" title="отдалить">－</button>
-      <button id="zfit" title="вписать в экран" style="font-size:13px">⤢</button>
+      <button id="zin" title="приблизить" aria-label="приблизить">＋</button>
+      <button id="zout" title="отдалить" aria-label="отдалить">－</button>
+      <button id="zfit" title="вписать в экран" aria-label="вписать в экран" style="font-size:13px">⤢</button>
+      <button id="howto-show" title="показать подсказку по управлению" aria-label="показать подсказку">?</button>
     </div>
   </section>
   <aside id="right">
@@ -264,6 +265,8 @@ function applyTheme(t) {
   S.nodeFill = cssVar("--text-secondary", "#a6abb5");
   S.labelColor = cssVar("--text-primary", "#eceef1");
   S.edgeColor = t === "light" ? "#9aa0ab" : "#4a4f58";
+  DRAW.danger = cssVar("--danger-color", "#e5544f");
+  DRAW.focus = cssVar("--border-focus", "#b6bec9");
 }
 function initTheme() {
   let t = null;
@@ -384,6 +387,7 @@ function fillTypeFilter(byType) {
 }
 
 function syncPositions() {
+  S.visCache = null;
   const keep = new Set(S.byId.keys());
   for (const id of [...S.pos.keys()]) if (!keep.has(id)) S.pos.delete(id);
   // цели пересчитываем при каждом изменении памяти: новая запись сразу встаёт на своё место
@@ -417,6 +421,7 @@ function applyFilter() {
   const minc = Number($("#minc").value) / 100;
   $("#minc-v").textContent = Math.round(minc * 100) + "%";
   S.visible = new Set();
+  S.visCache = null;
   for (const n of (S.snap ? S.snap.nodes : [])) {
     if (t && n.type !== t) continue;
     if (n.confidence < minc) continue;
@@ -640,12 +645,23 @@ function typeAnchors(types) {
 }
 
 /* один шаг сил с «теплотой» a */
-function forceStep(a) {
+/* кэш набора видимых узлов для силовой раскладки; сбрасывается при фильтре и смене набора позиций */
+function visCache() {
+  if (S.visCache) return S.visCache;
   const ids = [...S.visible].filter((id) => S.pos.has(id));
-  const n = ids.length;
-  const P = ids.map((id) => S.pos.get(id));
   const types = [...new Set(ids.map((id) => (S.byId.get(id) || {}).type))].sort();
-  const anchors = typeAnchors(types);
+  S.visCache = {
+    ids,
+    P: ids.map((id) => S.pos.get(id)),
+    anchors: typeAnchors(types),
+    index: new Map(ids.map((id, i) => [id, i])),
+  };
+  return S.visCache;
+}
+
+function forceStep(a) {
+  const {ids, P, anchors} = visCache();
+  const n = ids.length;
   // отталкивание — по соседним ячейкам сетки (вместо всех пар O(n²))
   const grid = new Map();
   for (let i = 0; i < n; i++) {
@@ -673,7 +689,7 @@ function forceStep(a) {
     }
   }
   // пружины: структурные связи сильные и короткие, synapse — слабые и длинные
-  const index = new Map(ids.map((id, i) => [id, i]));
+  const index = visCache().index;
   for (const e of S.visibleEdges) {
     const i = index.get(e.s), j = index.get(e.t);
     if (i === undefined || j === undefined) continue;
@@ -756,7 +772,10 @@ function nodeType(id) {
   const n = S.byId.get(id);
   return n ? n.type : null;
 }
-function animating() { return !!S.selEdge; }
+function animating() {
+  if (S.selEdge !== S._animEdge) { S._animEdge = S.selEdge; S._animStart = performance.now(); }
+  return !!S.selEdge && performance.now() - S._animStart < 4000;
+}
 /* фокус: выбранная запись, иначе запись под курсором (связи и соседи подсвечиваются) */
 function focusId() { return S.selected || S.hover || null; }
 
@@ -949,8 +968,6 @@ function draw() {
   S.cw = r.width; S.ch = r.height;
   ctx.clearRect(0, 0, r.width, r.height);
   if (!S.snap) return;
-  DRAW.danger = cssVar("--danger-color", "#e5544f");
-  DRAW.focus = cssVar("--border-focus", "#b6bec9");
   const t = performance.now() / 1000;
   const k = S.view.k;
   drawBackdrop(r.width, r.height);
@@ -997,7 +1014,24 @@ function draw() {
 
   // нейроны и подписи
   const showLabels = k > 1.6;
-  const labelBoxes = [];   // занятые места под подписи: обычные подписи не налезают друг на друга
+  const labelGrid = new Map();   // занятые места под подписи (сетка): обычные подписи не налезают друг на друга
+  const LG = 48;
+  const cellsOf = (b, fn) => {
+    for (let gx = Math.floor(b.x0 / LG); gx <= Math.floor(b.x1 / LG); gx++)
+      for (let gy = Math.floor(b.y0 / LG); gy <= Math.floor(b.y1 / LG); gy++) fn(gx + "," + gy);
+  };
+  const labelClash = (b) => {
+    let hit = false;
+    cellsOf(b, (key) => {
+      if (hit || !labelGrid.has(key)) return;
+      if (labelGrid.get(key).some((o) => !(b.x1 < o.x0 || b.x0 > o.x1 || b.y1 < o.y0 || b.y0 > o.y1))) hit = true;
+    });
+    return hit;
+  };
+  const labelAdd = (b) => cellsOf(b, (key) => {
+    if (!labelGrid.has(key)) labelGrid.set(key, []);
+    labelGrid.get(key).push(b);
+  });
   for (const id of S.visible) {
     const n = S.byId.get(id), p = S.pos.get(id);
     if (!n || !p) continue;
@@ -1016,10 +1050,10 @@ function draw() {
       const lx = x + rad + 6, ly = y + 4, lw = ctx.measureText(label).width;
       const box = {x0: lx - 2, x1: lx + lw + 2, y0: ly - 11, y1: ly + 3};
       const prio = S.degreeRank.has(id) || n.type === "group";
-      const clash = labelBoxes.some((b) => !(box.x1 < b.x0 || box.x0 > b.x1 || box.y1 < b.y0 || box.y0 > b.y1));
+      const clash = labelClash(box);
       if (prio || !clash) {
         ctx.fillText(label, lx, ly);
-        labelBoxes.push(box);
+        labelAdd(box);
       }
       ctx.restore();
     }
@@ -2313,6 +2347,14 @@ document.addEventListener("keydown", (e) => {
   if (S.multiMode || S.multi.size) setMultiMode(false);
 });
 
+let lastPollErr = "";
+function pollRefresh() {
+  return refresh(false).then(() => { lastPollErr = ""; }).catch((err) => {
+    if (err.message === lastPollErr) return;   // одинаковую ошибку пишем в журнал один раз
+    lastPollErr = err.message;
+    log("обновление: " + err.message, "bad");
+  });
+}
 setInterval(() => {
   if (document.hidden) return;
   // не перезаписываем панель, пока пользователь что-то печатает или нажал «Отмена» в форме
@@ -2320,7 +2362,7 @@ setInterval(() => {
   const editing = ae && $("#right").contains(ae) &&
     (ae.tagName === "TEXTAREA" || ae.tagName === "INPUT" || ae.tagName === "SELECT");
   if (S.live && !editing && !S.dirtyDetail) {
-    refresh(false).catch((err) => log("обновление: " + err.message, "bad"));
+    pollRefresh();
   }
 }, 2000);
 
@@ -2329,7 +2371,7 @@ for (const ev of ["pointermove", "pointerdown", "pointerup", "wheel", "keydown",
   document.addEventListener(ev, () => { S.redraw = true; }, {passive: true, capture: true});
 }
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden && S.live) refresh(false).catch((err) => log("обновление: " + err.message, "bad"));
+  if (!document.hidden && S.live) pollRefresh();
 });
 
 /* ---------- настройки пользователя: сохраняются в браузере и восстанавливаются при открытии ---------- */
@@ -2392,6 +2434,7 @@ $("#q").addEventListener("input", (e) => setPref("q", e.target.value));
 $("#minc").addEventListener("input", (e) => setPref("minc", Number(e.target.value)));
 $("#live").addEventListener("click", () => setPref("live", S.live));
 $("#howto-x").addEventListener("click", () => setPref("howtoHidden", true));
+$("#howto-show").addEventListener("click", () => { $("#howto").hidden = false; setPref("howtoHidden", false); });
 document.querySelectorAll(".tab").forEach((b) => b.addEventListener("click", () => setPref("tab", b.dataset.tab)));
 
 initTheme();

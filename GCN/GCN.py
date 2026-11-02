@@ -15,6 +15,7 @@ import threading
 import shutil
 import uuid
 import copy
+import itertools
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -512,10 +513,31 @@ def _cross_process_file_lock(path: str, timeout: float = 15.0, poll: float = 0.0
             pass
 
 
+# общий счётчик ревизий процесса: номера не повторяются даже между разными журналами (после load())
+_REVISION = itertools.count(1)
+
+
+class _EventLog(list):
+    """Журнал событий хранилища. Каждое добавление выдаёт новую ревизию (.rev),
+    поэтому состояние памяти можно сравнить за O(1) без обхода всех объектов."""
+
+    def __init__(self, items=()):
+        super().__init__(items)
+        self.rev = next(_REVISION)
+
+    def append(self, item):
+        super().append(item)
+        self.rev = next(_REVISION)
+
+    def extend(self, items):
+        super().extend(items)
+        self.rev = next(_REVISION)
+
+
 class MemoryStore:
     def __init__(self, embedding_dim: Optional[int] = None):
         self._objects: Dict[str, KnowledgeObject] = {}
-        self._events: List[KnowledgeEvent] = []
+        self._events: List[KnowledgeEvent] = _EventLog()
         self._graph = KnowledgeGraph()
         self._embedding_index: Dict[str, List[float]] = {}
         self._by_type: Dict[KnowledgeType, Set[str]] = defaultdict(set)
@@ -666,6 +688,11 @@ class MemoryStore:
         contradictions = sum(1 for _, neighbor in self._graph.get_neighbors(obj_id, "CONTRADICTS")
                              if neighbor in self._objects)
         return mt.trust(base, statuses, contradictions)
+
+    @property
+    def revision(self) -> int:
+        """Ревизия памяти: меняется при любой записи (через журнал событий) и при загрузке."""
+        return self._events.rev
 
     def get(self, obj_id: str) -> Optional[KnowledgeObject]:
         return self._objects.get(obj_id)
@@ -1421,7 +1448,7 @@ class MemoryStore:
                     weight = edge_meta.get(meta_key, {}).get("weight", 1.0)
                     self._graph.add_relation(src, relation, target, weight=weight)
 
-            self._events = []
+            self._events = _EventLog()
             for ed in data.get("events", []):
                 ed = dict(ed)
                 ed["type"] = EventType(ed["type"])

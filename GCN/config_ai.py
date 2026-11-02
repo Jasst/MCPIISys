@@ -270,10 +270,10 @@ CODE_ANALYSIS_MAX_FILES = 10  # лимит файлов за один анали
 CODE_CONTEXT_MAX_LINES = 50  # макс. строк контекста вокруг ошибки
 AUTO_FIX_SUGGESTIONS = True  # предлагать исправления автоматически
 CODE_ACCESS_ROOT = Path(__file__).resolve().parent.parent  # корень для доступа к коду
-ALLOWED_CODE_EXTENSIONS = {".py", ".json", ".md", ".txt", ".yml", ".yaml"}  # безопасные расширения
+ALLOWED_CODE_EXTENSIONS = {".py", ".json", ".md", ".txt", ".yml", ".yaml", ".js", ".css", ".html"}  # безопасные расширения
 # Инструменты кода видят ТОЛЬКО эти папки проекта. Данные пользователей
 # (ai_memory_v3, ui_state, auth.db) и .env сюда не входят и недоступны моделям.
-CODE_ALLOWED_DIRS = {"GCN", "routes"}
+CODE_ALLOWED_DIRS = {"GCN", "routes", "static", "tests"}   # static/tests: только код и ресурсы, данных нет
 
 # Инструменты MCP-сервера, которые НЕ регистрируются в чате.
 # Причины: (а) есть внутренний инструмент с тем же действием (internal__*),
@@ -282,7 +282,7 @@ CODE_ALLOWED_DIRS = {"GCN", "routes"}
 CHAT_TOOL_EXCLUDE = {
     # дубли internal__*: один и тот же результат, другой инструмент
     "recall", "remember", "add_goal", "web_search", "generate_image", "fetch_github_file",
-    "read_code_file", "search_in_code", "get_project_structure", "analyze_error",
+    "read_code_file", "search_in_code", "get_project_structure", "analyze_error", "list_code_files",
     # закрыты возможностями внутренних инструментов:
     #   remember_batch    -> remember(facts=[...])
     #   semantic_search   -> recall(queries=[...])

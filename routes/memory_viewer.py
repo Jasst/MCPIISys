@@ -409,8 +409,9 @@ async def identity_chain(layer: str = "private", limit: int = 200,
     async with mem._lock:
         await asyncio.to_thread(mem.reload_if_stale)
         store = mem.gcn_store
-        objs = _all_identity_objects(store)[-limit:]
-        entries = [asdict(IdentitySnapshot.from_object(o)) for o in objs]
+        all_snaps = [IdentitySnapshot.from_object(o) for o in _all_identity_objects(store)]
+        entries = [asdict(s) for s in all_snaps[-limit:]]
+        invalidated = [s.id for s in all_snaps if s.invalidated]   # по всей цепочке, а не только по окну
         heads = get_heads(store)
         version = core.store_version(store)
     return {
@@ -420,7 +421,7 @@ async def identity_chain(layer: str = "private", limit: int = 200,
         "chain": entries,
         "heads": [h.id for h in heads],
         "diverged": len(heads) > 1,
-        "invalidated_in_chain": [e["id"] for e in entries if e["invalidated"]],
+        "invalidated_in_chain": invalidated,
     }
 
 

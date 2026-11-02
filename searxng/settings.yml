@@ -4,8 +4,8 @@
 use_default_settings: true
 
 server:
-  # Ключ обязателен. Его подставляет docker-compose из переменной SEARXNG_SECRET.
-  secret_key: "${SEARXNG_SECRET}"
+  # Секрет берётся из переменной SEARXNG_SECRET (searxng/.env), здесь значение не используется.
+  secret_key: "set-by-env"
   limiter: false          # приложение ходит только с localhost, лимитер не нужен
   image_proxy: false
 
@@ -18,21 +18,10 @@ search:
   default_lang: "ru"
 
 engines:
-  # Движки, которые работают для русскоязычного поиска (включаем явно)
-  - name: yandex
-    engine: yandex
-    shortcut: ya
-    disabled: false
+  # Только движки, которые уже есть в настройках SearXNG по умолчанию.
+  # Свой движок yandex с shortcut "ya" убран: он конфликтовал со встроенным
+  # и вызывал "ambiguous shortcut: ya", из-за чего контейнер падал в цикл перезапусков.
   - name: wikipedia
     disabled: false
   - name: duckduckgo
     disabled: false
-  # Официальный API Яндекса (платный, нужен ключ и folder id из Yandex Cloud).
-  # Раскомментируй, если скрейпинг yandex начнёт упираться в капчу:
-  # - name: yandex api
-  #   engine: yandex_api
-  #   shortcut: yda
-  #   categories: [general, web]
-  #   inactive: false
-  #   api_key: "ключ_из_yandex_cloud"
-  #   yandex_folder_id: "folder_id"

@@ -302,6 +302,38 @@ def needs_search_heuristic(message: str) -> bool:
     return is_time_sensitive_query(message)
 
 
+async def _search_query_refiner(query: str, found_titles: List[str]) -> str:
+    """LLM-уточнитель запроса (web_search v3): видит запрос и заголовки найденных страниц
+    и предлагает одну более точную формулировку. Любой сбой — "" (поиск продолжится без него).
+    Проверку на дрейф темы делает web_search.sanitize_refined_query.
+    """
+    titles = "\n".join(f"- {t[:120]}" for t in found_titles[:6] if t) or "(нет)"
+    prompt = (
+        "Поиск по запросу дал слабо релевантные результаты. Предложи ОДНУ более точную "
+        "поисковую формулировку на том же языке, что и запрос. Сохрани главные слова и имена "
+        "из запроса, уточни термин или добавь недостающий контекст. "
+        "Ответь ТОЛЬКО формулировкой, без пояснений, кавычек и markdown.\n"
+        f"Запрос: {query}\n"
+        f"Заголовки найденных страниц:\n{titles}"
+    )
+    try:
+        raw = await call_llm([{"role": "user", "content": prompt}], temp=0.2, max_tokens=60)
+    except Exception as e:
+        logger.debug(f"search query refiner failed: {e}")
+        return ""
+    text = (raw or "").strip()
+    # модель может вернуть JSON-массив: берём первый элемент
+    m = re.search(r"\[[^\[\]]*\]", text)
+    if m:
+        try:
+            arr = json.loads(m.group(0))
+            if isinstance(arr, list) and arr and isinstance(arr[0], str):
+                return arr[0].strip()
+        except json.JSONDecodeError:
+            pass
+    return text.splitlines()[0].strip() if text else ""
+
+
 async def _search_query_expander(query: str) -> List[str]:
     """
     LLM-расширитель поискового запроса для deep_search (web_search v3):
@@ -592,7 +624,8 @@ class CognitiveController:
 
         # Регистрация внутренних инструментов
         from GCN.internal_tools import register_all
-        register_all(self.tool_registry, self, query_expander=_search_query_expander)
+        register_all(self.tool_registry, self, query_expander=_search_query_expander,
+                     query_refiner=_search_query_refiner)
 
         self._external_tools_registered = False
 
@@ -678,7 +711,8 @@ class CognitiveController:
             query = message if has_url else await rewrite_query(call_llm, message)
             try:
                 data = await deep_search(query, max_results=5,
-                                         query_expander=_search_query_expander)
+                                         query_expander=_search_query_expander,
+                                         query_refiner=_search_query_refiner)
             except Exception as e:
                 logger.warning(f"[ForcedSearch] попытка {attempt + 1}/{attempts}: исключение {e}")
                 continue

@@ -148,7 +148,8 @@ def _register_memory(registry: ToolRegistry, controller) -> None:
 
 
 def _register_search(registry: ToolRegistry, controller,
-                     query_expander: Optional[Callable] = None) -> None:
+                     query_expander: Optional[Callable] = None,
+                     query_refiner: Optional[Callable] = None) -> None:
     async def _internal_web_search(args: Dict) -> str:
         # Единый поиск за ход: если детерминированный поиск уже выполнен
         # (см. _force_search_if_requested), не дёргаем DDG повторно.
@@ -170,7 +171,8 @@ def _register_search(registry: ToolRegistry, controller,
         max_results = args.get("max_results", 5)
         results = await asyncio.gather(
             *[deep_search(q, max_results=max_results,
-                          query_expander=query_expander) for q in query_list],
+                          query_expander=query_expander,
+                          query_refiner=query_refiner) for q in query_list],
             return_exceptions=True
         )
 
@@ -703,9 +705,11 @@ def _register_identity(registry: ToolRegistry, controller) -> None:
 
 
 def register_all(registry: ToolRegistry, controller,
-                 query_expander: Optional[Callable] = None) -> None:
+                 query_expander: Optional[Callable] = None,
+                 query_refiner: Optional[Callable] = None) -> None:
     _register_memory(registry, controller)
-    _register_search(registry, controller, query_expander=query_expander)
+    _register_search(registry, controller, query_expander=query_expander,
+                     query_refiner=query_refiner)
     _register_image(registry, controller)
     _register_code(registry, controller)
     _register_identity(registry, controller)
