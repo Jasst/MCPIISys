@@ -226,6 +226,7 @@ from GCN.fast_router import (ComplexityRouter, ActivityGate, StageTimer, Route,
 # ИНТЕЛЛЕКТ-ПАКЕТ: заземлённые ответы, санитайзер фактов, подзапросный retrieval
 # (см. GCN/intellect.py)
 from GCN import cognition as intellect_mod
+from GCN import memory_trust as mt
 
 # ИЗМЕНЕНИЕ: импорт MemoryService и фабрики
 from GCN.memory_graph import MemoryService
@@ -1635,11 +1636,53 @@ class CognitiveController:
         await self.research(query)
 
     # ===== ОСНОВНАЯ ЛОГИКА ПОДГОТОВКИ СООБЩЕНИЙ =====
+    _CORRECTION_RE = re.compile(
+        r"\b(неверно|неправильно|неправда|это не так|ты ошибаешься|ты ошибся|ошибаешься|это неправда)\b",
+        re.IGNORECASE)
+
+    def _memory_object_for(self, gcn_id):
+        """Объект памяти по gcn_id из любого слоя (личный, общий, глобальный)."""
+        if not gcn_id:
+            return None
+        for store in (self.router.private_memory.store, self.router.shared_memory.store,
+                      self.router.global_memory.store):
+            obj = store.get(gcn_id)
+            if obj is not None:
+                return obj
+        return None
+
+    @staticmethod
+    def _trust_inputs(obj):
+        """(статусы проверок, источник) для пометки доверия в промпте."""
+        if obj is None:
+            return [], None
+        meta = obj.object if isinstance(obj.object, dict) else {}
+        statuses = []
+        if obj.provenance:
+            statuses = [v.get("status") for v in obj.provenance.verifications if isinstance(v, dict)]
+        return statuses, meta.get("source")
+
+    def _apply_correction_signal(self, message: str):
+        """Если пользователь поправляет ассистента, записи памяти из прошлого ответа
+        получают мягкий статус «под сомнением». Опровержение делает только человек в просмотрщике памяти."""
+        ids = getattr(self, "_last_memory_gcn_ids", None) or []
+        if not ids or not self._CORRECTION_RE.search(message or ""):
+            return
+        self._last_memory_gcn_ids = []
+        mem = self.memory_service.private_memory
+        for gid in ids:
+            try:
+                if mem.store.get(gid) is not None:
+                    mem.apply_feedback(gid, "dispute")
+            except Exception as e:
+                logging.getLogger(__name__).debug(f"correction signal failed for {gid}: {e}")
+
     async def _prepare_messages(self, message: str, web_search: bool = False,
                                 image_base64: Optional[str] = None,
                                 image_mime: Optional[str] = None,
                                 reasoning: bool = False,
                                 rerank: bool = True) -> Tuple[List[Dict], Dict]:
+        self._apply_correction_signal(message)
         auto_search = False
         if AUTO_SEARCH_ENABLED and not web_search and needs_search_heuristic(message):
             web_search = True
@@ -1700,16 +1743,27 @@ class CognitiveController:
                 "global": "глобальный"
             }
             lines = []
+            shown_ids = []
             for fact in context_facts:
                 text = fact["text"][:300]
-                conf = fact.get("confidence", 0.5)
+                obj = self._memory_object_for(fact.get("gcn_id"))
+                statuses, source = self._trust_inputs(obj)
+                if mt.is_refuted(statuses):
+                    continue  # опровергнутое человеком не подаём ассистенту как факт
                 label = type_labels.get(fact.get("type"), "факт")
                 if fact.get("via") == "graph":
                     label = label + ", по связям"
+                trust_text = mt.trust_label(source, statuses)
+                if trust_text:
+                    label = f"{label}, {trust_text}"
                 scope = fact.get("scope", "private")
                 scope_label = scope_labels.get(scope, scope)
                 # числа уверенности/важности модели не нужны: используются только для отбора выше
                 lines.append(f"- [{scope_label} {label}] {text}")
+                if fact.get("gcn_id"):
+                    shown_ids.append(fact["gcn_id"])
+            # запоминаем, что показано в этом ответе: по нему поймём поправку пользователя в следующем сообщении
+            self._last_memory_gcn_ids = shown_ids
 
             # НОВОЕ: явно перечисляем непогашенные противоречия
             contradiction_lines = []

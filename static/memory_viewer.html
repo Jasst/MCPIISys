@@ -177,8 +177,9 @@ a.back:hover{text-decoration:underline}
   <button id="multi" title="выбирать несколько записей (Shift+клик тоже работает)">☑ Выбор</button>
   <input id="q" type="search" placeholder="поиск по тексту…" size="22">
   <label>тип <select id="ftype"><option value="">все</option></select></label>
-  <label>связи <select id="rfilter" title="«synapse» — связь, возникшая когда записи использовались вместе">
-    <option value="">все</option><option value="nosyn">без «synapse»</option></select></label>
+  <label>связи <select id="rfilter" title="«у выбранной»: связи видны только у выбранной или наведённой записи; противоречия видны всегда">
+    <option value="focus">связи — у выбранной</option><option value="">все связи</option>
+    <option value="nosyn">без «synapse»</option></select></label>
   <label>доверие ≥ <input id="minc" type="range" min="0" max="100" value="0"><span id="minc-v">0%</span></label>
   <button id="fit" title="вписать в экран">Вписать</button>
   <button id="add" title="добавить запись в память">＋ Запись</button>
@@ -207,7 +208,7 @@ a.back:hover{text-decoration:underline}
   </aside>
   <section id="stage"><canvas id="cv"></canvas>
     <div id="multibar" hidden></div>
-    <div id="howto"><span>Главные записи и группы — ближе к центру, их соседи — дальше. Линия = связь «откуда → куда» (стрелка — направление, цвет — тип связи). Кольцо у записи — доверие, размер — важность. Клик — детали, клик по линии — связь. Shift+клик или «☑ Выбор» — несколько записей, их можно объединить в группу.</span><button id="howto-x" class="small" title="скрыть подсказку">✕</button></div>
+    <div id="howto"><span>Главные записи и группы — ближе к центру, их соседи — дальше. Линия = связь «откуда → куда» (стрелка — направление, цвет — тип связи). Связи по умолчанию видны только у выбранной или наведённой записи; противоречия — всегда. Полный вид — в списке «связи». Кольцо у записи — доверие, размер — важность. Наведи курсор — видны связи и соседи записи. Клик — детали, клик по линии — связь. Shift+клик или «☑ Выбор» — несколько записей, их можно объединить в группу.</span><button id="howto-x" class="small" title="скрыть подсказку">✕</button></div>
     <div id="zoombar">
       <button id="zin" title="приблизить">＋</button>
       <button id="zout" title="отдалить">－</button>
@@ -227,9 +228,10 @@ a.back:hover{text-decoration:underline}
 "use strict";
 const API = "/ai/memory";
 /* палитра графа в приглушённых «графитовых» тонах основного чата */
-const TYPE_COLORS = {claim:"#8fa1bd", concept:"#7fb8a4", observation:"#c9a06a", goal:"#a695c8",
-  evidence:"#86b6ac", hypothesis:"#c2b478", episode:"#93a8d0", notification:"#cf9276",
-  identity_core:"#c77f8e", entity:"#a7afbc", procedure:"#bda3d6", relationship:"#9dbdd6", group:"#d9b44a"};
+const TYPE_COLORS = {claim:"#7f9cc9", concept:"#5fbf9a", observation:"#d4a24c", goal:"#b07fd6",
+  evidence:"#4fc1c7", hypothesis:"#b8e06a", episode:"#9aa7c4", notification:"#ff8a65",
+  identity_core:"#e06ab0", entity:"#8c96a8", procedure:"#8fd9ff", relationship:"#4aa3d8", group:"#f2c94c",
+  memory_event:"#7d8799"};
 const REL_COLORS = {CONTRADICTS:"#e5544f", CONTRADICT:"#e5544f", GROUNDS_IN:"#787e89", CAUSES:"#e0a458",
   ENABLES:"#4cc38a", PREVENTS:"#e5544f", INHIBITS:"#e5544f", REQUIRES:"#a695c8", PART_OF:"#c9a86a"};
 const REP = 2600, SPRING = 0.03, GRAV = 0.0025, DAMP = 0.82;
@@ -245,6 +247,8 @@ const S = {
   insights: [], highlight: new Set(),
   selEdge: null,   // выбранная связь: {s, r, t}
   multi: new Set(), multiMode: false,           // несколько записей для группы
+  rfMode: "focus",                              // показ связей: focus | все | nosyn
+  pendingType: null, pendingTab: null,           // сохранённые настройки, которые ждут данных
   target: new Map(), hoverEdge: null, edgeSlot: new Map(),   // цели колец, связь под курсором, номер параллельной связи
 };
 
@@ -366,16 +370,17 @@ async function refresh(force) {
     else { S.selEdge = null; clearDetail(); }
   } else if (S.selected && S.byId.has(S.selected)) loadDetail(S.selected);
   else if (S.selected) { S.selected = null; clearDetail(); }
-  S.alpha = Math.max(S.alpha, 0.3);
+  if (S.layout === "graph") settleGraph(60, 0.1);
   S.redraw = true;
 }
 
 function fillTypeFilter(byType) {
-  const sel = $("#ftype"), cur = sel.value;
+  const sel = $("#ftype"), cur = sel.value || S.pendingType || "";
   sel.innerHTML = "";
   sel.append(h("option", {value: ""}, "все"));
   for (const t of Object.keys(byType || {})) sel.append(h("option", {value: t}, `${t} (${byType[t]})`));
   sel.value = cur;
+  if (sel.value === cur && cur) S.pendingType = null;
 }
 
 function syncPositions() {
@@ -383,8 +388,10 @@ function syncPositions() {
   for (const id of [...S.pos.keys()]) if (!keep.has(id)) S.pos.delete(id);
   // цели пересчитываем при каждом изменении памяти: новая запись сразу встаёт на своё место
   S.target = S.snap ? computeRings(S.snap) : new Map();
+  let newNodes = false;
   for (const id of keep) {
     if (!S.pos.has(id)) {
+      newNodes = true;
       const t = S.target.get(id);
       S.pos.set(id, t
         ? {x: t[0], y: t[1], vx: 0, vy: 0, pinned: false}
@@ -392,6 +399,7 @@ function syncPositions() {
     }
   }
   if (S.layout === "pca") applyPca();
+  if (S.layout === "graph") { settleGraph(newNodes ? 260 : 0, 1); applyPins(); }
 }
 
 function applyPca() {
@@ -416,6 +424,7 @@ function applyFilter() {
     S.visible.add(n.id);
   }
   const rf = $("#rfilter").value;
+  S.rfMode = rf;
   S.visibleEdges = (S.snap ? S.snap.edges : []).filter((e) =>
     S.visible.has(e.s) && S.visible.has(e.t) && !(rf === "nosyn" && e.r === "synapse"));
   // параллельные связи между одной парой записей расходятся дугами, а не накладываются
@@ -430,7 +439,7 @@ function applyFilter() {
   }
   const total = S.snap ? S.snap.total_nodes : 0, shown = S.snap ? S.snap.shown_nodes : 0;
   $("#counts").textContent = `${S.visible.size}/${shown} узлов · ${S.visibleEdges.length} рёбер · всего ${total}`;
-  if (S.layout === "graph") S.alpha = Math.max(S.alpha, 0.4);
+  if (S.layout === "graph") settleGraph(40, 0.12);   // фильтр слегка подвигает граф, не встряхивая его
   S.redraw = true;
 }
 
@@ -493,6 +502,7 @@ function computeRings(snap) {
     radii[d] = Math.max(radii[d - 1] + RING_GAP, (cnt[d] * RING_SPACE) / (Math.PI * 2));
   }
   const rOf = (d) => radii[d];
+  S.ringRadii = radii;   // радиусы уровней — для направляющих колец на экране
   const pts = new Map();
   // вес ветки — корень из размера: большие ветки получают больше места, но листья не сжимаются в щель
   const wOf = (v) => Math.sqrt(size.get(v));
@@ -587,12 +597,20 @@ function stepRings() {
   return moving;
 }
 
+/* режим «у выбранной»: связи видны только у выбранной/наведённой записи (иначе граф превращается в клубок);
+   противоречия и выбранная связь видны всегда */
+function edgeHidden(e) {
+  if (S.rfMode !== "focus" || isSelEdge(e) || e.r.startsWith("CONTRADICT")) return false;
+  const fid = focusId();
+  return !(fid && (e.s === fid || e.t === fid));
+}
+
 /* дуга связи: одна формула и для рисования, и для поиска мышью по линии */
 function edgeCtrl(e, x1, y1, x2, y2) {
   const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy) || 1;
   const sl = S.edgeSlot.get(edgeKey(e)) || {i: 0, n: 1};
   // встречные связи изгибаются в разные стороны, параллельные расходятся веером
-  const bend = Math.min(40, len * 0.10) * (e.s < e.t ? 1 : -1) + (sl.i - (sl.n - 1) / 2) * 16;
+  const bend = Math.min(22, len * 0.06) * (e.s < e.t ? 1 : -1) + (sl.i - (sl.n - 1) / 2) * 12;
   return [(x1 + x2) / 2 - (dy / len) * bend, (y1 + y2) / 2 + (dx / len) * bend];
 }
 function curvePt(x1, y1, cx, cy, x2, y2, t) {
@@ -601,13 +619,34 @@ function curvePt(x1, y1, cx, cy, x2, y2, t) {
 }
 
 /* ---------- физика и отрисовка ---------- */
-function tick() {
-  if (S.layout !== "graph" || S.alpha < 0.003) return;
+/* силовая сеть: связи разного веса, якоря типов и досчёт до покоя.
+   synapse (совместное использование, их тысячи) — слабая длинная пружина, структурные связи — сильная короткая;
+   записи одного типа тянутся к своему якорю, поэтому типы образуют отдельные облака, а не общий клубок. */
+const ANCHOR_R = 260, ANCHOR_K = 0.004, SPRING_STRUCT = 0.035, SPRING_SYN = 0.008;
+const LEN_STRUCT = 90, LEN_SYN = 170, MAX_V = 9;
+let anchorKey = "", anchorPos = new Map();
+function typeAnchors(types) {
+  const key = types.join("|");
+  if (key !== anchorKey) {
+    anchorKey = key;
+    anchorPos = new Map();
+    types.forEach((t, i) => {
+      if (types.length < 2) { anchorPos.set(t, [0, 0]); return; }
+      const th = (i / types.length) * Math.PI * 2 - Math.PI / 2;
+      anchorPos.set(t, [Math.cos(th) * ANCHOR_R, Math.sin(th) * ANCHOR_R]);
+    });
+  }
+  return anchorPos;
+}
+
+/* один шаг сил с «теплотой» a */
+function forceStep(a) {
   const ids = [...S.visible].filter((id) => S.pos.has(id));
   const n = ids.length;
-  const a = S.alpha;
   const P = ids.map((id) => S.pos.get(id));
-  // отталкивание считаем только между соседними ячейками сетки (вместо всех пар O(n²))
+  const types = [...new Set(ids.map((id) => (S.byId.get(id) || {}).type))].sort();
+  const anchors = typeAnchors(types);
+  // отталкивание — по соседним ячейкам сетки (вместо всех пар O(n²))
   const grid = new Map();
   for (let i = 0; i < n; i++) {
     const key = Math.floor(P[i].x / CELL) + "," + Math.floor(P[i].y / CELL);
@@ -622,7 +661,7 @@ function tick() {
       const cell = grid.get((cx + ox) + "," + (cy + oy));
       if (!cell) continue;
       for (const j of cell) {
-        if (j <= i) continue;               // каждая пара учитывается один раз
+        if (j <= i) continue;
         const q = P[j];
         let dx = p.x - q.x, dy = p.y - q.y;
         let d2 = dx * dx + dy * dy;
@@ -633,6 +672,7 @@ function tick() {
       }
     }
   }
+  // пружины: структурные связи сильные и короткие, synapse — слабые и длинные
   const index = new Map(ids.map((id, i) => [id, i]));
   for (const e of S.visibleEdges) {
     const i = index.get(e.s), j = index.get(e.t);
@@ -640,17 +680,39 @@ function tick() {
     const p = P[i], q = P[j];
     const dx = q.x - p.x, dy = q.y - p.y;
     const d = Math.sqrt(dx * dx + dy * dy) || 1;
-    const target = 70 + (1 - Math.min(1, e.w)) * 60;
-    const f = (d - target) * SPRING * a;
+    const syn = e.r === "synapse";
+    const target = syn ? LEN_SYN : LEN_STRUCT + (1 - Math.min(1, e.w)) * 30;
+    const f = (d - target) * (syn ? SPRING_SYN : SPRING_STRUCT) * a;
     p.vx += (dx / d) * f; p.vy += (dy / d) * f;
     q.vx -= (dx / d) * f; q.vy -= (dy / d) * f;
   }
-  for (const p of P) {
+  // якоря типов и слабая гравитация к центру
+  for (let i = 0; i < n; i++) {
+    const p = P[i];
+    const an = anchors.get((S.byId.get(ids[i]) || {}).type);
+    if (an) { p.vx += (an[0] - p.x) * ANCHOR_K * a; p.vy += (an[1] - p.y) * ANCHOR_K * a; }
     p.vx -= p.x * GRAV * a; p.vy -= p.y * GRAV * a;
+  }
+  // интегрирование с ограничением скорости: узлы не разлетаются
+  for (const p of P) {
+    p.vx = Math.max(-MAX_V, Math.min(MAX_V, p.vx));
+    p.vy = Math.max(-MAX_V, Math.min(MAX_V, p.vy));
     if (!p.pinned) { p.x += p.vx; p.y += p.vy; }
     p.vx *= DAMP; p.vy *= DAMP;
   }
+}
+
+function tick() {
+  if (S.layout !== "graph" || S.alpha < 0.003) return;
+  forceStep(S.alpha);
   S.alpha *= 0.985;
+}
+
+/* досчитывает раскладку до покоя сразу, без видимого «дрожания» на экране */
+function settleGraph(iters, startAlpha) {
+  let a = startAlpha;
+  for (let i = 0; i < iters && a >= 0.003; i++) { forceStep(a); a *= 0.975; }
+  S.alpha = 0;
 }
 
 /* размер узла = связи + важность; яркость (globalAlpha в draw) = доверие; см. также salience на сервере */
@@ -694,7 +756,9 @@ function nodeType(id) {
   const n = S.byId.get(id);
   return n ? n.type : null;
 }
-function animating() { return !!S.selEdge || contradicting.size > 0; }
+function animating() { return !!S.selEdge; }
+/* фокус: выбранная запись, иначе запись под курсором (связи и соседи подсвечиваются) */
+function focusId() { return S.selected || S.hover || null; }
 
 function roundRectPath(x, y, w, h, r) {
   ctx.beginPath();
@@ -730,11 +794,12 @@ function drawBackdrop(w, h) {
 /* синапс: изогнутая линия; цвет — тип связи, либо градиент от цвета одного конца к другому */
 function drawEdge(e, x1, y1, x2, y2, t, k) {
   const sel = isSelEdge(e);
-  const involved = S.selected && (e.s === S.selected || e.t === S.selected);
-  const flow = sel || e.r.startsWith("CONTRADICT");       // бегущий пунктир для противоречий и выбранной связи
+  const fid = focusId();
+  const involved = !!fid && (e.s === fid || e.t === fid);
   const [cx, cy] = edgeCtrl(e, x1, y1, x2, y2);
-  const dimmed = S.selected ? (involved ? 1 : 0.12) : S.selEdge ? (sel ? 1 : 0.18) : 1;
-  const base = 0.35 + Math.min(1, e.w) * 0.35;
+  const syn = e.r === "synapse", contra = e.r.startsWith("CONTRADICT");
+  const dimmed = fid ? (involved ? 1 : (S.selected ? 0.12 : 0.3)) : S.selEdge ? (sel ? 1 : 0.18) : 1;
+  const base = (0.35 + Math.min(1, e.w) * 0.35) * (syn ? 0.5 : 1);
   const relCol = REL_COLORS[e.r];
   let stroke;
   if (relCol) {
@@ -752,8 +817,9 @@ function drawEdge(e, x1, y1, x2, y2, t, k) {
   ctx.lineWidth = sel ? 3.4 : involved ? 2.2 : 0.9 + Math.min(1.6, e.w);
   ctx.lineCap = "round";
   if (sel) { ctx.shadowColor = rgba(relCol || "#ffffff", 0.9); ctx.shadowBlur = 14; }
-  ctx.setLineDash(flow ? [6, 5] : []);
-  ctx.lineDashOffset = flow ? -((t * 18) % 11) : 0;
+  // бегущий пунктир — только у выбранной связи; противоречия — статичный пунктир; синапсы — точечный
+  ctx.setLineDash(sel ? [6, 5] : contra ? [5, 4] : syn ? [2, 4] : []);
+  ctx.lineDashOffset = sel ? -((t * 18) % 11) : 0;
   ctx.beginPath();
   ctx.moveTo(x1, y1);
   ctx.quadraticCurveTo(cx, cy, x2, y2);
@@ -761,7 +827,7 @@ function drawEdge(e, x1, y1, x2, y2, t, k) {
   ctx.restore();
 
   // стрелка направления у конца — при приближении или для выбранных связей
-  if (k > 1.1 || sel || involved) {
+  if ((k > 1.1 && !syn) || sel || involved) {
     const tx = x2 - cx, ty = y2 - cy, tl = Math.hypot(tx, ty) || 1;
     const ux = tx / tl, uy = ty / tl;
     const tn = S.byId.get(e.t);
@@ -832,13 +898,12 @@ function drawNode(id, n, p, k, t, dimOn) {
 
   // противоречие: пульсирующее пунктирное кольцо
   if (hasContradiction(id)) {
-    const pulse = 1.5 * (0.5 + 0.5 * Math.sin(t * 4));
+    const pulse = 1.5;   // статичное кольцо: без пульсации кадры не перерисовываются постоянно
     ctx.save();
     ctx.globalAlpha = dimOn ? 0.2 : 0.9;
     ctx.strokeStyle = DRAW.danger;
     ctx.lineWidth = 1.5;
     ctx.setLineDash([3, 3]);
-    ctx.lineDashOffset = -((t * 10) % 6);
     ctx.beginPath();
     ctx.arc(x, y, rad + 7 + pulse, 0, Math.PI * 2);
     ctx.stroke();
@@ -890,8 +955,28 @@ function draw() {
   const k = S.view.k;
   drawBackdrop(r.width, r.height);
 
+  // направляющие кольца иерархии: показывают уровни, от центра к периферии
+  if (S.layout === "rings" && S.ringRadii) {
+    const [cx, cy] = toScreen({x: 0, y: 0});
+    ctx.save();
+    ctx.strokeStyle = S.theme === "light" ? "rgba(60,70,90,0.13)" : "rgba(170,185,210,0.10)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 6]);
+    for (const rr of S.ringRadii) {
+      if (rr <= 0) continue;
+      ctx.beginPath();
+      ctx.arc(cx, cy, rr * k, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  const fid = focusId();
+  neighSet = neighboursOf(fid);
+
   // синапсы под нейронами
   for (const e of S.visibleEdges) {
+    if (edgeHidden(e)) continue;
     const p = S.pos.get(e.s), q = S.pos.get(e.t);
     if (!p || !q) continue;
     const [x1, y1] = toScreen(p), [x2, y2] = toScreen(q);
@@ -912,10 +997,11 @@ function draw() {
 
   // нейроны и подписи
   const showLabels = k > 1.6;
+  const labelBoxes = [];   // занятые места под подписи: обычные подписи не налезают друг на друга
   for (const id of S.visible) {
     const n = S.byId.get(id), p = S.pos.get(id);
     if (!n || !p) continue;
-    const dimOn = S.selected ? (id !== S.selected && !isNeighbour(id))
+    const dimOn = fid ? (id !== fid && !isNeighbour(id))
       : S.selEdge ? !(id === S.selEdge.s || id === S.selEdge.t) : false;
     const rad = drawNode(id, n, p, k, t, dimOn);
     const label = n.subject.length > 40 ? n.subject.slice(0, 38) + "…" : n.subject;
@@ -927,7 +1013,14 @@ function draw() {
       ctx.globalAlpha = 0.95;
       ctx.fillStyle = S.labelColor;
       ctx.font = "11px Inter, system-ui, sans-serif";
-      ctx.fillText(label, x + rad + 6, y + 4);
+      const lx = x + rad + 6, ly = y + 4, lw = ctx.measureText(label).width;
+      const box = {x0: lx - 2, x1: lx + lw + 2, y0: ly - 11, y1: ly + 3};
+      const prio = S.degreeRank.has(id) || n.type === "group";
+      const clash = labelBoxes.some((b) => !(box.x1 < b.x0 || box.x0 > b.x1 || box.y1 < b.y0 || box.y0 > b.y1));
+      if (prio || !clash) {
+        ctx.fillText(label, lx, ly);
+        labelBoxes.push(box);
+      }
       ctx.restore();
     }
   }
@@ -940,16 +1033,19 @@ function rebuildContradictions() {
   contradicting.clear();
   for (const e of (S.snap ? S.snap.edges : [])) if (e.r.startsWith("CONTRADICT")) { contradicting.add(e.s); contradicting.add(e.t); }
 }
-let neighSet = new Set();
-function rebuildNeighbours() {
-  neighSet = new Set();
-  if (!S.selected || !S.snap) return;
+let neighSet = new Set();   // соседи текущего фокуса; пересчитывается в draw()
+function neighboursOf(fid) {
+  const out = new Set();
+  if (!fid || !S.snap) return out;
   for (const e of S.snap.edges) {
-    if (e.s === S.selected) neighSet.add(e.t);
-    else if (e.t === S.selected) neighSet.add(e.s);
+    if (e.s === fid) out.add(e.t);
+    else if (e.t === fid) out.add(e.s);
   }
+  return out;
 }
 function isNeighbour(id) { return neighSet.has(id); }
+/* соседи пересчитываются в draw() при каждом кадре — отдельная перестройка не нужна */
+function rebuildNeighbours() {}
 
 function worldAt(sx, sy) {
   const r = cv.getBoundingClientRect();
@@ -978,6 +1074,7 @@ function isSelEdge(e) {
 function hitEdge(sx, sy) {
   let best = null, bestD = 6;
   for (const e of S.visibleEdges) {
+    if (edgeHidden(e)) continue;
     const p = S.pos.get(e.s), q = S.pos.get(e.t);
     if (!p || !q) continue;
     const [x1, y1] = toScreen(p), [x2, y2] = toScreen(q);
@@ -1027,6 +1124,9 @@ function endPinch() {
 function openNodeMenu(x, y, id) {
   UI.menu(x, y, [
     {label: "Открыть", onClick: () => selectNode(id)},
+    {label: "Подтвердить", disabled: S.readonly, onClick: () => feedback(id, "confirm")},
+    {label: "Сомнительно", disabled: S.readonly, onClick: () => feedback(id, "dispute")},
+    {label: "Опровергнуть", danger: true, disabled: S.readonly, onClick: () => feedback(id, "refute")},
     {label: "Отозвать запись", danger: true, disabled: S.readonly, onClick: () => retractNode(id)},
   ]);
 }
@@ -1105,6 +1205,7 @@ cv.addEventListener("pointerup", (ev) => {
     return;
   }
   if (S.drag && S.drag.type === "node") {
+    if (S.drag.moved && S.layout === "graph") rememberPin(S.drag.id);
     if (!S.drag.moved) {
       // Shift/Ctrl/⌘ или режим «☑ Выбор» — добавить запись в набор, иначе обычный выбор
       if (ev.shiftKey || ev.ctrlKey || ev.metaKey || S.multiMode) toggleMulti(S.drag.id);
@@ -1127,7 +1228,7 @@ cv.addEventListener("pointercancel", (ev) => {
 cv.addEventListener("dblclick", (ev) => {
   const [sx, sy] = localPos(ev);
   const id = hitNode(sx, sy);
-  if (id) { S.pos.get(id).pinned = false; S.alpha = Math.max(S.alpha, 0.3); }
+  if (id) { S.pos.get(id).pinned = false; forgetPin(id); settleGraph(60, 0.2); }
 });
 cv.addEventListener("wheel", (ev) => {
   ev.preventDefault();
@@ -1415,6 +1516,15 @@ function renderDetail(d) {
           weight: Number(w.value)});
       }}, "Связать")),
     relHelp);
+
+  // 5b. проверка: человек подтверждает или опровергает; повторы доверие не повышают
+  const fbRow = h("div", {class: "row"},
+    h("button", {disabled: ro ? "" : null, onclick: () => feedback(d.id, "confirm")}, "Подтвердить"),
+    h("button", {disabled: ro ? "" : null, onclick: () => feedback(d.id, "dispute")}, "Сомнительно"),
+    h("button", {class: "danger", disabled: ro ? "" : null, onclick: () => feedback(d.id, "refute")}, "Опровергнуть"));
+  box.append(h("h3", {}, "Проверка"),
+    h("div", {class: "hint"}, `Доверие ${Math.round((d.confidence || 0) * 100)}%. Повторы и извлечения доверие не повышают: его меняет только проверка.`),
+    fbRow);
 
   // 6. удаление: сначала последствия, потом подтверждение
   const impactBox = h("div", {class: "card"}, h("div", {class: "mono"}, "считаю последствия…"));
@@ -2138,9 +2248,9 @@ $("#layout").addEventListener("change", async (e) => {
     }
     if (!S.snap || !Object.keys(S.snap.pca || {}).length) {
       log("у узлов нет эмбеддингов: проекция недоступна, оставлен граф", "bad");
-      S.layout = "graph"; e.target.value = "graph";
+      S.layout = "graph"; e.target.value = "graph"; setPref("layout", "graph");
     } else { applyPca(); fitView(); }
-  } else if (S.layout === "graph") { S.alpha = 1; fitView(); }
+  } else if (S.layout === "graph") { settleGraph(260, 1); applyPins(); fitView(); }
   else { syncPositions(); fitView(); }   // кольца: узлы плавно уйдут на место
 });
 $("#q").addEventListener("input", applyFilter);
@@ -2165,6 +2275,19 @@ cv.addEventListener("contextmenu", (ev) => {
 function retractNode(id) {
   return UI.confirm("Отозвать запись? Это сохранится в истории.", {title: "Отозвать запись", okText: "Отозвать", danger: true})
     .then((ok) => (ok ? edit("retract", {id, reason: "memory_viewer"}) : null));
+}
+/* проверка записи человеком: подтверждение, сомнение или опровержение */
+async function feedback(id, verdict) {
+  if (S.readonly) return;
+  const names = {confirm: "подтверждено", dispute: "под сомнением", refute: "опровергнуто"};
+  try {
+    const r = await api(`${API}/feedback`, {id, verdict});
+    log(`${names[verdict]}: доверие ${Math.round(r.confidence * 100)}%`, "ok");
+    await refresh(true);
+    if (S.selected === id) loadDetail(id);
+  } catch (err) {
+    log("проверка: " + err.message, "bad");
+  }
 }
 $("#add").addEventListener("click", startCreate);
 $("#zin").addEventListener("click", () => { const r = cv.getBoundingClientRect(); zoomAt(r.width / 2, r.height / 2, 1.4); });
@@ -2209,10 +2332,72 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden && S.live) refresh(false).catch((err) => log("обновление: " + err.message, "bad"));
 });
 
+/* ---------- настройки пользователя: сохраняются в браузере и восстанавливаются при открытии ---------- */
+const PREFS_KEY = "memory_viewer_prefs_v1";
+let PREFS = {};
+try { const o = JSON.parse(localStorage.getItem(PREFS_KEY) || "{}"); if (o && typeof o === "object") PREFS = o; } catch (_) { /* повреждённые данные — начинаем с чистого */ }
+let prefsTimer = null;
+function savePrefs() {
+  clearTimeout(prefsTimer);
+  prefsTimer = setTimeout(() => { try { localStorage.setItem(PREFS_KEY, JSON.stringify(PREFS)); } catch (_) { /* хранилище недоступно */ } }, 150);
+}
+function setPref(key, value) { PREFS[key] = value; savePrefs(); }
+const PIN_LIMIT = 500;
+function rememberPin(id) {
+  const p = S.pos.get(id);
+  if (!p) return;
+  PREFS.pins = PREFS.pins || {};
+  PREFS.pins[id] = [Math.round(p.x * 10) / 10, Math.round(p.y * 10) / 10];
+  const keys = Object.keys(PREFS.pins);
+  if (keys.length > PIN_LIMIT) for (const k of keys.slice(0, keys.length - PIN_LIMIT)) delete PREFS.pins[k];
+  savePrefs();
+}
+function forgetPin(id) {
+  if (PREFS.pins && id in PREFS.pins) { delete PREFS.pins[id]; savePrefs(); }
+}
+function applyPins() {
+  if (S.layout !== "graph" || !PREFS.pins) return;
+  for (const [id, v] of Object.entries(PREFS.pins)) {
+    const p = S.pos.get(id);
+    if (p && Array.isArray(v) && Number.isFinite(v[0]) && Number.isFinite(v[1])) {
+      p.x = v[0]; p.y = v[1]; p.vx = 0; p.vy = 0; p.pinned = true;
+    }
+  }
+}
+/* восстанавливаем значения элементов управления до первого запроса к серверу */
+function applyPrefs() {
+  const pick = (v, allowed) => (allowed.includes(v) ? v : null);
+  const layout = pick(PREFS.layout, ["rings", "graph", "pca"]);
+  if (layout) { $("#layout").value = layout; S.layout = layout; }
+  const rf = pick(PREFS.rfilter, ["focus", "", "nosyn"]);
+  if (rf !== null) $("#rfilter").value = rf;
+  if (typeof PREFS.q === "string") $("#q").value = PREFS.q.slice(0, 200);
+  if (typeof PREFS.ftype === "string") S.pendingType = PREFS.ftype;   // станет доступным, когда придут типы записей
+  if (Number.isFinite(PREFS.minc)) $("#minc").value = Math.max(0, Math.min(100, PREFS.minc));
+  if (PREFS.live === false) { S.live = false; $("#live").textContent = "Live: пауза"; }
+  if (PREFS.howtoHidden === true) $("#howto").hidden = true;
+  if (typeof PREFS.tab === "string") S.pendingTab = PREFS.tab;
+}
+function applyPendingTab() {
+  if (!S.pendingTab) return;
+  const b = document.querySelector(`.tab[data-tab="${S.pendingTab}"]`);
+  S.pendingTab = null;
+  if (b && !b.classList.contains("on")) b.click();
+}
+applyPrefs();
+$("#layout").addEventListener("change", (e) => setPref("layout", e.target.value));
+$("#rfilter").addEventListener("change", (e) => setPref("rfilter", e.target.value));
+$("#ftype").addEventListener("change", (e) => { S.pendingType = null; setPref("ftype", e.target.value); });
+$("#q").addEventListener("input", (e) => setPref("q", e.target.value));
+$("#minc").addEventListener("input", (e) => setPref("minc", Number(e.target.value)));
+$("#live").addEventListener("click", () => setPref("live", S.live));
+$("#howto-x").addEventListener("click", () => setPref("howtoHidden", true));
+document.querySelectorAll(".tab").forEach((b) => b.addEventListener("click", () => setPref("tab", b.dataset.tab)));
+
 initTheme();
 resize();
 requestAnimationFrame(loop);
-init().then(() => fitView()).catch((err) => {
+init().then(() => { fitView(); applyPendingTab(); }).catch((err) => {
   // ошибка старта раньше оставляла статус «…» и пустой граф: показываем причину прямо в шапке
   log("старт: " + err.message, "bad");
   const st = $("#status");
