@@ -45,6 +45,11 @@ class EditBody(BaseModel):
     args: Dict[str, Any] = Field(default_factory=dict)
 
 
+class FeedbackBody(BaseModel):
+    id: str = Field(..., max_length=128)
+    verdict: str = Field(..., max_length=16)
+
+
 class ReviewBody(BaseModel):
     id: str = Field(..., max_length=128)
 
@@ -185,6 +190,29 @@ async def memory_edit(body: EditBody, uid: str = Depends(require_auth)):
         mem._rebuild_caches_from_gcn()  # индексы фактов и кэши соответствуют новому состоянию
     await mem._save_async()
     return {"ok": True, "version": core.store_version(mem.store), **result}
+
+
+@router.post("/feedback")
+async def memory_feedback(body: FeedbackBody, uid: str = Depends(require_auth)):
+    """Человек подтверждает, оспаривает или опровергает запись. Доверие пересчитывается из проверок,
+    повторы и извлечения его не меняют."""
+    _enabled()
+    if READONLY:
+        raise HTTPException(status_code=403, detail="режим только чтение")
+    if body.verdict not in ("confirm", "refute", "dispute"):
+        raise HTTPException(status_code=400, detail="неизвестный вердикт")
+    _check_id(body.id)
+    mem = await _private_memory(uid)
+    async with mem._lock:
+        await asyncio.to_thread(mem.reload_if_stale)
+        try:
+            res = mem.apply_feedback(body.id, body.verdict)
+        except LookupError:
+            raise HTTPException(status_code=404, detail="запись не найдена")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    await mem._save_async()
+    return {"ok": True, "version": core.store_version(mem.store), **res}
 
 
 @router.post("/llm/review")
@@ -381,8 +409,9 @@ async def identity_chain(layer: str = "private", limit: int = 200,
     async with mem._lock:
         await asyncio.to_thread(mem.reload_if_stale)
         store = mem.gcn_store
-        objs = _all_identity_objects(store)[-limit:]
-        entries = [asdict(IdentitySnapshot.from_object(o)) for o in objs]
+        all_snaps = [IdentitySnapshot.from_object(o) for o in _all_identity_objects(store)]
+        entries = [asdict(s) for s in all_snaps[-limit:]]
+        invalidated = [s.id for s in all_snaps if s.invalidated]   # по всей цепочке, а не только по окну
         heads = get_heads(store)
         version = core.store_version(store)
     return {
@@ -392,7 +421,7 @@ async def identity_chain(layer: str = "private", limit: int = 200,
         "chain": entries,
         "heads": [h.id for h in heads],
         "diverged": len(heads) > 1,
-        "invalidated_in_chain": [e["id"] for e in entries if e["invalidated"]],
+        "invalidated_in_chain": invalidated,
     }
 
 

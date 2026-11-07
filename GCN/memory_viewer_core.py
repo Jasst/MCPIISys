@@ -70,9 +70,10 @@ def _kind(o):
 
 def store_version(store):
     """Дешёвая версия содержимого: меняется при любой правке или добавлении."""
-    with store._lock:  # RLock: снимок может строиться в другом потоке, пока чат пишет в память
-        objs = store._objects.values()
-        return f"{len(store._objects)}:{len(store._events)}:{sum(o.version for o in objs)}"
+    # Ревизия журнала растёт при каждой записи (update/retract/добавление) и при загрузке,
+    # поэтому обход всех объектов не нужен. RLock: снимок может строиться в другом потоке.
+    with store._lock:
+        return f"{len(store._objects)}:{store.revision}"
 
 
 def build_snapshot(store, readonly=False, max_nodes=MAX_NODES_DEFAULT, with_pca=True):
@@ -253,7 +254,19 @@ def _insights(store, degree, adj):
     return out
 
 
+_PCA_CACHE = {"key": None, "val": {}}
+
+
 def _pca(store, allowed):
+    """PCA-проекция с кэшем: SVD считается заново только когда меняется версия или набор узлов."""
+    key = (store_version(store), frozenset(allowed))
+    if _PCA_CACHE["key"] != key:
+        _PCA_CACHE["val"] = _pca_compute(store, allowed)
+        _PCA_CACHE["key"] = key
+    return _PCA_CACHE["val"]
+
+
+def _pca_compute(store, allowed):
     emb = {k: v for k, v in store._embedding_index.items() if k in allowed}
     # берём только основную размерность: один «кривой» вектор не должен ломать проекцию всех
     if emb:

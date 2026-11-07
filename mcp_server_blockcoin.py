@@ -34,7 +34,7 @@ from GCN.web_search import deep_search
 from GCN.image_utils import enhance_prompt, generate_image as gen_image
 from routes.ai_assistant import get_assistant
 from GCN.llm_client import call_llm
-from GCN.code_analyzer import get_analyzer
+from GCN.code_analyzer import get_analyzer, CodeAccessError
 
 # --- Вход по криптоподписи кошелька (EIP-191) ---
 try:
@@ -1937,43 +1937,59 @@ async def update_fact(
 
 @mcp.tool()
 async def read_code_file(
-        file_path: str = Field(..., description="Относительный путь от корня проекта, например 'GCN/config_ai.py'"),
-        max_lines: int = Field(500, description="Максимум строк для возврата", ge=10, le=2000),
+        file_path: str = Field(..., description="Путь от корня проекта, например 'GCN/GCN.py'"),
+        start_line: int = Field(1, description="Первая строка (нумерация с 1)", ge=1),
+        max_lines: int = Field(400, description="Строк за один вызов (до 1000)", ge=1, le=1000),
         ctx: Context = None
 ) -> Dict[str, Any]:
-    """Читает файл исходного кода проекта с проверкой безопасности."""
+    """Читает файл кода частями. Чтобы получить файл целиком, повторяйте вызов с next_start_line,
+    пока он не станет null. Если sha256 между частями меняется, файл изменился: начните заново."""
     _gate_uid, _gate_err = _safe_resolve_user(None, ctx)
     if _gate_err:
         return {"status": "error", "error": "forbidden", "message": _gate_err}
     analyzer = get_analyzer()
-    content = await analyzer.read_file(file_path, max_lines=max_lines)
-    ok = not content.startswith("Ошибка")
-    return {
-        "status": "ok" if ok else "error",
-        "file_path": file_path,
-        "content": content,
-        "truncated": "обрезан" in content,
-    }
+    try:
+        data = await asyncio.to_thread(analyzer.read_lines, file_path, start_line, max_lines)
+    except CodeAccessError as e:
+        return {"status": "error", "error": e.code, "message": e.message, "file_path": file_path}
+    return {"status": "ok", **data}
+
+
+@mcp.tool()
+async def list_code_files(
+        max_depth: int = Field(5, description="Максимальная глубина обхода папок", ge=1, le=10),
+        ctx: Context = None
+) -> Dict[str, Any]:
+    """Список файлов кода приложения: путь, число строк, размер и sha256.
+    Хэш меняется при любой правке файла, поэтому по нему видно, что файл изменился."""
+    _gate_uid, _gate_err = _safe_resolve_user(None, ctx)
+    if _gate_err:
+        return {"status": "error", "error": "forbidden", "message": _gate_err}
+    analyzer = get_analyzer()
+    try:
+        data = await asyncio.to_thread(analyzer.list_files, max_depth)
+    except CodeAccessError as e:
+        return {"status": "error", "error": e.code, "message": e.message}
+    return {"status": "ok", **data}
 
 
 @mcp.tool()
 async def search_in_code(
-        pattern: str = Field(..., description="Строка или регулярное выражение для поиска в коде проекта"),
-        max_results: int = Field(20, description="Максимум результатов", ge=1, le=50),
+        pattern: str = Field(..., description="Строка или регулярное выражение для поиска"),
+        max_results: int = Field(20, description="Максимум совпадений", ge=1, le=50),
         ctx: Context = None
 ) -> Dict[str, Any]:
-    """Ищет паттерн (строку или regex) по всем файлам кода проекта."""
+    """Ищет строку или regex по файлам кода приложения. Возвращает совпадения с контекстом.
+    files_truncated=true означает, что проверены не все файлы."""
     _gate_uid, _gate_err = _safe_resolve_user(None, ctx)
     if _gate_err:
         return {"status": "error", "error": "forbidden", "message": _gate_err}
     analyzer = get_analyzer()
-    result = await analyzer.search_in_code(pattern, max_results=max_results)
-    found = not result.startswith("Ничего не найдено") and not result.startswith("Ошибка")
-    return {
-        "status": "ok" if found else "not_found",
-        "pattern": pattern,
-        "result": result,
-    }
+    try:
+        data = await asyncio.to_thread(analyzer.search_structured, pattern, max_results)
+    except CodeAccessError as e:
+        return {"status": "error", "error": e.code, "message": e.message, "pattern": pattern}
+    return {"status": "ok" if data["results"] else "not_found", "pattern": pattern, **data}
 
 
 @mcp.tool()

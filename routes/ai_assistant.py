@@ -212,7 +212,8 @@ from GCN.mcp_client_manager import MCPToolManager
 from GCN.GCN import KnowledgeObject, KnowledgeType, MemoryScope
 from GCN.memory_graph import CognitiveMemory, Fact, Goal, GCNMemoryRouter
 
-from GCN.llm_client import (call_llm, call_llm_raw, call_llm_stream, list_models, llm_model_var,
+from GCN.llm_client import (call_llm, call_llm_raw, call_llm_stream, model_supports_vision,
+                            list_models, llm_model_var,
                             list_models_cached, get_loaded_model, ensure_model_loaded,
                             schedule_preload, model_ops_lock,
                             set_desired_model, get_desired_model, schedule_reconcile,
@@ -226,6 +227,7 @@ from GCN.fast_router import (ComplexityRouter, ActivityGate, StageTimer, Route,
 # ИНТЕЛЛЕКТ-ПАКЕТ: заземлённые ответы, санитайзер фактов, подзапросный retrieval
 # (см. GCN/intellect.py)
 from GCN import cognition as intellect_mod
+from GCN import memory_trust as mt
 
 # ИЗМЕНЕНИЕ: импорт MemoryService и фабрики
 from GCN.memory_graph import MemoryService
@@ -299,6 +301,38 @@ def needs_search_heuristic(message: str) -> bool:
     if any(kw in msg_lower for kw in SEARCH_TRIGGER_KEYWORDS):
         return True
     return is_time_sensitive_query(message)
+
+
+async def _search_query_refiner(query: str, found_titles: List[str]) -> str:
+    """LLM-уточнитель запроса (web_search v3): видит запрос и заголовки найденных страниц
+    и предлагает одну более точную формулировку. Любой сбой — "" (поиск продолжится без него).
+    Проверку на дрейф темы делает web_search.sanitize_refined_query.
+    """
+    titles = "\n".join(f"- {t[:120]}" for t in found_titles[:6] if t) or "(нет)"
+    prompt = (
+        "Поиск по запросу дал слабо релевантные результаты. Предложи ОДНУ более точную "
+        "поисковую формулировку на том же языке, что и запрос. Сохрани главные слова и имена "
+        "из запроса, уточни термин или добавь недостающий контекст. "
+        "Ответь ТОЛЬКО формулировкой, без пояснений, кавычек и markdown.\n"
+        f"Запрос: {query}\n"
+        f"Заголовки найденных страниц:\n{titles}"
+    )
+    try:
+        raw = await call_llm([{"role": "user", "content": prompt}], temp=0.2, max_tokens=60)
+    except Exception as e:
+        logger.debug(f"search query refiner failed: {e}")
+        return ""
+    text = (raw or "").strip()
+    # модель может вернуть JSON-массив: берём первый элемент
+    m = re.search(r"\[[^\[\]]*\]", text)
+    if m:
+        try:
+            arr = json.loads(m.group(0))
+            if isinstance(arr, list) and arr and isinstance(arr[0], str):
+                return arr[0].strip()
+        except json.JSONDecodeError:
+            pass
+    return text.splitlines()[0].strip() if text else ""
 
 
 async def _search_query_expander(query: str) -> List[str]:
@@ -591,7 +625,8 @@ class CognitiveController:
 
         # Регистрация внутренних инструментов
         from GCN.internal_tools import register_all
-        register_all(self.tool_registry, self, query_expander=_search_query_expander)
+        register_all(self.tool_registry, self, query_expander=_search_query_expander,
+                     query_refiner=_search_query_refiner)
 
         self._external_tools_registered = False
 
@@ -677,7 +712,8 @@ class CognitiveController:
             query = message if has_url else await rewrite_query(call_llm, message)
             try:
                 data = await deep_search(query, max_results=5,
-                                         query_expander=_search_query_expander)
+                                         query_expander=_search_query_expander,
+                                         query_refiner=_search_query_refiner)
             except Exception as e:
                 logger.warning(f"[ForcedSearch] попытка {attempt + 1}/{attempts}: исключение {e}")
                 continue
@@ -1635,11 +1671,53 @@ class CognitiveController:
         await self.research(query)
 
     # ===== ОСНОВНАЯ ЛОГИКА ПОДГОТОВКИ СООБЩЕНИЙ =====
+    _CORRECTION_RE = re.compile(
+        r"\b(неверно|неправильно|неправда|это не так|ты ошибаешься|ты ошибся|ошибаешься|это неправда)\b",
+        re.IGNORECASE)
+
+    def _memory_object_for(self, gcn_id):
+        """Объект памяти по gcn_id из любого слоя (личный, общий, глобальный)."""
+        if not gcn_id:
+            return None
+        for store in (self.router.private_memory.store, self.router.shared_memory.store,
+                      self.router.global_memory.store):
+            obj = store.get(gcn_id)
+            if obj is not None:
+                return obj
+        return None
+
+    @staticmethod
+    def _trust_inputs(obj):
+        """(статусы проверок, источник) для пометки доверия в промпте."""
+        if obj is None:
+            return [], None
+        meta = obj.object if isinstance(obj.object, dict) else {}
+        statuses = []
+        if obj.provenance:
+            statuses = [v.get("status") for v in obj.provenance.verifications if isinstance(v, dict)]
+        return statuses, meta.get("source")
+
+    def _apply_correction_signal(self, message: str):
+        """Если пользователь поправляет ассистента, записи памяти из прошлого ответа
+        получают мягкий статус «под сомнением». Опровержение делает только человек в просмотрщике памяти."""
+        ids = getattr(self, "_last_memory_gcn_ids", None) or []
+        if not ids or not self._CORRECTION_RE.search(message or ""):
+            return
+        self._last_memory_gcn_ids = []
+        mem = self.memory_service.private_memory
+        for gid in ids:
+            try:
+                if mem.store.get(gid) is not None:
+                    mem.apply_feedback(gid, "dispute")
+            except Exception as e:
+                logging.getLogger(__name__).debug(f"correction signal failed for {gid}: {e}")
+
     async def _prepare_messages(self, message: str, web_search: bool = False,
                                 image_base64: Optional[str] = None,
                                 image_mime: Optional[str] = None,
                                 reasoning: bool = False,
                                 rerank: bool = True) -> Tuple[List[Dict], Dict]:
+        self._apply_correction_signal(message)
         auto_search = False
         if AUTO_SEARCH_ENABLED and not web_search and needs_search_heuristic(message):
             web_search = True
@@ -1700,16 +1778,27 @@ class CognitiveController:
                 "global": "глобальный"
             }
             lines = []
+            shown_ids = []
             for fact in context_facts:
                 text = fact["text"][:300]
-                conf = fact.get("confidence", 0.5)
+                obj = self._memory_object_for(fact.get("gcn_id"))
+                statuses, source = self._trust_inputs(obj)
+                if mt.is_refuted(statuses):
+                    continue  # опровергнутое человеком не подаём ассистенту как факт
                 label = type_labels.get(fact.get("type"), "факт")
                 if fact.get("via") == "graph":
                     label = label + ", по связям"
+                trust_text = mt.trust_label(source, statuses)
+                if trust_text:
+                    label = f"{label}, {trust_text}"
                 scope = fact.get("scope", "private")
                 scope_label = scope_labels.get(scope, scope)
                 # числа уверенности/важности модели не нужны: используются только для отбора выше
                 lines.append(f"- [{scope_label} {label}] {text}")
+                if fact.get("gcn_id"):
+                    shown_ids.append(fact["gcn_id"])
+            # запоминаем, что показано в этом ответе: по нему поймём поправку пользователя в следующем сообщении
+            self._last_memory_gcn_ids = shown_ids
 
             # НОВОЕ: явно перечисляем непогашенные противоречия
             contradiction_lines = []
@@ -3145,8 +3234,14 @@ class CognitiveController:
             # Если пользователь приложил фото, а модель его не «видит» — честно
             # предупреждаем в потоке: иначе молчаливый текстовый ответ на вопрос
             # про картинку выглядит как галлюцинация.
-            if image_base64 and not LM_STUDIO_VISION_SUPPORTED:
-                await push(f"data: {json.dumps({'warning': 'Текущая модель не поддерживает анализ изображений — фото не будет учтено в ответе'})}\n\n")
+            if image_base64:
+                # Проверяем реальную модель в LM Studio, а не захардкоженный флаг.
+                vision = await model_supports_vision() if LM_STUDIO_VISION_SUPPORTED else False
+                if vision is False:   # None (сервер не сообщил) — пробуем отправить
+                    await push(f"data: {json.dumps({'warning': 'Текущая модель не поддерживает анализ изображений — фото не будет учтено в ответе'})}\n\n")
+                    # Картинку не отправляем вовсе: иначе текстовая модель вернёт 500
+                    image_base64 = None
+                    image_mime = None
 
             # Классификация (без LLM) ДО подготовки сообщений: на быстром маршруте
             # пропускаем LLM-реранк памяти. force_slow считаем так же, как это делает
@@ -3867,6 +3962,9 @@ class ModelSelectRequest(BaseModel):
     # check_only=True — «только проверить»: ничего не загружать, если целевая
     # модель уже в VRAM (используется при загрузке/перезагрузке страницы)
     check_only: bool = False
+    # параметры загрузки llama-server (контекст, слои GPU и т.д.) из окна настроек;
+    # None — взять сохранённые для модели. Для LM Studio игнорируются.
+    params: Optional[dict] = None
 
 
 @router.post("/models/select")
@@ -3918,7 +4016,8 @@ async def select_chat_model(body: ModelSelectRequest, address: str = Depends(req
     # _loaded_model_id давало бы ложное «уже в памяти» после ручного
     # выгружения модели в LM Studio (кэш залипал навсегда).
     from GCN import llm_client as _lc
-    hot = (vram_state_cached() == target and models
+    # с явными параметрами (окно настроек) быстрый путь не годится: могли измениться
+    hot = (vram_state_cached() == target and models and body.params is None
            and time.monotonic() - _lc._models_cache["ts"] < _MODELS_CACHE_TTL_S)
     if body.check_only:
         if hot:
@@ -3952,7 +4051,7 @@ async def select_chat_model(body: ModelSelectRequest, address: str = Depends(req
         return {"ok": True, "loaded": target, "changed": False}
     # ensure_model_loaded сама берёт model_ops_lock; внешний «async with» тут
     # приводил к взаимной блокировке (asyncio.Lock не реентерабелен).
-    result = await ensure_model_loaded(target)
+    result = await ensure_model_loaded(target, body.params)
     if not result["ok"]:
         return JSONResponse({"detail": "lm_studio_error", "error": result["error"]},
                             status_code=502)

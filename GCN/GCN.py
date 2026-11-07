@@ -15,6 +15,7 @@ import threading
 import shutil
 import uuid
 import copy
+import itertools
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -22,6 +23,7 @@ from typing import Dict, List, Optional, Any, Set, Tuple, Union, Callable
 from enum import Enum
 from collections import defaultdict
 import numpy as np
+from . import memory_trust as mt
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -511,10 +513,31 @@ def _cross_process_file_lock(path: str, timeout: float = 15.0, poll: float = 0.0
             pass
 
 
+# общий счётчик ревизий процесса: номера не повторяются даже между разными журналами (после load())
+_REVISION = itertools.count(1)
+
+
+class _EventLog(list):
+    """Журнал событий хранилища. Каждое добавление выдаёт новую ревизию (.rev),
+    поэтому состояние памяти можно сравнить за O(1) без обхода всех объектов."""
+
+    def __init__(self, items=()):
+        super().__init__(items)
+        self.rev = next(_REVISION)
+
+    def append(self, item):
+        super().append(item)
+        self.rev = next(_REVISION)
+
+    def extend(self, items):
+        super().extend(items)
+        self.rev = next(_REVISION)
+
+
 class MemoryStore:
     def __init__(self, embedding_dim: Optional[int] = None):
         self._objects: Dict[str, KnowledgeObject] = {}
-        self._events: List[KnowledgeEvent] = []
+        self._events: List[KnowledgeEvent] = _EventLog()
         self._graph = KnowledgeGraph()
         self._embedding_index: Dict[str, List[float]] = {}
         self._by_type: Dict[KnowledgeType, Set[str]] = defaultdict(set)
@@ -651,22 +674,25 @@ class MemoryStore:
         obj = self._objects.get(obj_id)
         if not obj:
             return 0.0
-        base = obj.confidence
-        # Бонус за количество свидетельств (до 5)
-        ev_count = len(obj.evidence)
-        ev_bonus = min(ev_count, 5) / 5 * 0.1
-        # Бонус за верификации (до 5)
-        ver_count = 0
+        # База — исходное доверие записи (из метаданных), а не значение прошлого пересчёта:
+        # раньше пересчитанное значение писалось обратно в confidence и бонусы копились между проходами.
+        meta = obj.object if isinstance(obj.object, dict) else {}
+        try:
+            base = float(meta.get("base_confidence", obj.confidence))
+        except (TypeError, ValueError):
+            base = obj.confidence
+        statuses = []
         if obj.provenance:
-            ver_count = len(obj.provenance.verifications)
-        ver_bonus = min(ver_count, 5) * 0.01
-        # Штраф за активные противоречия
-        contrad_penalty = 0.0
-        for _, neighbor in self._graph.get_neighbors(obj_id, "CONTRADICTS"):
-            # Проверяем, что объект-сосед всё ещё существует
-            if neighbor in self._objects:
-                contrad_penalty += 0.05
-        return max(0.0, min(1.0, base + ev_bonus + ver_bonus - contrad_penalty))
+            statuses = [v.get("status") for v in obj.provenance.verifications if isinstance(v, dict)]
+        # Противоречия со существующими записями снижают доверие
+        contradictions = sum(1 for _, neighbor in self._graph.get_neighbors(obj_id, "CONTRADICTS")
+                             if neighbor in self._objects)
+        return mt.trust(base, statuses, contradictions)
+
+    @property
+    def revision(self) -> int:
+        """Ревизия памяти: меняется при любой записи (через журнал событий) и при загрузке."""
+        return self._events.rev
 
     def get(self, obj_id: str) -> Optional[KnowledgeObject]:
         return self._objects.get(obj_id)
@@ -818,7 +844,9 @@ class MemoryStore:
             "prediction_error": 0.0,
             "access_count": 0,
             "last_accessed": None,
-            "local_id": local_id  # ✅ сохраняем
+            "local_id": local_id,  # ✅ сохраняем
+            # исходное доверие: из него всегда пересчитывается итоговое (не накапливается между пересчётами)
+            "base_confidence": confidence,
         }
         obj = KnowledgeObject(
             id=f"fact_{uuid.uuid4()}",
@@ -848,10 +876,11 @@ class MemoryStore:
             type=KnowledgeType.MEMORY_EVENT,
             subject=user_msg,
             predicate="user_message",
-            object={"salience": salience},
+            object={"salience": salience, "source": mt.SOURCE_USER,
+                    "base_confidence": mt.USER_UTTERANCE_CONFIDENCE},
             author=author,
             created=datetime.now(timezone.utc),
-            confidence=1.0
+            confidence=mt.USER_UTTERANCE_CONFIDENCE
         )
         user_id = self.create(user_obj, author)
 
@@ -860,10 +889,11 @@ class MemoryStore:
             type=KnowledgeType.MEMORY_EVENT,
             subject=assistant_msg,
             predicate="assistant_message",
-            object={"salience": salience},
+            object={"salience": salience, "source": mt.SOURCE_ASSISTANT,
+                    "base_confidence": mt.ASSISTANT_UTTERANCE_CONFIDENCE},
             author=author,
             created=datetime.now(timezone.utc),
-            confidence=1.0
+            confidence=mt.ASSISTANT_UTTERANCE_CONFIDENCE
         )
         ass_id = self.create(ass_obj, author)
 
@@ -1418,7 +1448,7 @@ class MemoryStore:
                     weight = edge_meta.get(meta_key, {}).get("weight", 1.0)
                     self._graph.add_relation(src, relation, target, weight=weight)
 
-            self._events = []
+            self._events = _EventLog()
             for ed in data.get("events", []):
                 ed = dict(ed)
                 ed["type"] = EventType(ed["type"])

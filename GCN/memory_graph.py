@@ -31,6 +31,7 @@ from GCN.GCN import (
 )
 
 from GCN.llm_client import call_llm
+from GCN import memory_trust as mt
 
 logger = logging.getLogger(__name__)
 
@@ -601,9 +602,13 @@ class CognitiveMemory:
             if other is None or other_id == fid:
                 continue
             similar_ids.append(other.id)
-            if sim > 0.45:
-                self._create_synapse(fid, other.id, weight=sim * 0.5)
-                self._create_synapse(other.id, fid, weight=sim * 0.5)
+        # связи «похожести» — только к действительно близким записям и в ограниченном числе
+        for other_id, sim in mt.select_similar(
+                [(i, s) for i, s in similar if i != fid and i in self.facts_by_id],
+                mt.SYNAPSE_SIMILARITY_THRESHOLD, mt.SYNAPSE_SIMILAR_MAX):
+            other = self.facts_by_id[other_id]
+            self._create_synapse(fid, other.id, weight=sim * 0.5)
+            self._create_synapse(other.id, fid, weight=sim * 0.5)
 
         self._detect_contradictions(fid, candidate_ids=similar_ids)
         self._dirty = True
@@ -692,8 +697,7 @@ class CognitiveMemory:
         fact = self.facts_by_id.get(fact_id)
         if not fact:
             return
-        neg_words = {'не', 'нет', 'без', 'против', 'отрицает', 'опровергает'}
-        has_neg = any(w in fact.text.lower() for w in neg_words)
+        has_neg = mt.has_negation(fact.text)
         if not has_neg or not candidate_ids:
             return
         fact_kw = set(fact.keywords)
@@ -765,6 +769,33 @@ class CognitiveMemory:
             self._dirty = True
         return removed
 
+    # ==================== ОБРАТНАЯ СВЯЗЬ ====================
+    def apply_feedback(self, gcn_id: str, verdict: str) -> Dict[str, Any]:
+        """Сигнал человека о записи.
+        confirm — подтверждено (доверие растёт по проверкам);
+        refute  — опровергнуто (доверие падает до минимума, запись перестаёт попадать в контекст,
+                  связи «похожести» и совместной активации к ней ослабляются);
+        dispute — под сомнением (мягкий штраф; используется, когда пользователь поправил в чате).
+        Доверие всегда пересчитывается из базы и проверок, поэтому отмену можно сделать повторной проверкой."""
+        status = {"confirm": mt.VERIFY_OK, "refute": mt.VERIFY_WRONG, "dispute": mt.VERIFY_DISPUTED}.get(verdict)
+        if status is None:
+            raise ValueError("verdict должен быть confirm, refute или dispute")
+        if self.gcn_store.get(gcn_id) is None:
+            raise LookupError("запись не найдена")
+        self.gcn_store.verify(gcn_id, verifier=self.user_id, status=status, actor=self.user_id)
+        new_conf = self.gcn_store.compute_confidence(gcn_id)
+        self.gcn_store.update(gcn_id, {"confidence": new_conf}, self.user_id)
+        fact = self._find_fact_by_gcn_id(gcn_id)
+        if fact is not None:
+            fact.confidence = new_conf
+            if status == mt.VERIFY_WRONG:
+                for (s, t), syn in list(self.synapses.items()):
+                    if fact.id in (s, t):
+                        syn.weight = max(SYNAPSE_MIN_WEIGHT, syn.weight * 0.5)
+                        self._sync_synapse_to_gcn(s, t)
+        self._dirty = True
+        return {"confidence": round(new_conf, 4), "status": status}
+
     # ==================== ЭПИЗОДЫ ====================
     async def add_episode(self, user_msg: str, assistant_msg: str, salience: float = 0.0):
         """Добавляет эпизод в GCN и локальный кэш."""
@@ -773,9 +804,9 @@ class CognitiveMemory:
         # Создаём локальные факты (как раньше) для совместимости
         # Факты привязываются к MEMORY_EVENT эпизода, а не создают дубль CLAIM
         user_fid = self._add_fact(user_msg, 'user', importance=1.0, salience=salience,
-                                  gcn_id=user_id_gcn)
+                                  confidence=mt.USER_UTTERANCE_CONFIDENCE, gcn_id=user_id_gcn)
         assistant_fid = self._add_fact(assistant_msg, 'assistant', importance=1.2, salience=salience,
-                                       gcn_id=ass_id_gcn)
+                                       confidence=mt.ASSISTANT_UTTERANCE_CONFIDENCE, gcn_id=ass_id_gcn)
         self._create_synapse(user_fid, assistant_fid, weight=0.8)
         self._create_synapse(assistant_fid, user_fid, weight=0.6)
 
@@ -1487,12 +1518,12 @@ class CognitiveMemory:
             for f in self.semantic_facts:
                 age = now - f.timestamp
                 recency = 1.0 / (1.0 + age / 86400)
-                f.importance = 0.5 * (f.importance + recency + f.access_count / 10)
+                f.importance = 0.5 * (f.importance + recency + mt.access_importance(f.access_count))
                 f.importance = min(2.0, f.importance)
                 # Обновляем в GCN
                 if f.gcn_id:
                     try:
-                        self.gcn_store.update(f.gcn_id, {"confidence": f.confidence}, self.user_id)
+                        # доверие не пишем обратно: оно пересчитывается из базы, проверок и противоречий
                         # Обновляем метаданные importance
                         meta = self.gcn_store.get(f.gcn_id).object if self.gcn_store.get(f.gcn_id) else {}
                         if isinstance(meta, dict):
@@ -2603,8 +2634,8 @@ class MemoryService:
                 if ex.get("score", 0) >= DEDUP_THRESHOLD:
                     ex_id = ex.get("gcn_id") or ex.get("id")
                     logger.info(f"[remember] дубль обнаружен (score={ex['score']:.2f}), "
-                                f"обновляю confidence вместо создания нового факта")
-                    # Повысить confidence существующего факта
+                                f"учитываю повтор, новый факт не создаю")
+                    # повтор — не доказательство: доверие не меняем, считаем повторы отдельно
                     if ex_id:
                         try:
                             scope_name = ex.get("scope", "private")
@@ -2616,10 +2647,11 @@ class MemoryService:
 
                             ko = memory_layer.store.get(ex_id)
                             if ko:
-                                new_confidence = min(1.0, max(ko.confidence, confidence))
+                                meta = dict(ko.object) if isinstance(ko.object, dict) else {}
+                                meta["restatements"] = int(meta.get("restatements", 0)) + 1
                                 memory_layer.store.update(
                                     ex_id,
-                                    {"confidence": new_confidence},
+                                    {"object": meta},
                                     actor=self.user_id
                                 )
                         except Exception as e:

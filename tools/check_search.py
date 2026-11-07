@@ -11,6 +11,14 @@ import sys
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, ROOT)
 
+# .env читаем до импорта web_search: он берёт SEARXNG_URL и порядок поисковиков при загрузке,
+# так же как run.py. Без этого скрипт проверял бы не те настройки, что использует приложение.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(dotenv_path=os.path.join(ROOT, '.env'), override=False)
+except ImportError:
+    pass
+
 import GCN.web_search as ws  # noqa: E402
 
 QUERY = 'погода москва сегодня'
@@ -31,7 +39,6 @@ async def check(name, fn):
 async def main():
     print('Поисковики в порядке использования:', ', '.join(ws.SEARCH_BACKENDS_ORDER))
     print('SearXNG адрес:', ws.SEARXNG_URL or '(не задан)')
-    print('Brave ключ:   ', 'задан' if ws.BRAVE_API_KEY else '(не задан)')
     print()
     for name in ws.SEARCH_BACKENDS_ORDER:
         fn = ws._BACKENDS.get(name)
