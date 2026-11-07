@@ -4,6 +4,13 @@
 import os
 from pathlib import Path
 
+# загружаем .env сами, чтобы работали и main.py, и MCP-сервер, запущенный отдельно
+try:
+    from dotenv import load_dotenv
+    load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env", override=False)
+except ImportError:
+    pass
+
 # -------------------------------
 # Общие пути
 # -------------------------------
@@ -21,7 +28,45 @@ LM_STUDIO_USE_STREAM = True
 LM_STUDIO_VISION_SUPPORTED = True
 # Модель по умолчанию, если пользователь не выбрал другую в интерфейсе.
 LM_STUDIO_MODEL = os.getenv("LM_STUDIO_MODEL", "local-model")
-DEFAULT_MAX_TOKENS = 4096         # увеличенная длина ответа по умолчанию (было 2048)
+
+# -------------------------------
+# Бэкенд LLM: lmstudio (по умолчанию) или llamacpp (llama-server из llama.cpp)
+# llamacpp: приложение само запускает llama-server с выбранной GGUF-моделью
+# -------------------------------
+LLM_BACKEND = os.getenv("LLM_BACKEND", "lmstudio").strip().lower()
+# Папка с GGUF-моделями (сканируется рекурсивно), например E:\models
+MODELS_DIR = os.getenv("MODELS_DIR", "").strip()
+# Путь к llama-server.exe (или просто имя, если он в PATH)
+LLAMACPP_SERVER_BIN = os.getenv("LLAMACPP_SERVER_BIN", "llama-server").strip()
+LLAMACPP_HOST = os.getenv("LLAMACPP_HOST", "127.0.0.1").strip()
+LLAMACPP_PORT = int(os.getenv("LLAMACPP_PORT", "8090"))
+LLAMACPP_URL = f"http://{LLAMACPP_HOST}:{LLAMACPP_PORT}/v1/chat/completions"
+# сколько ждать готовности модели (крупные модели грузятся минутами)
+LLAMACPP_STARTUP_TIMEOUT = int(os.getenv("LLAMACPP_STARTUP_TIMEOUT", "300"))
+# поднять модель при старте приложения (LLM_DEFAULT = LLAMACPP_DEFAULT_MODEL)
+LLAMACPP_AUTOSTART = os.getenv("LLAMACPP_AUTOSTART", "0") == "1"
+# id модели по умолчанию = путь относительно MODELS_DIR, например Qwen/Qwen3-14B-Q4_K_M.gguf
+LLAMACPP_DEFAULT_MODEL = os.getenv("LLAMACPP_DEFAULT_MODEL", "").strip()
+# порядок карт CUDA как в nvidia-smi (иначе 3060 и 1660 могут поменяться местами)
+LLAMACPP_CUDA_DEVICE_ORDER = os.getenv("LLAMACPP_CUDA_DEVICE_ORDER", "PCI_BUS_ID").strip()
+# дополнительные аргументы llama-server одной строкой, например: --no-mmap
+LLAMACPP_EXTRA_ARGS = os.getenv("LLAMACPP_EXTRA_ARGS", "").strip()
+LLAMACPP_LOG = os.getenv("LLAMACPP_LOG", "llama_server.log").strip()
+# значения по умолчанию при загрузке (переопределяются для каждой модели в окне настроек)
+LLAMACPP_DEFAULTS = {
+    "ctx": int(os.getenv("LLAMACPP_CTX", "8192")),
+    "gpu_layers": int(os.getenv("LLAMACPP_GPU_LAYERS", "-1")),
+    "flash_attn": os.getenv("LLAMACPP_FLASH_ATTN", "1") == "1",
+    "kv_cache_type": os.getenv("LLAMACPP_KV_CACHE_TYPE", "q8_0").strip(),
+    "threads": int(os.getenv("LLAMACPP_THREADS", "14")),
+    "main_gpu": int(os.getenv("LLAMACPP_MAIN_GPU", "0")),
+    "tensor_split": os.getenv("LLAMACPP_TENSOR_SPLIT", "").strip(),
+    "parallel": int(os.getenv("LLAMACPP_PARALLEL", "1")),
+}
+if LLM_BACKEND == "llamacpp" and LLAMACPP_DEFAULT_MODEL:
+    # для всего приложения «модель по умолчанию» — выбранная в .env GGUF
+    LM_STUDIO_MODEL = LLAMACPP_DEFAULT_MODEL
+DEFAULT_MAX_TOKENS = 8096         # увеличенная длина ответа по умолчанию (было 2048)
 
 # -------------------------------
 # Reasoning / теги <thought>
@@ -153,15 +198,19 @@ EASYDIFFUSION_ENABLED = True
 EASYDIFFUSION_URL = os.getenv("EASYDIFFUSION_URL", "http://localhost:7860")
 EASYDIFFUSION_ENDPOINT = "/v1/sdapi/v1/txt2img"
 EASYDIFFUSION_TIMEOUT = 140
-EASYDIFFUSION_DEFAULT_STEPS = 20
-EASYDIFFUSION_DEFAULT_WIDTH = 512
-EASYDIFFUSION_DEFAULT_HEIGHT = 512
+EASYDIFFUSION_MODEL = os.getenv("EASYDIFFUSION_MODEL", "realismByStableYogi_ponyV65.safetensors").strip()
+
+EASYDIFFUSION_DEFAULT_STEPS = int(os.getenv("EASYDIFFUSION_STEPS", "25"))
+EASYDIFFUSION_DEFAULT_WIDTH = int(os.getenv("EASYDIFFUSION_WIDTH", "512"))
+EASYDIFFUSION_DEFAULT_HEIGHT = int(os.getenv("EASYDIFFUSION_HEIGHT", "512"))
+EASYDIFFUSION_DEFAULT_CFG = float(os.getenv("EASYDIFFUSION_CFG", "7.0"))
+EASYDIFFUSION_DEFAULT_SAMPLER = os.getenv("EASYDIFFUSION_SAMPLER", "dpmpp_2m").strip()
+EASYDIFFUSION_NEGATIVE_PROMPT = os.getenv("EASYDIFFUSION_NEGATIVE_PROMPT", "").strip()
 
 EASYDIFFUSION_DEFAULT_LORA_USE = os.getenv("EASYDIFFUSION_LORA_USE", "0") == "1"
-EASYDIFFUSION_DEFAULT_LORA = os.getenv("EASYDIFFUSION_LORA", "")
-EASYDIFFUSION_DEFAULT_LORA_WEIGHT = 0.8
+EASYDIFFUSION_DEFAULT_LORA = os.getenv("EASYDIFFUSION_LORA", "").strip()
+EASYDIFFUSION_DEFAULT_LORA_WEIGHT = float(os.getenv("EASYDIFFUSION_LORA_WEIGHT", "0.8"))
 
-EASYDIFFUSION_MODEL = "realismByStableYogi_ponyV65.safetensors"   # <-- добавьте эту строку
 # Раньше был жёстко зашит Windows-путь "E:/BlockcoinWitres/generated_images" —
 # на любой другой машине (в т.ч. на Linux self-hosted сервере) mkdir() на
 # этом пути падал бы сразу. По умолчанию кладём рядом с MEMORY_BASE_DIR,

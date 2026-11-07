@@ -5,6 +5,7 @@ import time
 from typing import List, Dict, Optional
 import contextvars
 from GCN.config_ai import LM_STUDIO_URL, LM_STUDIO_API_KEY, LM_STUDIO_TIMEOUT, LM_STUDIO_STREAM_TIMEOUT, DEFAULT_MAX_TOKENS, LM_STUDIO_MODEL
+from GCN.config_ai import LLM_BACKEND, LLAMACPP_URL
 
 # Модель, выбранная пользователем в чате. Ставится на время запроса (см. ai_assistant),
 # вне запроса — LM_STUDIO_MODEL.
@@ -13,6 +14,16 @@ llm_model_var: contextvars.ContextVar = contextvars.ContextVar("llm_model", defa
 
 def _model_name() -> str:
     return llm_model_var.get() or LM_STUDIO_MODEL
+
+
+def _is_llamacpp() -> bool:
+    """True, если LLM_BACKEND=llamacpp: модели грузит llama-server, а не LM Studio."""
+    return LLM_BACKEND == "llamacpp"
+
+
+def _chat_url() -> str:
+    """Адрес /v1/chat/completions активного бэкенда."""
+    return LLAMACPP_URL if _is_llamacpp() else LM_STUDIO_URL
 
 
 def _api_base_url() -> str:
@@ -102,7 +113,7 @@ async def call_llm_raw(
     for attempt in range(retries):
         try:
             session = await _get_session()
-            async with session.post(LM_STUDIO_URL, json=payload, headers=headers,
+            async with session.post(_chat_url(), json=payload, headers=headers,
                                     timeout=aiohttp.ClientTimeout(total=LM_STUDIO_TIMEOUT)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
@@ -210,7 +221,7 @@ async def _call_llm_stream_once(
     finish_reason = None
     try:
         session = await _get_session()
-        async with session.post(LM_STUDIO_URL, json=payload,
+        async with session.post(_chat_url(), json=payload,
                                 headers=headers, timeout=timeout) as resp:
             if resp.status != 200:
                 error_text = await resp.text()
@@ -320,7 +331,11 @@ async def call_llm_stream(
 
 
 async def list_models() -> List[str]:
-    """Идентификаторы моделей из LM Studio (/v1/models). Эмбеддинг-модели не нужны для чата."""
+    """Идентификаторы моделей из LM Studio (/v1/models). Эмбеддинг-модели не нужны для чата.
+    При LLM_BACKEND=llamacpp — GGUF-файлы из MODELS_DIR (сеть не нужна)."""
+    if _is_llamacpp():
+        from GCN import llamacpp_manager as lm
+        return [m["id"] for m in lm.scan_models()]
     url = LM_STUDIO_URL.replace("/chat/completions", "/models")
     headers = {"Authorization": f"Bearer {LM_STUDIO_API_KEY}"}
     session = await _get_session()
@@ -468,6 +483,8 @@ async def reconcile_loaded_model(target: Optional[str]) -> Dict:
     """
     global _loaded_model_id, _last_ops_ts
     target = target or LM_STUDIO_MODEL
+    if _is_llamacpp():
+        return await _llamacpp_switch(target)
     async with model_ops_lock:
         current = await get_loaded_model()
         _last_ops_ts = time.monotonic()
@@ -561,6 +578,11 @@ async def get_loaded_model() -> Optional[str]:
     по X становится мгновенным и дешёвым для LM Studio.
     """
     global _loaded_model_id
+    if _is_llamacpp():
+        from GCN import llamacpp_manager as lm
+        loaded = lm.manager.loaded_id()
+        _remember_loaded(loaded)
+        return loaded
     try:
         ids = await list_models_cached()
     except Exception:
@@ -654,7 +676,7 @@ async def load_model(model_id: str) -> None:
             raise RuntimeError(f"LM Studio load '{model_id}': HTTP {resp.status}: {text[:150]}")
 
 
-async def ensure_model_loaded(target: Optional[str]) -> Dict:
+async def ensure_model_loaded(target: Optional[str], params: Optional[Dict] = None) -> Dict:
     """Выгрузить текущую модель и загрузить выбранную (target=None — дефолт).
 
     Возвращает {"ok": bool, "loaded": id, "changed": bool, "error": str|None}.
@@ -671,6 +693,8 @@ async def ensure_model_loaded(target: Optional[str]) -> Dict:
         _preload_task.cancel()
     if _preload_task is not _cur:
         _preload_task = None
+    if _is_llamacpp():
+        return await _llamacpp_switch(target, params)
     async with model_ops_lock:
         current = await get_loaded_model()
         _last_ops_ts = time.monotonic()
@@ -714,6 +738,72 @@ async def ensure_model_loaded(target: Optional[str]) -> Dict:
             invalidate_models_cache()
             _notify_state_changed()
             return {"ok": False, "loaded": current, "changed": False, "error": str(e)}
+
+
+async def unload_current_model() -> Dict:
+    """Выгрузить модель из памяти (кнопка «Выгрузить»).
+
+    Сбрасывает и намерение выбора, и фоновые задачи дозарядки/сверки — иначе
+    после перезагрузки страницы фронтенд или отложенная задача загрузили бы
+    модель обратно. Вызывать только когда генерации нет (проверяет роут).
+    """
+    global _desired_model_id, _last_ops_ts, _preload_task, _reconcile_task
+    for t in (_preload_task, _reconcile_task):
+        if t is not None and not t.done() and t is not asyncio.current_task():
+            t.cancel()
+    _preload_task = None
+    _reconcile_task = None
+    async with model_ops_lock:
+        if _is_llamacpp():
+            from GCN import llamacpp_manager as lm
+            await lm.manager.unload()
+        else:
+            current = await get_loaded_model()
+            if current:
+                await unload_model(current)
+        _desired_model_id = None
+        _last_ops_ts = time.monotonic()
+        _remember_loaded(None)
+        invalidate_models_cache()
+        _notify_state_changed()
+        logger.info("Модель выгружена из памяти по запросу пользователя")
+    return {"ok": True, "loaded": None}
+
+
+async def _llamacpp_switch(target: str, params: Optional[Dict] = None) -> Dict:
+    """Смена модели для llama.cpp: останавливаем старый llama-server, поднимаем новый.
+
+    Контракт тот же, что у ensure_model_loaded: {ok, loaded, changed, error}.
+    Идемпотентно: модель уже запущена с теми же параметрами — ничего не делаем.
+    params=None — взять сохранённые для модели параметры (или из .env).
+    """
+    global _load_ts, _last_ops_ts
+    from GCN import llamacpp_manager as lm
+    mgr = lm.manager
+    async with model_ops_lock:
+        current = mgr.loaded_id()
+        _last_ops_ts = time.monotonic()
+        try:
+            want = lm.LoadParams(**params).normalized() if params else lm.get_params(target)
+        except (TypeError, ValueError) as e:
+            return {"ok": False, "loaded": current, "changed": False, "error": f"Параметры: {e}"}
+        if current == target and (params is None or mgr.params() == want):
+            _remember_loaded(target)
+            return {"ok": True, "loaded": target, "changed": False, "error": None}
+        try:
+            await mgr.load(target, want)
+            _load_ts = time.monotonic()
+            _remember_loaded(target)
+            invalidate_models_cache()
+            _notify_state_changed()
+            logger.info(f"llama-server: модель {target!r} загружена")
+            return {"ok": True, "loaded": target, "changed": True, "error": None}
+        except Exception as e:
+            logger.error(f"llama-server: не удалось загрузить {target!r}: {e}")
+            _remember_loaded(None)
+            invalidate_models_cache()
+            _notify_state_changed()
+            return {"ok": False, "loaded": None, "changed": False, "error": str(e)}
 
 
 def schedule_preload(target: Optional[str]) -> None:

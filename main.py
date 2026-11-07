@@ -36,12 +36,29 @@ from routes.ai_assistant import (
 from routes.auth import router as auth_router
 from routes.ui_state import router as ui_state_router
 from routes.memory_viewer import router as memory_viewer_router
+from routes.model_settings import router as model_settings_router
 from mcp_server_blockcoin import mcp
 
 setup_logging()
 logger = logging.getLogger(__name__)
 logging.getLogger("routes.ai_assistant").setLevel(logging.INFO)
 logging.getLogger("GCN.mcp_client_manager").setLevel(logging.INFO)
+
+
+async def _autostart_llamacpp():
+    """LLM_BACKEND=llamacpp и LLAMACPP_AUTOSTART=1: поднять модель по умолчанию при старте."""
+    from GCN.config_ai import LLM_BACKEND, LLAMACPP_AUTOSTART, LM_STUDIO_MODEL
+    if LLM_BACKEND != "llamacpp" or not LLAMACPP_AUTOSTART:
+        return
+    await asyncio.sleep(2)
+    from GCN.llm_client import ensure_model_loaded, list_models_cached
+    models = await list_models_cached(force=True)
+    target = LM_STUDIO_MODEL if LM_STUDIO_MODEL in models else (models[0] if models else None)
+    if not target:
+        logger.warning("llama-server autostart: в MODELS_DIR нет .gguf моделей")
+        return
+    res = await ensure_model_loaded(target)
+    logger.info(f"llama-server autostart: {res}")
 
 
 @asynccontextmanager
@@ -61,13 +78,18 @@ async def lifespan(app: FastAPI):
 
     async with mcp.session_manager.run():
         init_task = asyncio.create_task(_deferred_init_mcp(), name="mcp-init")
+        autostart_task = asyncio.create_task(_autostart_llamacpp(), name="llama-autostart")
         try:
             yield
         finally:
             init_task.cancel()
+            autostart_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await init_task
             await shutdown_all()
+            # llama-server — наш дочерний процесс: останавливаем вместе с приложением
+            from GCN.llamacpp_manager import shutdown_llamacpp
+            await shutdown_llamacpp()
             logger.info("Shutdown complete")
 
 
@@ -124,6 +146,7 @@ app.include_router(ai_router)
 app.include_router(auth_router)
 app.include_router(ui_state_router)
 app.include_router(memory_viewer_router)
+app.include_router(model_settings_router)
 
 
 def _page(name: str):

@@ -3955,6 +3955,9 @@ class ModelSelectRequest(BaseModel):
     # check_only=True — «только проверить»: ничего не загружать, если целевая
     # модель уже в VRAM (используется при загрузке/перезагрузке страницы)
     check_only: bool = False
+    # параметры загрузки llama-server (контекст, слои GPU и т.д.) из окна настроек;
+    # None — взять сохранённые для модели. Для LM Studio игнорируются.
+    params: Optional[dict] = None
 
 
 @router.post("/models/select")
@@ -4006,7 +4009,8 @@ async def select_chat_model(body: ModelSelectRequest, address: str = Depends(req
     # _loaded_model_id давало бы ложное «уже в памяти» после ручного
     # выгружения модели в LM Studio (кэш залипал навсегда).
     from GCN import llm_client as _lc
-    hot = (vram_state_cached() == target and models
+    # с явными параметрами (окно настроек) быстрый путь не годится: могли измениться
+    hot = (vram_state_cached() == target and models and body.params is None
            and time.monotonic() - _lc._models_cache["ts"] < _MODELS_CACHE_TTL_S)
     if body.check_only:
         if hot:
@@ -4040,7 +4044,7 @@ async def select_chat_model(body: ModelSelectRequest, address: str = Depends(req
         return {"ok": True, "loaded": target, "changed": False}
     # ensure_model_loaded сама берёт model_ops_lock; внешний «async with» тут
     # приводил к взаимной блокировке (asyncio.Lock не реентерабелен).
-    result = await ensure_model_loaded(target)
+    result = await ensure_model_loaded(target, body.params)
     if not result["ok"]:
         return JSONResponse({"detail": "lm_studio_error", "error": result["error"]},
                             status_code=502)

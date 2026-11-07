@@ -3113,7 +3113,7 @@
     const name = $('#modelName');
     if (!name) return;
     const cur = currentModel();
-    name.textContent = cur || 'Модель…';
+    name.textContent = cur ? modelDisplayName(cur) : 'Модель…';
     const btn = $('#modelSelectBtn');
     if (btn) btn.title = cur ? ('Модель: ' + cur + ' — нажмите, чтобы сменить') : 'Выбрать модель';
     // точка «модель реально в VRAM» на кнопке в шапке — тот же маркер, что и
@@ -3128,7 +3128,7 @@
       const other = modelList.loaded && modelList.loaded !== cur ? modelList.loaded : null;
       const st = $('#modelStatus');
       if (st) {
-        if (other) { st.hidden = false; st.textContent = 'в памяти: ' + shortModelName(other, 26); }
+        if (other) { st.hidden = false; st.textContent = 'в памяти: ' + modelDisplayName(other); }
         else { st.hidden = true; st.textContent = ''; }
       }
     }
@@ -3311,6 +3311,12 @@
   window.addEventListener('resize', closeModelDd);
   // имя модели в LM Studio длинное ("qwen2.5-coder-32b-instruct-q4_k_m"):
   // режем середину для показа, полное имя всегда остаётся в title/атрибутах
+  // для показа в интерфейсе — только имя файла модели без папок и .gguf;
+  // полный id (с путём) остаётся в подсказке title
+  function modelDisplayName(id) {
+    if (!id) return '';
+    return id.split('/').pop().replace(/\.gguf$/i, '');
+  }
   function shortModelName(id, max = 34) {
     if (!id || id.length <= max) return id || '';
     const half = Math.floor((max - 1) / 2);
@@ -3381,6 +3387,18 @@
       ddEl.style.top = below + 'px';
     }
   }
+  async function unloadChatModel() {
+    try {
+      const r = await fetch('/ai/model-settings/unload', { method: 'POST', credentials: 'same-origin' });
+      const d = await r.json().catch(() => ({}));
+      if (r.status === 409) { toast('Сейчас идёт ответ — выгрузка будет доступна после него', 3200); return; }
+      if (!r.ok) { toast('Не удалось выгрузить: ' + (d.detail || r.status), 3200); return; }
+      toast('Модель выгружена, видеопамять освобождена', 2600);
+    } catch (e) {
+      toast('Ошибка выгрузки: ' + e.message, 3200);
+    }
+    await loadModels();
+  }
   function openModelDd() {
     const btn = $('#modelSelectBtn');
     if (!btn || !modelList.models || !modelList.models.length) return;
@@ -3404,7 +3422,7 @@
     d.setAttribute('aria-label', 'Модели LM Studio');
     const head = document.createElement('div');
     head.className = 'model-dd-head';
-    head.textContent = 'Модель LM Studio';
+    head.textContent = 'Модель';
     d.appendChild(head);
     const list = document.createElement('div');
     list.className = 'model-dd-list';
@@ -3419,7 +3437,7 @@
       b.setAttribute('aria-selected', String(id === cur));
       const nm = document.createElement('span');
       nm.className = 'model-dd-name';
-      nm.textContent = shortModelName(id);
+      nm.textContent = modelDisplayName(id);
       nm.title = id;                              // полное имя — при наведении
       b.appendChild(nm);
       const meta = document.createElement('span');
@@ -3475,6 +3493,18 @@
       toast('Список моделей обновлён');
     });
     list.appendChild(upd);
+    if (modelList.loaded) {
+      const ul = document.createElement('button');
+      ul.type = 'button';
+      ul.className = 'model-dd-item muted';
+      ul.textContent = '⏏ Выгрузить из памяти: ' + modelDisplayName(modelList.loaded);
+      ul.addEventListener('click', (e) => {
+        e.stopPropagation();
+        closeModelDd();
+        unloadChatModel();
+      });
+      list.appendChild(ul);
+    }
     d.appendChild(list);
     ddLayer.appendChild(d);
     document.body.appendChild(ddLayer);
