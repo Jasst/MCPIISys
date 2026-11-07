@@ -98,6 +98,80 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------
+# v4: контекст диалога, релевантность и регион
+# ---------------------------------------------------------------------
+from contextvars import ContextVar
+
+# последние реплики диалога, выставляет ai_assistant на время хода
+conversation_context: ContextVar = ContextVar("conversation_context", default="")
+
+DDG_REGION = os.getenv("DDG_REGION", "ru-ru")          # регион выдачи DuckDuckGo
+SEARXNG_LANGUAGE = os.getenv("SEARXNG_LANGUAGE", "ru")  # язык выдачи SearXNG
+# какая доля ключевых слов запроса должна встретиться в сниппете/заголовке
+SEARCH_COVERAGE_MIN = float(os.getenv("SEARCH_COVERAGE_MIN", "0.5"))
+REWRITE_MAX_WORDS = 6  # короче — почти наверняка пропуск темы, переписываем по контексту
+
+_STOP_WORDS = frozenset({
+    "что", "как", "это", "для", "при", "или", "все", "так", "где", "кто", "какой", "какая",
+    "какие", "когда", "почему", "зачем", "про", "над", "под", "без", "ещё", "еще", "его",
+    "её", "ее", "они", "она", "оно", "был", "была", "было", "быть", "если", "там", "тут",
+    "мой", "моя", "мне", "меня", "тебе", "ты", "вы", "мы", "the", "and", "for", "with",
+    "what", "how", "is", "are", "of", "to", "in", "on",
+})
+# местоимения и указательные слова, по которым видно, что реплика ссылается на контекст
+_ANAPHORA_RE = re.compile(
+    r"\b(он|она|оно|они|его|её|ее|их|ней|нём|этот|эта|это|эти|этого|этом|там|тут|такой|тот|тоже)\b",
+    re.I,
+)
+
+
+def _stems(text: str) -> set:
+    return {w[:5] for w in _tokenize(text) if len(w) >= 3 and w not in _STOP_WORDS and not w.isdigit()}
+
+
+def query_coverage(query: str, text: str) -> float:
+    """Доля ключевых слов запроса, найденных в тексте (основа — первые 5 букв)."""
+    q = _stems(query)
+    if not q:
+        return 1.0
+    return len(q & {w[:5] for w in _tokenize(text)}) / len(q)
+
+
+def _needs_rewrite(query: str, ctx: str) -> bool:
+    if not ctx:
+        return False
+    return len(_tokenize(query)) <= REWRITE_MAX_WORDS or bool(_ANAPHORA_RE.search(query))
+
+
+async def rewrite_with_context(query: str) -> str:
+    """Делает самостоятельный запрос из реплики «а что он сказал?», опираясь на диалог.
+    Любой сбой или пустой ответ — возвращаем исходный запрос."""
+    ctx = conversation_context.get()
+    if not _needs_rewrite(query, ctx):
+        return query
+    try:
+        from GCN.llm_client import call_llm   # ленивый импорт: без цикла с ai_assistant
+        prompt = (
+            "Диалог:\n" + ctx + "\n\nПоследняя реплика пользователя: " + query + "\n\n"
+            "Сформулируй ОДИН самостоятельный поисковый запрос по теме последней реплики: "
+            "раскрой местоимения и пропуски по диалогу, сохрани язык пользователя. "
+            "Ответь только запросом, без кавычек и пояснений."
+        )
+        raw = await asyncio.wait_for(
+            call_llm([{"role": "user", "content": prompt}], temp=0.0, max_tokens=60, retries=1),
+            timeout=6.0,
+        )
+    except Exception as e:
+        logger.debug(f"rewrite_with_context: {e}")
+        return query
+    lines = (raw or "").strip().splitlines()
+    cand = lines[0].strip().strip("\"'«»`").strip() if lines else ""
+    if not cand or len(cand) > 200 or URL_RE.search(cand):
+        return query
+    logger.info(f"[Search] контекст: '{query[:60]}' -> '{cand[:80]}'")
+    return cand
+
 try:
     from ddgs import DDGS
     DDGS_AVAILABLE = True
@@ -950,7 +1024,7 @@ async def search_ddg(query: str, max_results: int = 5) -> List[Dict]:
                 ddgs = DDGS()
                 results = await loop.run_in_executor(
                     None,
-                    lambda: list(ddgs.text(query, max_results=max_results))
+                    lambda: list(ddgs.text(query, region=DDG_REGION, safesearch="moderate", max_results=max_results))
                 )
                 _last_ddg_call = time.time()
                 return [{"title": r.get("title", ""), "url": r.get("href", ""), "snippet": r.get("body", "")}
@@ -970,7 +1044,7 @@ async def search_searxng(query: str, max_results: int = 5) -> List[Dict]:
         session = await _fetcher._get_session()
         async with session.get(
             f"{SEARXNG_URL}/search",
-            params={"q": query, "format": "json"},
+            params={"q": query, "format": "json", "language": SEARXNG_LANGUAGE, "safesearch": "1"},
             timeout=aiohttp.ClientTimeout(total=15),
         ) as resp:
             if resp.status != 200:
@@ -1241,6 +1315,7 @@ async def deep_search(
         if remainder:
             query = remainder
 
+    query = await rewrite_with_context(query)
     query = inject_query_date(query)
     cache_key = hash_query(query)
     skip_cache = content_has_currency_numbers(query)
@@ -1290,10 +1365,19 @@ async def deep_search(
                 continue
             seen.add(url)
             r["url"] = url
+            r["_q"] = q
             merged_results.append(r)
 
     if not merged_results:
         return {"sources": [], "context": "Поиск не дал результатов.", "search_performed": False}
+
+    # --- Гейт релевантности: сниппет должен покрывать ключевые слова ЕГО запроса ---
+    gated = [r for r in merged_results
+             if query_coverage(r.get("_q", query), f"{r.get('title', '')} {r.get('snippet', '')}") >= SEARCH_COVERAGE_MIN]
+    if not gated:
+        logger.info(f"[Search] нет релевантных результатов для '{query[:60]}'")
+        return {"sources": [], "context": "По запросу не найдено релевантных страниц.", "search_performed": False}
+    merged_results = gated
 
     # --- Ранжирование сниппетов: BM25 + доверие домена + свежесть ---
     snippet_texts = [f"{r.get('title', '')} {r.get('snippet', '')}" for r in merged_results]
@@ -1304,8 +1388,8 @@ async def deep_search(
         base += _recency_boost(r.get("published"), time_sensitive)
         scored.append((base, r))
     scored.sort(key=lambda x: x[0], reverse=True)
-    above_threshold = [r for s, r in scored if s >= MIN_RELEVANCE_THRESHOLD]
-    ordered_results = above_threshold if above_threshold else [r for _, r in scored]
+    # v4: порог больше не пускает «все подряд» — гейт выше уже отсёк нерелевантное
+    ordered_results = [r for _, r in scored]
 
     urls = [r["url"] for r in ordered_results if r.get("url")][:max_results]
     url_to_title = {r["url"]: r["title"] for r in merged_results}
@@ -1363,6 +1447,8 @@ async def deep_search(
         logger.info(f"[Search] слабый результат (score={best_score:.2f}), уточнение {refinements_done}: '{refined[:80]}'")
 
         refined_results, _ = await search_backends(refined, max_results)
+        refined_results = [r for r in refined_results
+                           if query_coverage(refined, f"{r.get('title', '')} {r.get('snippet', '')}") >= SEARCH_COVERAGE_MIN]
         if not refined_results:
             break
         r_scored = sorted(

@@ -2176,6 +2176,7 @@ class CognitiveController:
         # Подтягиваем изменения, сделанные другими процессами
         self.memory_service.refresh()
         self._last_activity_time = time.time()
+        self._set_search_context(message)
         if self.autonomy is not None:
             self.autonomy.on_user_message(message)
 
@@ -3013,6 +3014,19 @@ class CognitiveController:
         if value:
             self._exchange_log.append(value)
 
+    def _set_search_context(self, message: str) -> None:
+        """Отдаёт веб-поиску последние реплики диалога, чтобы «а что он сказал?» искался по теме."""
+        try:
+            from GCN.web_search import conversation_context
+            turns = [m for m in self.history[-8:] if m.get("role") in ("user", "assistant")]
+            if turns and turns[-1].get("role") == "user" and turns[-1].get("content") == message:
+                turns = turns[:-1]   # текущую реплику в контекст не кладём — её перепишет rewrite
+            lines = [f"{'Пользователь' if m['role'] == 'user' else 'Ассистент'}: "
+                     f"{str(m.get('content', ''))[:300]}" for m in turns[-4:]]
+            conversation_context.set("\n".join(lines))
+        except Exception:
+            pass
+
     async def stream_response(self, message: str, web_search: bool = False,
                               image_base64: str = None, image_mime: str = None,
                               reasoning: bool = False, char_by_char: bool = None,
@@ -3231,6 +3245,7 @@ class CognitiveController:
 
             await self._ensure_external_tools_registered()
 
+            self._set_search_context(message)
             # Если пользователь приложил фото, а модель его не «видит» — честно
             # предупреждаем в потоке: иначе молчаливый текстовый ответ на вопрос
             # про картинку выглядит как галлюцинация.

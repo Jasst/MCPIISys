@@ -251,6 +251,7 @@ const S = {
   rfMode: "focus",                              // показ связей: focus | все | nosyn
   pendingType: null, pendingTab: null,           // сохранённые настройки, которые ждут данных
   target: new Map(), hoverEdge: null, edgeSlot: new Map(),   // цели колец, связь под курсором, номер параллельной связи
+  pulses: [], act: new Map(), born: new Map(), bornSeeded: false, growing: false,   // импульсы, активация узлов, появление
 };
 
 /* ---------- тема — как в основном чате (тёмная по умолчанию, светлая по классу) ---------- */
@@ -788,11 +789,23 @@ function roundRectPath(x, y, w, h, r) {
   ctx.arcTo(x, y, x + w, y, r);
   ctx.closePath();
 }
+/* ширина текста кэшируется: measureText на каждую подпись каждый кадр — лишняя работа */
+const TW = new Map();
+function textW(text) {
+  const key = ctx.font + "|" + text;
+  let w = TW.get(key);
+  if (w === undefined) {
+    if (TW.size > 4000) TW.clear();
+    w = ctx.measureText(text).width;
+    TW.set(key, w);
+  }
+  return w;
+}
 /* подпись в «пилюле» — читается на любом фоне */
 function pill(text, x, y, strong) {
   ctx.save();
   ctx.font = (strong ? "600 12px" : "500 11px") + " Inter, system-ui, sans-serif";
-  const w = ctx.measureText(text).width + 12;
+  const w = textW(text) + 12;
   ctx.fillStyle = S.theme === "light" ? "rgba(255,255,255,0.9)" : "rgba(14,16,22,0.8)";
   roundRectPath(x - 6, y - 13, w, 19, 6);
   ctx.fill();
@@ -808,6 +821,33 @@ function drawBackdrop(w, h) {
   g.addColorStop(1, light ? "rgba(60,70,90,0.06)" : "rgba(0,0,0,0.35)");
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, w, h);
+}
+
+/* синапсы вне фокуса — одним штрихом на уровень веса: без градиента и save/restore на каждую связь */
+function drawSynapseBatch(list, dimNon) {
+  if (!list.length) return;
+  const buckets = new Map();
+  for (const it of list) {
+    const key = Math.min(4, Math.floor(Math.min(1, it.e.w) * 5));
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(it);
+  }
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.setLineDash([2, 4]);
+  ctx.strokeStyle = S.edgeColor;
+  for (const [key, items] of buckets) {
+    const wq = (key + 0.5) / 5;
+    ctx.globalAlpha = (0.35 + wq * 0.35) * 0.5 * dimNon;
+    ctx.lineWidth = 0.9 + wq;
+    ctx.beginPath();
+    for (const it of items) {
+      ctx.moveTo(it.x1, it.y1);
+      ctx.quadraticCurveTo(it.cx, it.cy, it.x2, it.y2);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 /* синапс: изогнутая линия; цвет — тип связи, либо градиент от цвета одного конца к другому */
@@ -871,16 +911,47 @@ function drawEdge(e, x1, y1, x2, y2, t, k) {
   }
 }
 
+/* форма тела по типу: помогает отличать типы не только цветом (и дальтоникам) */
+const SIDES = {concept: 6, evidence: 5, observation: 4, procedure: 4, goal: 3};
+function bodyPath(type, x, y, r) {
+  const sides = SIDES[type];
+  ctx.beginPath();
+  if (!sides) { ctx.arc(x, y, r, 0, Math.PI * 2); return; }
+  const rot = sides === 4 ? Math.PI / 4 : -Math.PI / 2;
+  for (let i = 0; i < sides; i++) {
+    const a = rot + (i * 2 * Math.PI) / sides;
+    const px = x + Math.cos(a) * r, py = y + Math.sin(a) * r;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+}
+
 /* нейрон: объёмное тело, ореол по доверию, кольцо доверия; возвращает радиус */
-function drawNode(id, n, p, k, t, dimOn) {
+function drawNode(id, n, p, k, t, dimOn, grow = 1) {
   const [x, y] = toScreen(p);
-  const rad = nodeRadius(n) * Math.min(1.6, Math.max(0.7, k));
+  const ease = 1 - Math.pow(1 - grow, 3);   // появление: узел вырастает от нуля
+  const rad = nodeRadius(n) * Math.min(1.6, Math.max(0.7, k)) * ease;
   const col = TYPE_COLORS[n.type] || S.nodeFill;
   const conf = Math.max(0, Math.min(1, n.confidence));
   const isSel = id === S.selected;
   const hub = S.degreeRank.has(id);
   const isGroup = n.type === "group";
   const a = dimOn ? 0.16 : 0.45 + 0.55 * conf;
+
+  // активация: мягкое свечение, гаснет за ACT_MS после прихода импульса
+  const actAt = S.act.get(id);
+  if (actAt !== undefined) {
+    const g2 = 1 - (performance.now() - actAt) / ACT_MS;
+    if (g2 > 0) {
+      ctx.save();
+      ctx.globalAlpha = 0.35 * g2 * (dimOn ? 0.3 : 1);
+      ctx.fillStyle = rgba(col, 1);
+      ctx.beginPath();
+      ctx.arc(x, y, rad + 4 + 10 * g2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
 
   // тело с бликом
   ctx.save();
@@ -893,8 +964,7 @@ function drawNode(id, n, p, k, t, dimOn) {
   g.addColorStop(0.55, rgba(col, 1));
   g.addColorStop(1, rgba(col, 0.7));
   ctx.fillStyle = g;
-  ctx.beginPath();
-  ctx.arc(x, y, rad, 0, Math.PI * 2);
+  bodyPath(n.type, x, y, rad);
   ctx.fill();
   ctx.restore();
 
@@ -963,13 +1033,65 @@ function drawNode(id, n, p, k, t, dimOn) {
   return rad;
 }
 
+/* ---------- импульсы: активация распространяется по связям ---------- */
+const PULSE_MS = 900, ACT_MS = 1500;
+function firePulse(e, delay) {
+  S.pulses.push({e, t0: performance.now() + delay});
+  if (S.pulses.length > 400) S.pulses.splice(0, S.pulses.length - 400);
+}
+/* от выбранной записи: импульсы по её видимым связям волной (по 40 мс на связь) */
+function spreadFrom(id) {
+  let i = 0;
+  for (const e of S.visibleEdges) {
+    if (e.s !== id && e.t !== id) continue;
+    if (edgeHidden(e)) continue;
+    firePulse(e, 40 * i++);
+  }
+  S.act.set(id, performance.now());
+}
+function drawPulses(now) {
+  for (const [id, at] of S.act) if (now - at > ACT_MS) S.act.delete(id);
+  const alive = [];
+  for (const p of S.pulses) {
+    if (now < p.t0) { alive.push(p); continue; }
+    const u = (now - p.t0) / PULSE_MS;
+    if (u >= 1) { S.act.set(p.e.t, now); continue; }   // импульс дошёл — цель активируется
+    alive.push(p);
+    const a = S.pos.get(p.e.s), b = S.pos.get(p.e.t);
+    if (!a || !b) continue;
+    const [x1, y1] = toScreen(a), [x2, y2] = toScreen(b);
+    const [cx, cy] = edgeCtrl(p.e, x1, y1, x2, y2);
+    const [x, y] = curvePt(x1, y1, cx, cy, x2, y2, u);
+    ctx.save();
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = "#ffffff";
+    ctx.shadowColor = rgba(TYPE_COLORS[nodeType(p.e.s)] || "#ffffff", 1);
+    ctx.shadowBlur = 10;
+    ctx.beginPath();
+    ctx.arc(x, y, 2.6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+  S.pulses = alive;
+}
+/* нужны ли кадры для эффектов (импульсы, затухающая активация) */
+function fxActive(now) {
+  if (S.pulses.length) return true;
+  for (const at of S.act.values()) if (now - at < ACT_MS) return true;
+  return false;
+}
+
 function draw() {
   const r = cv.getBoundingClientRect();
   S.cw = r.width; S.ch = r.height;
   ctx.clearRect(0, 0, r.width, r.height);
   if (!S.snap) return;
-  const t = performance.now() / 1000;
+  const nowMs = performance.now();
+  const t = nowMs / 1000;
   const k = S.view.k;
+  const firstDraw = !S.bornSeeded;   // узлы первой загрузки не «вырастают»
+  S.bornSeeded = true;
+  S.growing = false;
   drawBackdrop(r.width, r.height);
 
   // направляющие кольца иерархии: показывают уровни, от центра к периферии
@@ -991,14 +1113,23 @@ function draw() {
   const fid = focusId();
   neighSet = neighboursOf(fid);
 
-  // синапсы под нейронами
+  // синапсы под нейронами: вне фокуса — батчем, связи с фокусом и выбранная — как раньше
+  const dimNon = fid ? (S.selected ? 0.12 : 0.3) : S.selEdge ? 0.18 : 1;
+  const plain = [];
   for (const e of S.visibleEdges) {
     if (edgeHidden(e)) continue;
     const p = S.pos.get(e.s), q = S.pos.get(e.t);
     if (!p || !q) continue;
     const [x1, y1] = toScreen(p), [x2, y2] = toScreen(q);
+    const involved = !!fid && (e.s === fid || e.t === fid);
+    if (e.r === "synapse" && !involved && !isSelEdge(e)) {
+      const [cx, cy] = edgeCtrl(e, x1, y1, x2, y2);
+      plain.push({e, x1, y1, x2, y2, cx, cy});
+      continue;
+    }
     drawEdge(e, x1, y1, x2, y2, t, k);
   }
+  drawSynapseBatch(plain, dimNon);
 
   // подпись связи под курсором: «что с чем и как»
   if (S.hoverEdge && !S.selEdge) {
@@ -1011,6 +1142,8 @@ function draw() {
       pill(`${REL_RU[he.r] || he.r}: ${short(a ? a.subject : "", 26)} → ${short(b ? b.subject : "", 26)}`, mx + 6, my - 4, false);
     }
   }
+
+  drawPulses(nowMs);
 
   // нейроны и подписи
   const showLabels = k > 1.6;
@@ -1037,7 +1170,10 @@ function draw() {
     if (!n || !p) continue;
     const dimOn = fid ? (id !== fid && !isNeighbour(id))
       : S.selEdge ? !(id === S.selEdge.s || id === S.selEdge.t) : false;
-    const rad = drawNode(id, n, p, k, t, dimOn);
+    if (!S.born.has(id)) S.born.set(id, firstDraw ? nowMs - 1e6 : nowMs);
+    const grow = Math.min(1, (nowMs - S.born.get(id)) / 500);
+    if (grow < 1) S.growing = true;
+    const rad = drawNode(id, n, p, k, t, dimOn, grow);
     const label = n.subject.length > 40 ? n.subject.slice(0, 38) + "…" : n.subject;
     const [x, y] = toScreen(p);
     if (id === S.selected || id === S.hover || S.highlight.has(id)) {
@@ -1047,7 +1183,7 @@ function draw() {
       ctx.globalAlpha = 0.95;
       ctx.fillStyle = S.labelColor;
       ctx.font = "11px Inter, system-ui, sans-serif";
-      const lx = x + rad + 6, ly = y + 4, lw = ctx.measureText(label).width;
+      const lx = x + rad + 6, ly = y + 4, lw = textW(label);
       const box = {x0: lx - 2, x1: lx + lw + 2, y0: ly - 11, y1: ly + 3};
       const prio = S.degreeRank.has(id) || n.type === "group";
       const clash = labelClash(box);
@@ -1128,6 +1264,7 @@ function loop() {
   if (S.layout === "graph" && S.alpha >= 0.003) { tick(); hot = true; }   // силовая раскладка ещё «горячая»
   if (S.layout === "rings") hot = stepRings();                           // кольца плавно встают на место
   const anim = animating();   // пульсация и бегущий пунктир требуют кадров
+  if (S.growing || fxActive(performance.now())) hot = true;
   if (hot || S.redraw || anim) { S.redraw = false; draw(); }
   requestAnimationFrame(loop);
 }
@@ -1371,6 +1508,7 @@ function selectNode(id) {
   S.selected = id;
   S.selEdge = null;
   rebuildNeighbours();
+  if (id) spreadFrom(id);
   if (id) {
     loadDetail(id);
     if (TOUCH_MODE()) openSheet();
