@@ -116,6 +116,24 @@ def scan_models() -> List[Dict]:
     return out
 
 
+def find_mmproj(model_path: str) -> Optional[str]:
+    """Проектор зрения (mmproj*.gguf) рядом с моделью или None.
+    Без --mmproj llama-server отвечает 'image input is not supported' на любое фото."""
+    p = Path(model_path)
+    cands = [f for f in p.parent.glob("*.gguf") if "mmproj" in f.name.lower()]
+    if not cands:
+        return None
+    if len(cands) == 1:
+        return str(cands[0])
+
+    def tokens(s: str) -> set:
+        return set(re.findall(r"[a-z0-9]+", s.lower())) - {"mmproj", "gguf"}
+
+    model_tokens = tokens(p.stem)
+    best = max(cands, key=lambda f: len(tokens(f.stem) & model_tokens))
+    return str(best)
+
+
 def _find_model(model_id: str) -> Optional[Dict]:
     for m in scan_models():
         if m["id"] == model_id:
@@ -161,6 +179,7 @@ class LlamaServerManager:
         self._proc: Optional[subprocess.Popen] = None
         self._model_id: Optional[str] = None
         self._params: Optional[LoadParams] = None
+        self._mmproj: Optional[str] = None
         self._log_fp = None
 
     # --- состояние ---
@@ -179,6 +198,7 @@ class LlamaServerManager:
         self._proc = None
         self._model_id = None
         self._params = None
+        self._mmproj = None
         if self._log_fp is not None:
             try:
                 self._log_fp.close()
@@ -187,7 +207,8 @@ class LlamaServerManager:
             self._log_fp = None
 
     # --- аргументы командной строки ---
-    def build_args(self, model_path: str, alias: str, p: LoadParams) -> List[str]:
+    def build_args(self, model_path: str, alias: str, p: LoadParams,
+                   mmproj: Optional[str] = None) -> List[str]:
         # квантованный KV-кэш в llama.cpp требует flash attention
         fa = p.flash_attn or p.kv_cache_type != "f16"
         args = [
@@ -209,6 +230,8 @@ class LlamaServerManager:
             args += ["--cache-type-k", p.kv_cache_type, "--cache-type-v", p.kv_cache_type]
         if p.tensor_split:
             args += ["--tensor-split", p.tensor_split]
+        if mmproj:
+            args += ["--mmproj", mmproj]         # включает распознавание изображений
         if LLAMACPP_EXTRA_ARGS:
             args += shlex.split(LLAMACPP_EXTRA_ARGS)
         return args
@@ -224,7 +247,9 @@ class LlamaServerManager:
         p = (params or get_params(model_id)).normalized()
 
         await self.unload()                      # один процесс — старый сначала гасим
-        args = self.build_args(model["path"], model_id, p)
+        mmproj = find_mmproj(model["path"])
+        logger.info(f"mmproj для {model_id!r}: {mmproj or 'не найден (изображения не поддерживаются)'}")
+        args = self.build_args(model["path"], model_id, p, mmproj=mmproj)
         env = os.environ.copy()
         env["CUDA_DEVICE_ORDER"] = LLAMACPP_CUDA_DEVICE_ORDER   # порядок карт как в nvidia-smi
         logger.info(f"llama-server: запуск {model_id!r}")
@@ -235,6 +260,7 @@ class LlamaServerManager:
         self._proc = subprocess.Popen(args, stdout=self._log_fp, stderr=subprocess.STDOUT,
                                       env=env, creationflags=creation)
         self._model_id, self._params = model_id, p
+        self._mmproj = mmproj
         try:
             await self._wait_ready()
         except Exception:

@@ -212,7 +212,8 @@ from GCN.mcp_client_manager import MCPToolManager
 from GCN.GCN import KnowledgeObject, KnowledgeType, MemoryScope
 from GCN.memory_graph import CognitiveMemory, Fact, Goal, GCNMemoryRouter
 
-from GCN.llm_client import (call_llm, call_llm_raw, call_llm_stream, list_models, llm_model_var,
+from GCN.llm_client import (call_llm, call_llm_raw, call_llm_stream, model_supports_vision,
+                            list_models, llm_model_var,
                             list_models_cached, get_loaded_model, ensure_model_loaded,
                             schedule_preload, model_ops_lock,
                             set_desired_model, get_desired_model, schedule_reconcile,
@@ -3233,8 +3234,14 @@ class CognitiveController:
             # Если пользователь приложил фото, а модель его не «видит» — честно
             # предупреждаем в потоке: иначе молчаливый текстовый ответ на вопрос
             # про картинку выглядит как галлюцинация.
-            if image_base64 and not LM_STUDIO_VISION_SUPPORTED:
-                await push(f"data: {json.dumps({'warning': 'Текущая модель не поддерживает анализ изображений — фото не будет учтено в ответе'})}\n\n")
+            if image_base64:
+                # Проверяем реальную модель в LM Studio, а не захардкоженный флаг.
+                vision = await model_supports_vision() if LM_STUDIO_VISION_SUPPORTED else False
+                if vision is False:   # None (сервер не сообщил) — пробуем отправить
+                    await push(f"data: {json.dumps({'warning': 'Текущая модель не поддерживает анализ изображений — фото не будет учтено в ответе'})}\n\n")
+                    # Картинку не отправляем вовсе: иначе текстовая модель вернёт 500
+                    image_base64 = None
+                    image_mime = None
 
             # Классификация (без LLM) ДО подготовки сообщений: на быстром маршруте
             # пропускаем LLM-реранк памяти. force_slow считаем так же, как это делает

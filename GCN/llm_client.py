@@ -121,6 +121,9 @@ async def call_llm_raw(
 
                 error_text = await resp.text()
                 logger.error(f"LLM error {resp.status}: {error_text[:200]}")
+                if _is_image_unsupported(error_text):
+                    # Повтор не поможет — модель не умеет картинки
+                    return {"_error": VISION_UNSUPPORTED_MSG}
                 # tools может быть не поддержан бэкендом (400) — пробуем без tools один раз
                 if tools and resp.status == 400 and attempt == 0:
                     payload.pop("tools", None)
@@ -226,7 +229,11 @@ async def _call_llm_stream_once(
             if resp.status != 200:
                 error_text = await resp.text()
                 logger.error(f"Stream error {resp.status}: {error_text[:200]}")
-                yield {"kind": "content", "text": "[Ошибка LLM]"}
+                if _is_image_unsupported(error_text):
+                    yield {"kind": "content", "text": VISION_UNSUPPORTED_MSG}
+                else:
+                    yield {"kind": "content",
+                           "text": f"[Ошибка LLM: HTTP {resp.status}] {error_text[:200]}"}
                 return
             async for line in resp.content:
                 if not line:
@@ -278,9 +285,59 @@ async def _call_llm_stream_once(
     except asyncio.CancelledError:
         logger.debug("Stream cancelled")
         raise
+    except aiohttp.ClientConnectorError:
+        logger.error(f"LM Studio недоступна по адресу {LM_STUDIO_URL}")
+        yield {"kind": "content",
+               "text": "[Ошибка LLM: LM Studio недоступна. Запустите сервер и загрузите модель]"}
     except Exception as e:
         logger.error(f"Stream error: {e}")
         yield {"kind": "content", "text": f"[Ошибка: {e}]"}
+
+
+# ===== Проверка поддержки изображений =====
+VISION_UNSUPPORTED_MSG = (
+    "[Ошибка LLM: загруженная модель не принимает изображения. "
+    "Загрузите vision-модель (VLM) в LM Studio или отправьте запрос без фото]"
+)
+
+
+def _is_image_unsupported(error_text: str) -> bool:
+    low = (error_text or "").lower()
+    return "image input is not supported" in low or "mmproj" in low
+
+
+async def model_supports_vision() -> Optional[bool]:
+    """True/False по данным LM Studio (/api/v0/models, type == 'vlm').
+    None — если сервер недоступен или не сообщает о возможностях модели.
+    llama-server: поле modalities.vision из /props (есть только при загруженном --mmproj)."""
+    if _is_llamacpp():
+        try:
+            session = await _get_session()
+            async with session.get(LLAMACPP_URL.replace("/v1/chat/completions", "/props"),
+                                   timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+        except Exception:
+            return None
+        modalities = data.get("modalities")
+        if isinstance(modalities, dict) and "vision" in modalities:
+            return bool(modalities["vision"])
+        return None
+    try:
+        session = await _get_session()
+        async with session.get(_LMS_API_BASE + "/models", headers=_LMS_HEADERS,
+                               timeout=aiohttp.ClientTimeout(total=3)) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json()
+    except Exception:
+        return None
+    target = _model_name()
+    for m in data.get("data", []):
+        if m.get("id") == target:
+            return m.get("type") == "vlm"
+    return None
 
 
 async def call_llm_stream(
