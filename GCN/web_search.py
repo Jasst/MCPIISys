@@ -111,6 +111,8 @@ SEARXNG_LANGUAGE = os.getenv("SEARXNG_LANGUAGE", "ru")  # язык выдачи 
 # какая доля ключевых слов запроса должна встретиться в сниппете/заголовке
 SEARCH_COVERAGE_MIN = float(os.getenv("SEARCH_COVERAGE_MIN", "0.5"))
 REWRITE_MAX_WORDS = 6  # короче — почти наверняка пропуск темы, переписываем по контексту
+REWRITE_TIMEOUT = float(os.getenv("REWRITE_TIMEOUT", "6"))            # переписывание по контексту
+QUERY_EXPANDER_TIMEOUT = float(os.getenv("QUERY_EXPANDER_TIMEOUT", "20"))  # расширение запроса LLM
 
 _STOP_WORDS = frozenset({
     "что", "как", "это", "для", "при", "или", "все", "так", "где", "кто", "какой", "какая",
@@ -160,7 +162,7 @@ async def rewrite_with_context(query: str) -> str:
         )
         raw = await asyncio.wait_for(
             call_llm([{"role": "user", "content": prompt}], temp=0.0, max_tokens=60, retries=1),
-            timeout=6.0,
+            timeout=REWRITE_TIMEOUT,
         )
     except Exception as e:
         logger.debug(f"rewrite_with_context: {e}")
@@ -1327,27 +1329,28 @@ async def deep_search(
 
     time_sensitive = is_time_sensitive_query(query)
 
-    # --- v3: расширение запроса (параллельные формулировки) ---
+    # --- v4: поиск по исходному запросу стартует сразу, расширение идёт параллельно ---
     queries = [query]
-    if query_expander is not None:
+    base_task = asyncio.ensure_future(search_backends(query, max_results + 2))
+    exp_task = asyncio.ensure_future(query_expander(query)) if query_expander is not None else None
+    if exp_task is not None:
         try:
-            extra = await asyncio.wait_for(query_expander(query), timeout=8.0)
-            if extra:
-                for q in extra:
-                    q = (q or "").strip()
-                    if q and q.lower() != query.lower() and q not in queries:
-                        queries.append(q)
-                    if len(queries) >= MAX_EXPANDED_QUERIES:
-                        break
+            extra = await asyncio.wait_for(asyncio.shield(exp_task), timeout=QUERY_EXPANDER_TIMEOUT)
+            for q in extra or []:
+                q = (q or "").strip()
+                if q and q.lower() != query.lower() and q not in queries:
+                    queries.append(q)
+                if len(queries) >= MAX_EXPANDED_QUERIES:
+                    break
+        except asyncio.TimeoutError:
+            exp_task.cancel()
+            logger.info(f"[Search] расширение не ответило за {QUERY_EXPANDER_TIMEOUT:.0f} с, ищем только исходный запрос")
         except Exception as e:
             logger.debug(f"query_expander failed: {e}")
 
-    # --- Поиск по всем формулировкам параллельно ---
-    per_query = max(3, max_results // len(queries) + 1)
-    search_results = await asyncio.gather(
-        *[search_backends(q, per_query + 2) for q in queries],
-        return_exceptions=True,
-    )
+    # результат базового поиска уже готов или догоняет; дополнительные формулировки — рядом с ним
+    extra_tasks = [asyncio.ensure_future(search_backends(q, max_results + 2)) for q in queries[1:]]
+    search_results = await asyncio.gather(base_task, *extra_tasks, return_exceptions=True)
 
     merged_results: List[Dict] = []
     seen: set = set()
@@ -1372,18 +1375,25 @@ async def deep_search(
         return {"sources": [], "context": "Поиск не дал результатов.", "search_performed": False}
 
     # --- Гейт релевантности: сниппет должен покрывать ключевые слова ЕГО запроса ---
+    def _text_of(r: Dict) -> str:
+        return f"{r.get('title', '')} {r.get('snippet', '')}"
+
+    # двуязычный гейт: английская страница проходит по английской формулировке,
+    # русская — по русской; достаточно совпадения с любой из них
     gated = [r for r in merged_results
-             if query_coverage(r.get("_q", query), f"{r.get('title', '')} {r.get('snippet', '')}") >= SEARCH_COVERAGE_MIN]
+             if max(query_coverage(q2, _text_of(r)) for q2 in queries) >= SEARCH_COVERAGE_MIN]
     if not gated:
         logger.info(f"[Search] нет релевантных результатов для '{query[:60]}'")
         return {"sources": [], "context": "По запросу не найдено релевантных страниц.", "search_performed": False}
     merged_results = gated
+    rank_query = " ".join(queries)   # все формулировки сразу: английские фрагменты тоже получают очки
 
     # --- Ранжирование сниппетов: BM25 + доверие домена + свежесть ---
     snippet_texts = [f"{r.get('title', '')} {r.get('snippet', '')}" for r in merged_results]
-    bm = bm25_scores(query, snippet_texts)
+    bm = bm25_scores(rank_query, snippet_texts)
     scored = []
     for r, base in zip(merged_results, bm):
+        base += 2.0 * max(query_coverage(q2, _text_of(r)) for q2 in queries)
         base += domain_trust(r.get("url", ""))[1]
         base += _recency_boost(r.get("published"), time_sensitive)
         scored.append((base, r))
@@ -1402,7 +1412,7 @@ async def deep_search(
     if remaining <= 2.0:
         # Времени на чтение страниц нет — контекст из сниппетов
         sources, context_parts, best_score, _ = await _process_pages(
-            query, [(u, "", []) for u in urls], url_to_title, url_to_snippet,
+            rank_query, [(u, "", []) for u in urls], url_to_title, url_to_snippet,
             url_to_published, time_sensitive, 0, deadline=deadline,
         )
     else:
@@ -1411,7 +1421,7 @@ async def deep_search(
             urls, limit=PARALLEL_FETCH_LIMIT, deadline=fetch_deadline
         )
         sources, context_parts, best_score, _ = await _process_pages(
-            query, fetched, url_to_title, url_to_snippet, url_to_published,
+            rank_query, fetched, url_to_title, url_to_snippet, url_to_published,
             time_sensitive, MAX_EXTRA_HOPS, deadline=fetch_deadline,
         )
 
@@ -1474,7 +1484,7 @@ async def deep_search(
         )
         # score считаем по исходному запросу: только так он сравним с best_score
         new_sources, new_parts, new_best, _ = await _process_pages(
-            query, new_fetched, url_to_title, url_to_snippet, url_to_published,
+            rank_query, new_fetched, url_to_title, url_to_snippet, url_to_published,
             time_sensitive, 0, deadline=deadline - 1.0,
         )
         if new_best <= best_score:
