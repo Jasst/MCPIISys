@@ -1539,6 +1539,14 @@ class CognitiveController:
             logger.debug(f"Identity consistency check failed: {e}")
         return None
 
+    def _compute_prediction_error(self, predicted: List[str], actual: str) -> float:
+        if not predicted or not actual:
+            return 1.0
+        pred_text = " ".join(predicted)
+        sim = self.memory._compute_similarity(pred_text, actual)
+        error = 1.0 - min(1.0, sim * 1.5)
+        return max(0.0, min(1.0, error))
+
     async def _periodic_reflection(self):
         while True:
             await asyncio.sleep(self.reflection_interval)
