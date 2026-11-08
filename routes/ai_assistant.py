@@ -233,6 +233,10 @@ from GCN import memory_trust as mt
 from GCN.memory_graph import MemoryService
 
 from GCN.config_ai import ENABLE_CODE_SELF_REFLECTION
+from GCN.json_schema import (CONTRADICTION_RESPONSE_FORMAT, FACT_LIST_RESPONSE_FORMAT,
+                             CONTRADICTION_VERDICT_SCHEMA, validate as validate_json)
+from GCN.temporal import normalize_event_time
+from GCN.nli import NLIJudge
 # Импорт инструментов самоанализа кода
 if ENABLE_CODE_SELF_REFLECTION:
     from GCN.code_analyzer import get_analyzer
@@ -1773,6 +1777,8 @@ class CognitiveController:
                 trust_text = mt.trust_label(source, statuses)
                 if trust_text:
                     label = f"{label}, {trust_text}"
+                if fact.get("event_time"):
+                    label = f"{label}, событие {fact['event_time']}"
                 scope = fact.get("scope", "private")
                 scope_label = scope_labels.get(scope, scope)
                 # числа уверенности/важности модели не нужны: используются только для отбора выше
@@ -2438,7 +2444,7 @@ class CognitiveController:
                 [{"role": "user", "content":
                   base_prompt +
                   f"\n\nТЕКСТ (часть {i + 1}/{len(chunks)}):\n{chunk}"}],
-                temp=0.2, max_tokens=450,
+                temp=0.2, max_tokens=450, response_format=FACT_LIST_RESPONSE_FORMAT,
             )
             for i, chunk in enumerate(chunks)
         ]
@@ -2510,6 +2516,20 @@ class CognitiveController:
                 facts.append(s[:300])
         return facts[:20]
 
+    def _nli_label(self, text_a: str, text_b: str) -> Optional[str]:
+        """NLI-решение до LLM: entailment/neutral -> ложное противоречие. None — решает LLM."""
+        from GCN.config_ai import NLI_MODEL, NLI_LABELS, NLI_DECISION_THRESHOLD
+        judge = getattr(self, "_nli_judge", None)
+        if judge is None:
+            judge = self._nli_judge = NLIJudge(labels=NLI_LABELS, model_name=NLI_MODEL)
+        if not judge.available:
+            return None
+        try:
+            return judge.decide(text_a, text_b, NLI_DECISION_THRESHOLD)
+        except Exception as e:
+            logger.debug(f"NLI failed, fallback to LLM: {e}")
+            return None
+
     async def _verify_pending_contradictions(self, max_checks: int = 5):
         pairs = self.memory.get_unverified_contradictions(limit=max_checks)
         if not pairs:
@@ -2518,24 +2538,26 @@ class CognitiveController:
         actor = f"reflection:{self.user_id}"
         resolved = 0
         for fact_a, fact_b in pairs:
-            prompt = CONTRADICTION_VERIFY_PROMPT.format(text_a=fact_a.text, text_b=fact_b.text)
-            try:
-                raw = await self._bg_llm([{"role": "user", "content": prompt}], temp=0.0, max_tokens=150)
-            except Exception as e:
-                logger.warning(f"Contradiction verify LLM call failed ({fact_a.id},{fact_b.id}): {e}")
-                continue
-
-            # ИСПРАВЛЕНИЕ: пустой ответ LLM (сбой/таймаут LM Studio — call_llm возвращает "")
-            # — это не "плохой JSON", и спамить warning каждый цикл консолидации из-за
-            # этого не нужно. Реально невалидный (непустой) ответ логируем как раньше.
-            if not raw or not raw.strip():
-                logger.debug(f"Contradiction verify: пустой ответ LLM для пары ({fact_a.id},{fact_b.id}) — пропуск.")
-                continue
-
-            verdict = parse_llm_json(raw)
-            if not verdict or "relation" not in verdict:
-                logger.warning(f"Contradiction verify: bad JSON from LLM: {raw[:200]!r}")
-                continue
+            nli_label = self._nli_label(fact_a.text, fact_b.text)
+            if nli_label in ("entailment", "neutral"):
+                # NLI уверенно говорит, что утверждения не противоречат — LLM не вызываем
+                verdict = {"relation": "false_positive", "keep": "both", "reason": f"NLI: {nli_label}"}
+            else:
+                prompt = CONTRADICTION_VERIFY_PROMPT.format(text_a=fact_a.text, text_b=fact_b.text)
+                try:
+                    raw = await self._bg_llm([{"role": "user", "content": prompt}], temp=0.0, max_tokens=150,
+                                             response_format=CONTRADICTION_RESPONSE_FORMAT)
+                except Exception as e:
+                    logger.warning(f"Contradiction verify LLM call failed ({fact_a.id},{fact_b.id}): {e}")
+                    continue
+                if not raw or not raw.strip():
+                    logger.debug(f"Contradiction verify: пустой ответ LLM для пары ({fact_a.id},{fact_b.id}) — пропуск.")
+                    continue
+                verdict = parse_llm_json(raw)
+                ok, err = validate_json(verdict, CONTRADICTION_VERDICT_SCHEMA)
+                if not ok:
+                    logger.warning(f"Contradiction verify: ответ не прошёл схему ({err}): {raw[:200]!r}")
+                    continue
 
             relation = verdict.get("relation")
             reason = verdict.get("reason", "")
@@ -2974,9 +2996,11 @@ class CognitiveController:
                 if facts:
                     sanitized = intellect_mod.sanitize_search_facts(facts, all_evidence)
                     # Сохраняем через сервис — он сам разложит по scope
+                    _dates = {str(f.get("text", "")).strip(): f.get("date") for f in facts if isinstance(f, dict)}
                     for text, scope, conf in sanitized:
                         res = await self.memory_service.remember(
-                            text, scope=scope, confidence=conf
+                            text, scope=scope, confidence=conf,
+                            event_time=normalize_event_time(_dates.get(text)),
                         )
                         if res.get("id"):
                             saved_fact_ids.append(res["id"])

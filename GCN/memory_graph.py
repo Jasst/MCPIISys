@@ -35,6 +35,7 @@ from GCN import memory_trust as mt
 from collections import OrderedDict
 from GCN.plasticity import PlasticityParams, stdp_delta, stabilized_plasticity, normalize_strength
 from GCN.learned_rerank import RerankLearner
+from GCN.transition_model import TransitionModel, fit_with_gate
 
 logger = logging.getLogger(__name__)
 
@@ -952,6 +953,18 @@ class CognitiveMemory:
                 for nxt_key, prob in self.predictive_matrix[key].items():
                     candidates[nxt_key] += prob
 
+        transition = self._get_transition() if not exact_hit else None
+        if transition is not None and self.concept_embeddings and current_texts:
+            q = self._get_embedding(current_texts[-1], is_query=True)
+            if q is not None and np.any(q):
+                keys = list(self.concept_embeddings.keys())
+                cand = np.stack([np.asarray(self.concept_embeddings[k], dtype=float) for k in keys])
+                cand = cand / np.where(np.linalg.norm(cand, axis=1, keepdims=True) == 0, 1.0,
+                                       np.linalg.norm(cand, axis=1, keepdims=True))
+                pred = transition.predict(np.asarray(q, dtype=float))[0]
+                sims = cand @ pred
+                for idx in np.argsort(-sims)[:TRANSITION_TOP_K]:
+                    candidates[keys[idx]] += float(sims[idx])
         if not exact_hit and self.use_embeddings and self.concept_embeddings:
             for text in current_texts:
                 query_vec = self._get_embedding(text, is_query=True)
@@ -1063,6 +1076,49 @@ class CognitiveMemory:
         if touched:
             self._dirty = True
         return touched
+
+    def _get_transition(self) -> Optional["TransitionModel"]:
+        """Предиктор переходов: загружается с диска один раз; None, если не принят гейтом."""
+        if getattr(self, "_transition", None) is None and not getattr(self, "_transition_checked", False):
+            self._transition_checked = True
+            path = self.base_dir / "transition.npz"
+            if path.exists():
+                try:
+                    self._transition = TransitionModel.load(str(path))
+                except Exception as e:
+                    logger.debug(f"transition: не удалось загрузить модель: {e}")
+        return getattr(self, "_transition", None)
+
+    def _train_transition_model(self, max_pairs: int = 1000) -> Dict:
+        """Обучает предиктор на парах соседних реплик (user->assistant, assistant->следующий user).
+
+        Модель сохраняется только если на отложенной выборке она лучше базового уровня
+        (популярность концептов). Иначе предыдущая модель удаляется, и predict_next её не использует.
+        """
+        if not self.use_embeddings or not self.concept_embeddings or len(self.episodic_memory) < 25:
+            return {"accepted": False, "reason": "мало данных или нет эмбеддингов"}
+        eps = self.episodic_memory[-max_pairs:]
+        src_texts, tgt_texts = [], []
+        for i, ep in enumerate(eps):
+            src_texts.append(ep.user_msg); tgt_texts.append(ep.assistant_msg)
+            if i + 1 < len(eps):
+                src_texts.append(ep.assistant_msg); tgt_texts.append(eps[i + 1].user_msg)
+        X = np.array([self._get_embedding(t) for t in src_texts], dtype=float)
+        Y = np.array([self._get_embedding(t) for t in tgt_texts], dtype=float)
+        cand = np.stack([np.asarray(v, dtype=float) for v in self.concept_embeddings.values()])
+        model, report = fit_with_gate(X, Y, cand, k=TRANSITION_TOP_K)
+        path = self.base_dir / "transition.npz"
+        if model is not None:
+            self.base_dir.mkdir(parents=True, exist_ok=True)
+            model.save(str(path))
+            self._transition = model
+        else:
+            self._transition = None
+            if path.exists():
+                path.unlink()
+        self._transition_checked = True
+        logger.info(f"[transition] {report}")
+        return report
 
     def _scale_synapses(self) -> int:
         """Синаптическое масштабирование: суммарная входящая/исходящая сила узла ≤ SYNAPSE_NODE_STRENGTH_CAP."""
@@ -1304,6 +1360,7 @@ class CognitiveMemory:
                 "gcn_id": obj.id,
                 "scope": obj.scope.value,
                 "via": "graph",
+                "event_time": meta.get("event_time"),
             })
         return out
 
@@ -1406,6 +1463,7 @@ class CognitiveMemory:
                 "id": fid,
                 "text": text,
                 "type": item_type,
+                "event_time": meta.get("event_time") if isinstance(meta, dict) else None,
                 "timestamp": obj.created.timestamp(),
                 "score": final_score,
                 "relevance": det["relevance"],
@@ -1600,6 +1658,10 @@ class CognitiveMemory:
                         self._hebbian_update(ass_fact.id, user_fact.id, post_ass, pre_user)
 
             # Синаптическое масштабирование: не даём хабам бесконечно копить силу
+            try:
+                self._train_transition_model()
+            except Exception as e:
+                logger.debug(f"transition training failed: {e}")
             self._scale_synapses()
 
             # Обновляем confidence и importance
@@ -2296,7 +2358,7 @@ class GCNMemoryRouter:
     def add_knowledge(self, subject: str, predicate: str, obj: Any,
                       scope: MemoryScope = MemoryScope.PRIVATE,
                       confidence: float = 0.5, author: Optional[str] = None,
-                      source_type: str = "user_input") -> str:
+                      source_type: str = "user_input", event_time: Optional[str] = None) -> str:
         """
         Добавляет знание в соответствующий слой с учётом scope.
         Для GLOBAL использует инжекшн (дедупликация, агрегация).
@@ -2310,7 +2372,8 @@ class GCNMemoryRouter:
             type=KnowledgeType.CLAIM,
             subject=subject,
             predicate=predicate,
-            object={"value": obj},
+            # event_time — когда произошло описанное (отдельно от created и last_accessed)
+            object=({"value": obj, "event_time": event_time} if event_time else {"value": obj}),
             author=author,
             created=datetime.now(timezone.utc),
             confidence=confidence,
@@ -2676,6 +2739,7 @@ class MemoryService:
             confidence: float = 0.9,
             force_new: bool = False,
             user_explicit: bool = False,
+            event_time: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Сохраняет факт в указанный скоуп (автоопределение, если scope не задан).
@@ -2776,7 +2840,8 @@ class MemoryService:
             scope=scope_enum,
             confidence=confidence,
             author=self.user_id,
-            source_type="memory_service"
+            source_type="memory_service",
+            event_time=event_time,
         )
         # Добавляем в рабочую память соответствующего слоя
         if obj_id:

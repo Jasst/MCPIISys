@@ -92,6 +92,7 @@ async def call_llm_raw(
     tools: Optional[List[Dict]] = None,
     retries: int = 3,
     think: bool = False,
+    response_format: Optional[Dict] = None,
 ) -> Dict:
     """
     Возвращает сырой объект message от LLM целиком (не только content), чтобы
@@ -106,6 +107,8 @@ async def call_llm_raw(
         "temperature": temp,
         "max_tokens": max_tokens
     }
+    if response_format:
+        payload["response_format"] = response_format
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
@@ -124,6 +127,11 @@ async def call_llm_raw(
                 if _is_image_unsupported(error_text):
                     # Повтор не поможет — модель не умеет картинки
                     return {"_error": VISION_UNSUPPORTED_MSG}
+                # бэкенд не понимает response_format (400) — повторяем без него; разбор и схема остаются
+                if "response_format" in payload and resp.status == 400:
+                    payload.pop("response_format", None)
+                    logger.warning("LLM: бэкенд отклонил response_format, повтор без схемы")
+                    continue
                 # tools может быть не поддержан бэкендом (400) — пробуем без tools один раз
                 if tools and resp.status == 400 and attempt == 0:
                     payload.pop("tools", None)
@@ -151,6 +159,7 @@ async def call_llm(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     retries: int = 3,
     include_reasoning: bool = False,
+    response_format: Optional[Dict] = None,
 ) -> str:
     """Универсальный вызов локальной LLM (LM Studio) — только текст ответа.
 
@@ -161,7 +170,8 @@ async def call_llm(
     чтобы reasoning не путал парсеры.
     """
     msg = await call_llm_raw(messages, temp=temp, max_tokens=max_tokens,
-                             tools=None, retries=retries, think=include_reasoning)
+                             tools=None, retries=retries, think=include_reasoning,
+                             response_format=response_format)
     content = msg.get("content", "") or ""
     if not include_reasoning:
         # служебный вызов: рассуждения, которые модель вывела в content, не должны

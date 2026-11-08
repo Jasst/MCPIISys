@@ -732,4 +732,11 @@ def _apply_calibration_overrides():
         if isinstance(_data.get(_key), (int, float)):
             g[_key] = float(_data[_key])
 
+# NLI для противоречий: без NLI_MODEL используется только LLM-верификатор
+NLI_MODEL = os.getenv("NLI_MODEL", "")
+NLI_LABELS = tuple(x.strip() for x in os.getenv("NLI_LABELS", "contradiction,entailment,neutral").split(","))
+NLI_DECISION_THRESHOLD = float(os.getenv("NLI_DECISION_THRESHOLD", "0.85"))
+# Предиктор переходов: сколько кандидатов учитывать при предсказании
+TRANSITION_TOP_K = int(os.getenv("TRANSITION_TOP_K", "5"))
+
 _apply_calibration_overrides()
