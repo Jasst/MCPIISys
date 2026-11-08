@@ -32,10 +32,29 @@ from GCN.GCN import (
 
 from GCN.llm_client import call_llm
 from GCN import memory_trust as mt
+from collections import OrderedDict
+from GCN.plasticity import PlasticityParams, stdp_delta, stabilized_plasticity, normalize_strength
+from GCN.learned_rerank import RerankLearner
 
 logger = logging.getLogger(__name__)
 
 from GCN.config_ai import *  # единственный источник конфигурации (fallback-дубль констант удалён)
+
+
+def _plasticity_params() -> PlasticityParams:
+    return PlasticityParams(
+        ltp=STDP_LONG_TERM_POTENTIATION, ltd=STDP_LONG_TERM_DEPRESSION,
+        window=STDP_TIME_WINDOW, base_rate=HEBBIAN_LEARNING_RATE,
+        floor=PLASTICITY_FLOOR, stabilize_k=PLASTICITY_STABILIZE_K,
+        initial_plasticity=0.5,
+    )
+
+
+def _clip01(x) -> float:
+    try:
+        return max(0.0, min(1.0, float(x)))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 # =====================================================================
@@ -105,6 +124,9 @@ class Episode:
     # полей; тогда используется прежний textual fallback (см. deep_consolidation).
     user_fact_id: Optional[int] = None
     assistant_fact_id: Optional[int] = None
+    # Реальные времена реплик (секунды). None — для старых данных; тогда используется fallback.
+    user_ts: Optional[float] = None
+    assistant_ts: Optional[float] = None
 
 
 @dataclass
@@ -793,12 +815,19 @@ class CognitiveMemory:
                     if fact.id in (s, t):
                         syn.weight = max(SYNAPSE_MIN_WEIGHT, syn.weight * 0.5)
                         self._sync_synapse_to_gcn(s, t)
+        # Обучение весов ранжирования по обратной связи: признаки того поиска, который показал этот факт
+        feats = (getattr(self, "_retrieval_features", None) or {}).get(gcn_id)
+        if feats is not None:
+            rr = self._get_reranker()
+            rr.feedback(feats, verdict)
+            self._dynamic_weights.update(rr.weights())
         self._dirty = True
         return {"confidence": round(new_conf, 4), "status": status}
 
     # ==================== ЭПИЗОДЫ ====================
-    async def add_episode(self, user_msg: str, assistant_msg: str, salience: float = 0.0):
-        """Добавляет эпизод в GCN и локальный кэш."""
+    async def add_episode(self, user_msg: str, assistant_msg: str, salience: float = 0.0,
+                          user_ts: Optional[float] = None, assistant_ts: Optional[float] = None):
+        """Добавляет эпизод в GCN и локальный кэш. user_ts/assistant_ts — времена реплик, если известны."""
         user_id_gcn, ass_id_gcn = self.gcn_store.add_episode(user_msg, assistant_msg, self.user_id, salience)
 
         # Создаём локальные факты (как раньше) для совместимости
@@ -823,6 +852,8 @@ class CognitiveMemory:
             salience=salience,
             user_fact_id=user_fid,
             assistant_fact_id=assistant_fid,
+            user_ts=user_ts,
+            assistant_ts=assistant_ts,
         )
         self._next_episode_id += 1
         self.episodic_memory.append(episode)
@@ -830,7 +861,22 @@ class CognitiveMemory:
             self.episodic_memory.sort(key=lambda e: (e.importance, e.timestamp), reverse=True)
             self.episodic_memory = self.episodic_memory[:EPISODIC_MAX_SIZE]
 
+        # Консолидация по порогу эпизодов (а не только по таймеру): граф учится сразу после накопления.
+        self._episodes_since_deep = getattr(self, "_episodes_since_deep", 0) + 1
+        if (self._episodes_since_deep >= DEEP_CONSOLIDATION_EPISODE_TRIGGER
+                and not getattr(self, "_deep_task_running", False)):
+            self._deep_task_running = True
+            asyncio.create_task(self._run_triggered_consolidation())
+
         await self._schedule_save()
+
+    async def _run_triggered_consolidation(self):
+        try:
+            await self.deep_consolidation()
+        except Exception as e:
+            logger.debug(f"triggered consolidation failed: {e}")
+        finally:
+            self._deep_task_running = False
 
     # ==================== ПРЕДСКАЗАТЕЛЬНАЯ МОДЕЛЬ ====================
     def _concept_key(self, text: str, top_n: int = 5) -> Optional[str]:
@@ -929,48 +975,29 @@ class CognitiveMemory:
         return [self.concept_examples.get(k, k) for k, _ in sorted_candidates]
 
     # ==================== HEBBIAN / STDP ====================
-    def _hebbian_update(self, source_id: int, target_id: int, coactivation_time: float):
-        """Обновляет вес синапса source->target по правилу STDP/Hebbian.
+    def _hebbian_update(self, source_id: int, target_id: int, pre_time: float, post_time: float):
+        """Обновляет вес source->target по STDP по реальным временам событий обоих узлов.
 
-        ИСПРАВЛЕНИЕ (мёртвые параметры конфигурации): STDP_LONG_TERM_POTENTIATION /
-        STDP_LONG_TERM_DEPRESSION, SYNAPSE_PLASTICITY_RATE и
-        SYNAPSE_COACTIVATION_THRESHOLD были объявлены в config_ai.py, но нигде не
-        читались — обе ветки STDP использовали один и тот же STDP_LEARNING_RATE
-        (депрессия отличалась только произвольным множителем 0.5), а
-        Synapse.plasticity выставлялось при создании и больше никогда не менялось:
-        метапластичности не было — часто подтверждаемые и совсем новые связи
-        учились с одинаковой скоростью.
-        Теперь: LTP и LTD используют раздельные константы; величина изменения
-        масштабируется текущей пластичностью синапса; синапсы, накопившие много
-        значимых совместных активаций, постепенно теряют пластичность
-        (стабилизируются) — так базовые, многократно подтверждённые ассоциации не
-        размываются каждым новым шумным сигналом, а действительно новые связи
-        остаются пластичными и быстро обучаются.
+        ИСПРАВЛЕНИЕ: раньше dt считался от last_activation самого синапса, а не от момента
+        пре- и постсинаптического события, поэтому окно STDP почти никогда не срабатывало
+        и правило работало как счётчик. Теперь dt = post_time - pre_time, направления
+        учитываются отдельно. Пластичность стабилизируется по числу подтверждённых
+        совпадений (GCN/plasticity.py).
         """
         key = (source_id, target_id)
         if key not in self.synapses:
             return
         syn = self.synapses[key]
-        dt = coactivation_time - syn.last_activation
-        plastic = max(0.05, syn.plasticity)
-        if dt > 0 and dt < STDP_TIME_WINDOW:
-            # Пост-событие следует за пре-событием в разумном окне — потенциация.
-            delta = STDP_LONG_TERM_POTENTIATION * (1.0 - dt / STDP_TIME_WINDOW) * plastic
-        elif dt < 0 and abs(dt) < STDP_TIME_WINDOW:
-            # Обратный порядок — депрессия (в норме слабее и медленнее LTP).
-            delta = -STDP_LONG_TERM_DEPRESSION * (1.0 - abs(dt) / STDP_TIME_WINDOW) * plastic
-        else:
-            delta = HEBBIAN_LEARNING_RATE * 0.1 * plastic
+        params = _plasticity_params()
+        delta = stdp_delta(post_time - pre_time, syn.plasticity, params)
         syn.weight = min(SYNAPSE_MAX_WEIGHT, max(SYNAPSE_MIN_WEIGHT, syn.weight + delta))
-        syn.last_activation = coactivation_time
+        syn.pre_time = pre_time
+        syn.post_time = post_time
+        syn.last_activation = max(syn.last_activation, post_time)
+        syn.last_coactivation = post_time
         syn.coactivation_count += 1
-        syn.last_coactivation = coactivation_time
         syn.confidence = min(1.0, syn.confidence + 0.01)
-        # Метапластичность: значимое по модулю изменение постепенно "остужает" синапс.
-        if abs(delta) >= SYNAPSE_COACTIVATION_THRESHOLD * STDP_LONG_TERM_POTENTIATION:
-            syn.plasticity = max(0.05, syn.plasticity - SYNAPSE_PLASTICITY_RATE)
-        self._sync_synapse_to_gcn(source_id, target_id)
-        self._dirty = True
+        syn.plasticity = stabilized_plasticity(syn.coactivation_count, params)
 
     def _get_effective_weight(self, syn: Synapse, now: Optional[float] = None) -> float:
         if now is None:
@@ -1036,6 +1063,58 @@ class CognitiveMemory:
         if touched:
             self._dirty = True
         return touched
+
+    def _scale_synapses(self) -> int:
+        """Синаптическое масштабирование: суммарная входящая/исходящая сила узла ≤ SYNAPSE_NODE_STRENGTH_CAP."""
+        weights = {k: s.weight for k, s in self.synapses.items()}
+        changed = normalize_strength(weights, SYNAPSE_NODE_STRENGTH_CAP, min_weight=SYNAPSE_MIN_WEIGHT)
+        for key in changed:
+            self.synapses[key].weight = weights[key]
+            self._sync_synapse_to_gcn(*key)
+        if changed:
+            self._dirty = True
+        return len(changed)
+
+    def _get_reranker(self) -> RerankLearner:
+        """Онлайн-обучение весов гибридного поиска. Создаётся при первом обращении и грузит сохранённые веса."""
+        rr = getattr(self, "_rerank", None)
+        if rr is None:
+            prior = {"semantic": HYBRID_WEIGHT_SEMANTIC, "graph": HYBRID_WEIGHT_GRAPH,
+                     "freshness": HYBRID_WEIGHT_FRESHNESS, "confidence": HYBRID_WEIGHT_CONFIDENCE,
+                     "evidence": HYBRID_WEIGHT_EVIDENCE}
+            path = None
+            try:
+                self.base_dir.mkdir(parents=True, exist_ok=True)
+                path = str(self.base_dir / "rerank.json")
+            except OSError as e:
+                logger.warning(f"rerank: каталог недоступен, веса не сохранятся: {e}")
+            rr = RerankLearner(prior, lr=RERANK_LEARNING_RATE, l2=RERANK_L2, path=path)
+            self._rerank = rr
+            self._dynamic_weights.update(rr.weights())
+        return rr
+
+    def _record_retrieval_features(self, result: List[Dict]) -> None:
+        """Запоминает признаки каждого результата поиска, чтобы обратная связь могла обучить веса."""
+        store = getattr(self, "_retrieval_features", None)
+        if store is None:
+            store = self._retrieval_features = OrderedDict()
+        now = time.time()
+        for item in result:
+            gid = item.get("gcn_id")
+            obj = self.gcn_store.get(gid) if gid else None
+            if obj is None:
+                continue
+            age_days = max(0.0, (now - obj.created.timestamp()) / 86400.0)
+            store[gid] = {
+                "semantic": _clip01(item.get("semantic_sim", 0.0)),
+                "graph": _clip01(item.get("activation", 0.0)),
+                "freshness": 1.0 / (1.0 + age_days),
+                "confidence": _clip01(obj.confidence),
+                "evidence": _clip01(len(obj.evidence or []) / 3.0),
+            }
+            store.move_to_end(gid)
+        while len(store) > RETRIEVAL_FEATURE_CACHE_SIZE:
+            store.popitem(last=False)
 
     def _sync_synapse_to_gcn(self, src: int, tgt: int):
         syn = self.synapses.get((src, tgt))
@@ -1252,6 +1331,7 @@ class CognitiveMemory:
             query_vector = self._get_embedding(query, is_query=True).tolist()
 
         # Адаптивные веса по типу запроса (логика прежняя).
+        self._get_reranker()  # подхватывает выученные веса после перезапуска
         weights = self._dynamic_weights.copy()
         if self._is_time_sensitive(query):
             weights['freshness'] = min(0.8, weights.get('freshness', 0.15) + 0.3)
@@ -1344,6 +1424,7 @@ class CognitiveMemory:
                 {r["gcn_id"] for r in result}, activation_map,
                 exclude=set(seed_local_ids)))
 
+        self._record_retrieval_features(result)
         self._cache[cache_key] = (result, time.time())
         if len(self._cache) > self._cache_maxsize:
             oldest = sorted(self._cache.items(), key=lambda x: x[1][1])[0][0]
@@ -1476,6 +1557,7 @@ class CognitiveMemory:
 
     async def deep_consolidation(self):
         async with self._lock:
+            self._episodes_since_deep = 0
             # Обновляем веса синапсов на основе эпизодов (локально)
             if self.episodic_memory:
                 self.episodic_memory.sort(key=lambda e: (e.importance * (1 + e.salience), e.timestamp), reverse=True)
@@ -1510,8 +1592,15 @@ class CognitiveMemory:
                         # Разносим "пре" (user) и "пост" (assistant) на 1 секунду —
                         # реальный порядок реплик внутри эпизода нам известен, даже без
                         # точных временных меток на каждую реплику в отдельности.
-                        self._hebbian_update(user_fact.id, ass_fact.id, ep.timestamp + 1.0)
-                        self._hebbian_update(ass_fact.id, user_fact.id, ep.timestamp)
+                        pre_user = ep.user_ts if ep.user_ts is not None else ep.timestamp - 1.0
+                        post_ass = ep.assistant_ts if ep.assistant_ts is not None else ep.timestamp
+                        # user -> assistant: пре=реплика пользователя, пост=ответ (dt>0 -> LTP)
+                        self._hebbian_update(user_fact.id, ass_fact.id, pre_user, post_ass)
+                        # assistant -> user: пре=ответ, пост=реплика пользователя (dt<0 -> LTD)
+                        self._hebbian_update(ass_fact.id, user_fact.id, post_ass, pre_user)
+
+            # Синаптическое масштабирование: не даём хабам бесконечно копить силу
+            self._scale_synapses()
 
             # Обновляем confidence и importance
             now = time.time()
@@ -3091,12 +3180,15 @@ class MemoryService:
         ]
 
     # ===== ДОБАВЛЕННЫЙ МЕТОД =====
-    async def add_episode(self, user_msg: str, assistant_msg: str, salience: float = 0.0):
+    async def add_episode(self, user_msg: str, assistant_msg: str, salience: float = 0.0,
+                          user_ts: Optional[float] = None, assistant_ts: Optional[float] = None):
         """
         Сохраняет эпизод (диалог) в личную память пользователя.
+        user_ts / assistant_ts — реальные времена реплик; без них STDP использует fallback.
         """
         self.refresh()
-        await self.private_memory.add_episode(user_msg, assistant_msg, salience)
+        await self.private_memory.add_episode(user_msg, assistant_msg, salience,
+                                              user_ts=user_ts, assistant_ts=assistant_ts)
 
     async def shutdown(self):
         """

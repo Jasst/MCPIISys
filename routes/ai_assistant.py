@@ -1493,67 +1493,47 @@ class CognitiveController:
             return None
         return note[:400]
 
+    def _identity_head_text(self) -> Optional[str]:
+        """Текст текущей версии ТЕКУЩЕЕ_Я: последний валидный голос identity-цепочки в shared-слое."""
+        from GCN.GCN import get_latest_head, IdentitySnapshot
+        head = get_latest_head(self.router.shared_memory.store)
+        if head is None:
+            return None
+        return IdentitySnapshot.from_object(head).content or None
+
     async def _verify_identity_consistency(self, response: str) -> Optional[str]:
-        """
-        ПУНКТ №4 (Совесть): Проверяет, не происходит ли смыслового дрейфа.
-        Считает косинусную близость между вектором ответа и векторами Ядра памяти.
+        """Критик идентичности: сравнивает ответ с текущей версией ТЕКУЩЕЕ_Я.
+
+        ИСПРАВЛЕНИЕ: раньше сравнение шло с центроидом топ-5 фактов по топологии синапсов,
+        а не с цепочкой идентичности, и каждый эмбеддинг считался дважды. Теперь один
+        эмбеддинг текста идентичности и один эмбеддинг ответа; порог калиброван по
+        размеченным парам (IDENTITY_CONSISTENCY_THRESHOLD, tools/calibrate_thresholds.py).
         """
         from GCN.config_ai import IDENTITY_CONSISTENCY_THRESHOLD
         if not response or len(response.split()) < 15:
             return None
-
         try:
-            # 1. Получаем Ядро (gcn_id самых важных фактов)
-            core_gcn_ids = await self.memory.identify_core(top_k=5)
-            if not core_gcn_ids:
-                return None  # Память пуста, ядра нет, проверять нечего
-
-            # 2. Собираем тексты ядра и их эмбеддинги
-            core_texts = []
-            for gid in core_gcn_ids:
-                obj = self.memory.store.get(gid)
-                if obj:
-                    core_texts.append(obj.subject)
-
-            if not core_texts:
+            identity_text = self._identity_head_text()
+            if not identity_text:
                 return None
-
-            # 3. Считаем центроид (средний вектор) Ядра
-            core_embeddings = [self.memory.embed_text(t) for t in core_texts if self.memory.embed_text(t)]
-            if not core_embeddings:
+            resp_vec = self.memory.embed_text(response)
+            id_vec = self.memory.embed_text(identity_text)
+            if not resp_vec or not id_vec:
                 return None
-
             import numpy as np
-            core_centroid = np.mean(core_embeddings, axis=0)
-
-            # 4. Эмбеддим ответ и считаем близость к центроиду
-            response_emb = np.array(self.memory.embed_text(response))
-            core_norm = np.linalg.norm(core_centroid)
-            resp_norm = np.linalg.norm(response_emb)
-
-            if core_norm == 0 or resp_norm == 0:
+            a = np.asarray(resp_vec, dtype=float)
+            b = np.asarray(id_vec, dtype=float)
+            denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+            if denom == 0.0:
                 return None
-
-            similarity = float(np.dot(response_emb, core_centroid) / (core_norm * resp_norm))
-
-            # 5. Если ответ слишком далек от Ядра — помечаем как дрейф
+            similarity = float(a @ b) / denom
             if similarity < IDENTITY_CONSISTENCY_THRESHOLD:
-                logger.warning(f"[IdentityCritic] Смысловой дрейф! Similarity to core: {similarity:.2f}")
-                return f"ответ слабо связан с моим базовым ядром идентичности (сходство {similarity:.2f}) — возможна потеря контекста или пустая болтовня."
-
+                logger.warning(f"[IdentityCritic] Смысловой дрейф от ТЕКУЩЕЕ_Я: сходство {similarity:.2f}")
+                return (f"ответ слабо связан с моей текущей версией идентичности "
+                        f"(сходство {similarity:.2f}) — возможен смысловой дрейф.")
         except Exception as e:
             logger.debug(f"Identity consistency check failed: {e}")
-            return None
-
         return None
-
-    def _compute_prediction_error(self, predicted: List[str], actual: str) -> float:
-        if not predicted or not actual:
-            return 1.0
-        pred_text = " ".join(predicted)
-        sim = self.memory._compute_similarity(pred_text, actual)
-        error = 1.0 - min(1.0, sim * 1.5)
-        return max(0.0, min(1.0, error))
 
     async def _periodic_reflection(self):
         while True:
@@ -1780,6 +1760,7 @@ class CognitiveController:
             }
             lines = []
             shown_ids = []
+            from GCN.config_ai import MEMORY_CONTEXT_MAX_CHARS as _mem_budget
             for fact in context_facts:
                 text = fact["text"][:300]
                 obj = self._memory_object_for(fact.get("gcn_id"))
@@ -1795,11 +1776,22 @@ class CognitiveController:
                 scope = fact.get("scope", "private")
                 scope_label = scope_labels.get(scope, scope)
                 # числа уверенности/важности модели не нужны: используются только для отбора выше
-                lines.append(f"- [{scope_label} {label}] {text}")
+                _line = f"- [{scope_label} {label}] {text}"
+                # бюджет контекста: факты идут по убыванию релевантности, лишние отбрасываем
+                if sum(len(x) for x in lines) + len(_line) > _mem_budget:
+                    break
+                lines.append(_line)
                 if fact.get("gcn_id"):
                     shown_ids.append(fact["gcn_id"])
             # запоминаем, что показано в этом ответе: по нему поймём поправку пользователя в следующем сообщении
             self._last_memory_gcn_ids = shown_ids
+            # Единая рабочая память: показанные модели факты становятся стартовыми узлами
+            # графового поиска (раньше две рабочие памяти расходились).
+            for _gid in shown_ids[:3]:
+                try:
+                    self.memory.hierarchy.add_to_working(_gid)
+                except Exception:
+                    pass
 
             # НОВОЕ: явно перечисляем непогашенные противоречия
             contradiction_lines = []
@@ -1905,6 +1897,7 @@ class CognitiveController:
 
         search_meta["context"] = search_context
         self._last_prepare_meta = {
+            "user_ts": time.time(),  # момент получения сообщения: нужен STDP для направления user->assistant
             "search_meta": search_meta,
             "search_context": search_context,
             "sources": sources,
@@ -2047,9 +2040,11 @@ class CognitiveController:
             salience = 1.0 - uncertainty
             # Эпизод (эмбеддинги + синапсы) и сохранение — в фоне: [DONE] и разблокировка
             # ввода не ждут тяжёлых вычислений памяти.
-            async def _persist_episode(_m=message, _r=stored_response, _s=salience):
+            _ut = self._last_prepare_meta.get("user_ts")
+            _at = time.time()
+            async def _persist_episode(_m=message, _r=stored_response, _s=salience, _ut=_ut, _at=_at):
                 try:
-                    await self.memory_service.add_episode(_m, _r, salience=_s)
+                    await self.memory_service.add_episode(_m, _r, salience=_s, user_ts=_ut, assistant_ts=_at)
                     await self.memory_service.private_memory._schedule_save()
                 except Exception as _pe:
                     logger.error(f"[finalize] фоновое сохранение эпизода не удалось: {_pe}")

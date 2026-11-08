@@ -119,7 +119,7 @@ DYNAMIC_WEIGHTS_ENABLED = True
 # и all-MiniLM-L6-v2. Для multilingual-e5-large используется 1024.
 # Реальная размерность берётся из model.get_sentence_embedding_dimension()
 # в memory_graph.py:CognitiveMemory.__init__().
-EMBEDDING_DIM = 384                # размерность векторов (по умолчанию для MiniLM)
+EMBEDDING_DIM = 1024               # multilingual-e5-large даёт 1024-мерные векторы (было 384 от MiniLM)
 USE_EMBEDDINGS = True
 GLOBAL_FACT_CONFIDENCE_THRESHOLD = 0.75
 
@@ -699,3 +699,37 @@ GRAPH_EXPANSION_MIN_ACTIVATION = float(os.getenv("GRAPH_EXPANSION_MIN_ACTIVATION
 GRAPH_EXPANSION_RELEVANCE = float(os.getenv("GRAPH_EXPANSION_RELEVANCE", "0.30"))
 MOTIVATION_MAX_ACTIVE = int(os.getenv("MOTIVATION_MAX_ACTIVE", "3"))
 MOTIVATION_MAX_PER_DAY = int(os.getenv("MOTIVATION_MAX_PER_DAY", "4"))
+
+# ====================================================================
+# Улучшения памяти и нейросетевой части (см. CHANGES.md)
+# ====================================================================
+# Синаптическое масштабирование: суммарная входящая/исходящая сила узла не выше этого значения
+SYNAPSE_NODE_STRENGTH_CAP = float(os.getenv("SYNAPSE_NODE_STRENGTH_CAP", "3.0"))
+# Метапластичность: пластичность = max(FLOOR, initial / (1 + K * подтверждения))
+PLASTICITY_FLOOR = float(os.getenv("PLASTICITY_FLOOR", "0.05"))
+PLASTICITY_STABILIZE_K = float(os.getenv("PLASTICITY_STABILIZE_K", "0.1"))
+# Консолидация по числу новых эпизодов (в дополнение к таймеру)
+DEEP_CONSOLIDATION_EPISODE_TRIGGER = int(os.getenv("DEEP_CONSOLIDATION_EPISODE_TRIGGER", "20"))
+# Онлайн-обучение весов ранжирования по обратной связи
+RERANK_LEARNING_RATE = float(os.getenv("RERANK_LEARNING_RATE", "0.01"))
+RERANK_L2 = float(os.getenv("RERANK_L2", "0.05"))
+RETRIEVAL_FEATURE_CACHE_SIZE = int(os.getenv("RETRIEVAL_FEATURE_CACHE_SIZE", "500"))
+# Бюджет символов блока долговременной памяти в промпте
+MEMORY_CONTEXT_MAX_CHARS = int(os.getenv("MEMORY_CONTEXT_MAX_CHARS", "3500"))
+
+# Калиброванные пороги (tools/calibrate_thresholds.py пишет GCN/calibration.json).
+# Если файла нет — остаются значения выше.
+def _apply_calibration_overrides():
+    import json as _json
+    _path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "calibration.json")
+    try:
+        with open(_path, "r", encoding="utf-8") as _fh:
+            _data = _json.load(_fh)
+    except (OSError, ValueError):
+        return
+    g = globals()
+    for _key in ("IDENTITY_HANDSHAKE_THRESHOLD", "IDENTITY_CONSISTENCY_THRESHOLD"):
+        if isinstance(_data.get(_key), (int, float)):
+            g[_key] = float(_data[_key])
+
+_apply_calibration_overrides()

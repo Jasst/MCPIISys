@@ -54,7 +54,7 @@ except ImportError:
     FAISS_NLIST = 200
     FAISS_NPROBE = 30
     FAISS_MIN_TRAIN_VECTORS = 500
-    EMBEDDING_DIM = 128
+    EMBEDDING_DIM = 1024
     WORKING_MEMORY_SIZE = 20        # <-- добавить fallback
     GCN_STATE_FILENAME = "gcn_state.json"
 
