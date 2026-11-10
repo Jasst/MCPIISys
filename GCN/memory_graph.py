@@ -8,6 +8,7 @@ spreading activation, predictive transitions, противоречия, конс
 
 import json
 import logging
+import os
 import time
 import re
 import asyncio
@@ -32,6 +33,9 @@ from GCN.GCN import (
 
 from GCN.llm_client import call_llm
 from GCN import memory_trust as mt
+from GCN import inhibition as inh
+from GCN import stabilizer as stab
+import statistics
 from collections import OrderedDict
 from GCN.plasticity import PlasticityParams, stdp_delta, stabilized_plasticity, normalize_strength
 from GCN.learned_rerank import RerankLearner
@@ -96,6 +100,8 @@ class Synapse:
     last_coactivation: float = 0.0
     pre_time: float = 0.0
     post_time: float = 0.0
+    # +1 возбуждающая, -1 тормозная. Хранится в GCN как отдельный тип связи "inhibit".
+    sign: int = 1
 
 
 @dataclass
@@ -432,7 +438,7 @@ class CognitiveMemory:
                     continue
                 tgt_int = tgt_fact.id
                 weight = self.gcn_store._graph.get_relation_weight(src_id, rel, tgt_id) or 0.5
-                if rel == "synapse":
+                if rel in ("synapse", "inhibit"):
                     key = (src_int, tgt_int)
                     if key not in self.synapses:
                         self.synapses[key] = Synapse(
@@ -441,7 +447,8 @@ class CognitiveMemory:
                             weight=weight,
                             last_activation=time.time(),
                             plasticity=0.5,
-                            confidence=0.5
+                            confidence=0.5,
+                            sign=-1 if rel == "inhibit" else 1,
                         )
                     self.graph[src_int].add(tgt_int)
 
@@ -689,7 +696,7 @@ class CognitiveMemory:
         candidates.sort(key=lambda x: -x[1])
         return candidates[:top_k]
 
-    def _create_synapse(self, src: int, tgt: int, weight: float = SYNAPSE_INITIAL_WEIGHT):
+    def _create_synapse(self, src: int, tgt: int, weight: float = SYNAPSE_INITIAL_WEIGHT, sign: int = 1):
         key = (src, tgt)
         if key in self.synapses:
             syn = self.synapses[key]
@@ -702,7 +709,8 @@ class CognitiveMemory:
                 weight=max(SYNAPSE_MIN_WEIGHT, min(SYNAPSE_MAX_WEIGHT, weight)),
                 last_activation=time.time(),
                 plasticity=0.5,
-                confidence=0.5
+                confidence=0.5,
+                sign=-1 if sign < 0 else 1,
             )
         self.graph[src].add(tgt)
         # Синхронизация через GCN link
@@ -710,7 +718,8 @@ class CognitiveMemory:
         fact_tgt = self.facts_by_id.get(tgt)
         if fact_src and fact_tgt and fact_src.gcn_id and fact_tgt.gcn_id:
             try:
-                self.gcn_store.link(fact_src.gcn_id, fact_tgt.gcn_id, "synapse", self.user_id,
+                self.gcn_store.link(fact_src.gcn_id, fact_tgt.gcn_id,
+                                    self._relation_for(self.synapses[key]), self.user_id,
                                     weight=self.synapses[key].weight)
             except Exception as e:
                 logger.debug(f"GCN link failed: {e}")
@@ -738,6 +747,11 @@ class CognitiveMemory:
                     other.confidence = self.gcn_store.compute_confidence(other.gcn_id)
                 except Exception as e:
                     logger.debug(f"Contradiction registration failed: {e}")
+                    continue
+                if INHIBITORY_SYNAPSES_ENABLED:
+                    # Противоречащие факты тормозят друг друга в активации, а не только помечены в выдаче.
+                    self._create_synapse(fact.id, other.id, weight=INHIBITORY_INITIAL_WEIGHT, sign=-1)
+                    self._create_synapse(other.id, fact.id, weight=INHIBITORY_INITIAL_WEIGHT, sign=-1)
 
     # ==================== ВЕРИФИКАЦИЯ ПРОТИВОРЕЧИЙ ====================
     def get_unverified_contradictions(self, limit: int = 5) -> List[Tuple['Fact', 'Fact']]:
@@ -1122,8 +1136,9 @@ class CognitiveMemory:
 
     def _scale_synapses(self) -> int:
         """Синаптическое масштабирование: суммарная входящая/исходящая сила узла ≤ SYNAPSE_NODE_STRENGTH_CAP."""
-        weights = {k: s.weight for k, s in self.synapses.items()}
-        changed = normalize_strength(weights, SYNAPSE_NODE_STRENGTH_CAP, min_weight=SYNAPSE_MIN_WEIGHT)
+        weights = {k: s.weight for k, s in self.synapses.items() if s.sign > 0}
+        cap = self._get_tune()["node_strength_cap"]
+        changed = normalize_strength(weights, cap, min_weight=SYNAPSE_MIN_WEIGHT)
         for key in changed:
             self.synapses[key].weight = weights[key]
             self._sync_synapse_to_gcn(*key)
@@ -1172,6 +1187,10 @@ class CognitiveMemory:
         while len(store) > RETRIEVAL_FEATURE_CACHE_SIZE:
             store.popitem(last=False)
 
+    @staticmethod
+    def _relation_for(syn: "Synapse") -> str:
+        return "inhibit" if syn.sign < 0 else "synapse"
+
     def _sync_synapse_to_gcn(self, src: int, tgt: int):
         syn = self.synapses.get((src, tgt))
         if not syn:
@@ -1181,7 +1200,7 @@ class CognitiveMemory:
         if fact_src and fact_tgt and fact_src.gcn_id and fact_tgt.gcn_id:
             try:
                 self.gcn_store.set_relation_weight(
-                    fact_src.gcn_id, fact_tgt.gcn_id, "synapse", syn.weight, self.user_id
+                    fact_src.gcn_id, fact_tgt.gcn_id, self._relation_for(syn), syn.weight, self.user_id
                 )
             except Exception as e:
                 logger.debug(f"GCN synapse sync failed: {e}")
@@ -1231,6 +1250,8 @@ class CognitiveMemory:
                     if neighbor in visited or neighbor not in self.facts_by_id:
                         continue
                     syn = self.synapses.get((fid, neighbor))
+                    if syn is not None and syn.sign < 0:
+                        continue  # тормозные связи в BFS не возбуждают, их учитываем ниже
                     weight = self._get_effective_weight(syn, now) if syn else 0.5
                     level_contrib[neighbor] += act * weight * decay
 
@@ -1245,6 +1266,21 @@ class CognitiveMemory:
                     break
             frontier = new_frontier
             depth += 1
+
+        # Тормозные связи: активный узел гасит другие активные узлы, с которыми связан тормозом.
+        # Затем падающие ниже порога узлы выбрасываются, кроме стартовых.
+        if INHIBITORY_SYNAPSES_ENABLED and activation_map:
+            inhibition: Dict[int, float] = defaultdict(float)
+            for fid, act in activation_map.items():
+                for neighbor in self.graph.get(fid, set()):
+                    syn = self.synapses.get((fid, neighbor))
+                    if syn is None or syn.sign >= 0 or neighbor not in activation_map:
+                        continue
+                    inhibition[neighbor] += act * self._get_effective_weight(syn, now) * decay
+            for nid, sub in inhibition.items():
+                activation_map[nid] = max(0.0, activation_map[nid] - sub)
+            activation_map = {k: v for k, v in activation_map.items()
+                              if v >= SPREADING_THRESHOLD or k in valid_seeds}
 
         for fid, act in activation_map.items():
             if fid in self.facts_by_id:
@@ -1476,6 +1512,8 @@ class CognitiveMemory:
             })
 
         result.sort(key=lambda x: x["score"], reverse=True)
+        if LATERAL_INHIBITION_ENABLED and self.use_embeddings and len(result) > 1:
+            result = self._lateral_inhibit(result)
         result = result[:top_k]
         if activation_map:
             result.extend(self._graph_expansions(
@@ -1488,6 +1526,37 @@ class CognitiveMemory:
             oldest = sorted(self._cache.items(), key=lambda x: x[1][1])[0][0]
             del self._cache[oldest]
         return result
+
+    def _lateral_inhibit(self, result: List[Dict]) -> List[Dict]:
+        """Латеральное торможение выдачи: почти одинаковые результаты гасят друг друга.
+
+        Меняется только порядок. Набор кандидатов и их скоры в памяти не трогаются.
+        Эмбеддинги текстов кандидатов кэшируются на время вызова.
+        """
+        texts = [(r.get("text") or "") for r in result]
+        vecs: List[Optional[np.ndarray]] = [None] * len(texts)
+        try:
+            prefix = EMBEDDING_PASSAGE_PREFIX
+            encoded = self.embedder.encode([f"{prefix}{t}" if prefix else t for t in texts],
+                                           convert_to_numpy=True, batch_size=len(texts))
+            for i, v in enumerate(encoded):
+                n = float(np.linalg.norm(v))
+                vecs[i] = v / n if n > 0 else None
+        except Exception as e:
+            logger.debug(f"lateral inhibition embeddings failed: {e}")
+
+        def similarity(i: int, j: int) -> float:
+            a, b = vecs[i], vecs[j]
+            if a is None or b is None:
+                return 0.0
+            return float(np.dot(a, b))
+
+        lam = self._get_tune()["lateral_lambda"]
+        reranked = inh.lateral_rerank(result, similarity,
+                                      threshold=LATERAL_INHIBITION_THRESHOLD, lam=lam)
+        for r in reranked:
+            r.pop("score_adj", None)
+        return reranked
 
     def _is_time_sensitive(self, query: str) -> bool:
         """
@@ -1663,6 +1732,11 @@ class CognitiveMemory:
             except Exception as e:
                 logger.debug(f"transition training failed: {e}")
             self._scale_synapses()
+            if INHIBITORY_SYNAPSES_ENABLED:
+                try:
+                    self._inhibitory_homeostasis()
+                except Exception as e:
+                    logger.debug(f"inhibitory homeostasis failed: {e}")
 
             # Обновляем confidence и importance
             now = time.time()
@@ -1691,8 +1765,95 @@ class CognitiveMemory:
                 self.semantic_facts = keep
                 self._remove_facts(removed_ids)
 
+            if STABILIZER_ENABLED:
+                try:
+                    self._stabilize_deterministic()
+                    if STABILIZER_AI_REVIEW and not getattr(self, "_stab_review_running", False):
+                        asyncio.create_task(self._ai_review_stabilizer())
+                except Exception as e:
+                    logger.debug(f"stabilizer failed: {e}")
+
             await self._schedule_save()
             logger.info(f"Deep consolidation done for {self.user_id[:16]}")
+
+    # ==================== ТОРМОЗНЫЕ СИНАПСЫ И СТАБИЛИЗАТОР ====================
+    def _state_path(self, name: str) -> str:
+        return str(self.base_dir / name)
+
+    def _get_tune(self) -> Dict[str, float]:
+        """Текущие подстраиваемые параметры. Без файла — значения из config_ai."""
+        tune = getattr(self, "_tune", None)
+        if tune is None:
+            base = getattr(self, "base_dir", None)
+            path = str(base / "stabilizer_state.json") if base is not None else None
+            if path and os.path.exists(path):
+                tune = stab.load_state(path)
+            else:
+                tune = {"lateral_lambda": LATERAL_INHIBITION_LAMBDA,
+                        "node_strength_cap": SYNAPSE_NODE_STRENGTH_CAP}
+            self._tune = tune
+        return tune
+
+    def _inhibitory_homeostasis(self) -> int:
+        """iSTDP-гомеостаз: тормоз растёт у узлов, активнее медианы, и слабеет у тихих."""
+        inh_items = [(k, s) for k, s in self.synapses.items() if s.sign < 0]
+        if not inh_items or not self.semantic_facts:
+            return 0
+        rates = {f.id: float(f.access_count) for f in self.semantic_facts}
+        top = max(rates.values()) or 1.0
+        norm = {fid: r / top for fid, r in rates.items()}
+        target = statistics.median(norm.values())
+        changed = 0
+        for (src, tgt), syn in inh_items:
+            post = norm.get(tgt, 0.0)
+            new_w = inh.clamp_inhibitory(
+                syn.weight + inh.inhibitory_delta(post, target, INHIBITORY_ETA), INHIBITORY_MAX_WEIGHT)
+            if abs(new_w - syn.weight) > 1e-9:
+                syn.weight = new_w
+                self._sync_synapse_to_gcn(src, tgt)
+                changed += 1
+        if changed:
+            self._dirty = True
+        return changed
+
+    def _stabilize_deterministic(self) -> None:
+        """Измеряет граф и готовит предложения правок. Ничего не применяет сам."""
+        edges = [(s.source_id, s.target_id, s.weight, s.sign) for s in self.synapses.values()]
+        total = len(self.semantic_facts) or 1
+        active = sum(1 for f in self.semantic_facts if f.activation > SPREADING_THRESHOLD) / total
+        self._stab_metrics = stab.compute_metrics(edges, active)
+        self._stab_proposals = stab.propose(self._stab_metrics, self._get_tune())
+
+    async def _ai_review_stabilizer(self) -> None:
+        """ИИ-рецензент: одобряет или отклоняет предложения. Не может добавлять свои правки."""
+        if getattr(self, "_stab_review_running", False):
+            return
+        self._stab_review_running = True
+        try:
+            async with self._lock:
+                metrics = getattr(self, "_stab_metrics", None)
+                proposals = list(getattr(self, "_stab_proposals", []) or [])
+            if metrics is None or not proposals:
+                return
+            prompt = stab.build_review_prompt(metrics, proposals)
+            raw = await call_llm([{"role": "user", "content": prompt}], temp=0.0, max_tokens=300)
+            approved = stab.parse_review(raw or "", proposals)
+            async with self._lock:
+                new_tune = stab.apply_approved(self._get_tune(), proposals, approved)
+                self._tune = new_tune
+                stab.save_state(self._state_path("stabilizer_state.json"), new_tune)
+                stab.append_log(self._state_path("stabilizer_log.jsonl"), {
+                    "ts": time.time(),
+                    "metrics": metrics.to_dict(),
+                    "proposals": proposals,
+                    "approved": approved,
+                    "tune": new_tune,
+                })
+            logger.info(f"Stabilizer: approved {approved} of {len(proposals)} for {self.user_id[:16]}")
+        except Exception as e:
+            logger.debug(f"AI stabilizer review failed: {e}")
+        finally:
+            self._stab_review_running = False
 
     # ==================== РАБОТА С ЦЕЛЯМИ ====================
     # Порог схожести для дедупликации целей — совпадает с

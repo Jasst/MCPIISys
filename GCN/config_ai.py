@@ -739,4 +739,18 @@ NLI_DECISION_THRESHOLD = float(os.getenv("NLI_DECISION_THRESHOLD", "0.85"))
 # Предиктор переходов: сколько кандидатов учитывать при предсказании
 TRANSITION_TOP_K = int(os.getenv("TRANSITION_TOP_K", "5"))
 
+# ---- Тормозные синапсы, латеральное торможение, стабилизатор ----
+# Латеральное торможение только переупорядочивает выдачу (набор кандидатов не меняется),
+# поэтому включено по умолчанию. Тормозные синапсы меняют активацию графа, поэтому выключены,
+# пока не проверены на копии данных. Стабилизатор меняет параметры, поэтому тоже выключен.
+LATERAL_INHIBITION_ENABLED = os.getenv("LATERAL_INHIBITION_ENABLED", "1") == "1"
+LATERAL_INHIBITION_THRESHOLD = float(os.getenv("LATERAL_INHIBITION_THRESHOLD", "0.9"))
+LATERAL_INHIBITION_LAMBDA = float(os.getenv("LATERAL_INHIBITION_LAMBDA", "0.3"))
+INHIBITORY_SYNAPSES_ENABLED = os.getenv("INHIBITORY_SYNAPSES_ENABLED", "0") == "1"
+INHIBITORY_INITIAL_WEIGHT = 0.2
+INHIBITORY_MAX_WEIGHT = 1.0
+INHIBITORY_ETA = 0.01
+STABILIZER_ENABLED = os.getenv("STABILIZER_ENABLED", "0") == "1"
+STABILIZER_AI_REVIEW = os.getenv("STABILIZER_AI_REVIEW", "1") == "1"
+
 _apply_calibration_overrides()

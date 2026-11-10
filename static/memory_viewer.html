@@ -234,7 +234,8 @@ const TYPE_COLORS = {claim:"#7f9cc9", concept:"#5fbf9a", observation:"#d4a24c", 
   identity_core:"#e06ab0", entity:"#8c96a8", procedure:"#8fd9ff", relationship:"#4aa3d8", group:"#f2c94c",
   memory_event:"#7d8799"};
 const REL_COLORS = {CONTRADICTS:"#e5544f", CONTRADICT:"#e5544f", GROUNDS_IN:"#787e89", CAUSES:"#e0a458",
-  ENABLES:"#4cc38a", PREVENTS:"#e5544f", INHIBITS:"#e5544f", REQUIRES:"#a695c8", PART_OF:"#c9a86a"};
+  ENABLES:"#4cc38a", PREVENTS:"#e5544f", INHIBITS:"#e5544f", REQUIRES:"#a695c8", PART_OF:"#c9a86a",
+  inhibit:"#b36bff"};   // тормозная связь: гасит активацию (не публикуется через ИИ)
 const REP = 2600, SPRING = 0.03, GRAV = 0.0025, DAMP = 0.82;
 const CELL = 200;   // размер ячейки сетки для отталкивания
 
@@ -856,7 +857,7 @@ function drawEdge(e, x1, y1, x2, y2, t, k) {
   const fid = focusId();
   const involved = !!fid && (e.s === fid || e.t === fid);
   const [cx, cy] = edgeCtrl(e, x1, y1, x2, y2);
-  const syn = e.r === "synapse", contra = e.r.startsWith("CONTRADICT");
+  const syn = e.r === "synapse", contra = e.r.startsWith("CONTRADICT"), inhib = e.r === "inhibit";
   const dimmed = fid ? (involved ? 1 : (S.selected ? 0.12 : 0.3)) : S.selEdge ? (sel ? 1 : 0.18) : 1;
   const base = (0.35 + Math.min(1, e.w) * 0.35) * (syn ? 0.5 : 1);
   const relCol = REL_COLORS[e.r];
@@ -877,7 +878,7 @@ function drawEdge(e, x1, y1, x2, y2, t, k) {
   ctx.lineCap = "round";
   if (sel) { ctx.shadowColor = rgba(relCol || "#ffffff", 0.9); ctx.shadowBlur = 14; }
   // бегущий пунктир — только у выбранной связи; противоречия — статичный пунктир; синапсы — точечный
-  ctx.setLineDash(sel ? [6, 5] : contra ? [5, 4] : syn ? [2, 4] : []);
+  ctx.setLineDash(sel ? [6, 5] : contra ? [5, 4] : inhib ? [1, 3] : syn ? [2, 4] : []);
   ctx.lineDashOffset = sel ? -((t * 18) % 11) : 0;
   ctx.beginPath();
   ctx.moveTo(x1, y1);
