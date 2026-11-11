@@ -3426,7 +3426,7 @@
   // Окно живёт во временном layer-контейнере на body: position:fixed внутри
   // шапки с backdrop-filter давал бы «двойную» подложку и чужие тени.
   let ddEl = null, ddLayer = null, ddKeyLis = null, ddScrollLis = null,
-      ddWheelLis = null, ddTouchLis = null, ddReposLis = null;
+      ddWheelLis = null, ddTouchLis = null, ddReposLis = null, ddSearch = null;   // ddSearch — поле поиска списка моделей
   function closeModelDd() {
     if (!ddEl) return;
     const gone = ddEl;
@@ -3670,6 +3670,25 @@
       });
       list.appendChild(ul);
     }
+    // Поле поиска — только когда моделей много (от 7): короткий список не нагружаем.
+    if (modelList.models.length > 6) {
+      const search = document.createElement('input');
+      search.type = 'search';
+      search.className = 'model-dd-search';
+      search.placeholder = 'Найти модель…';
+      search.setAttribute('aria-label', 'Поиск модели');
+      search.autocomplete = 'off';
+      search.addEventListener('input', () => {
+        const q = search.value.trim().toLowerCase();
+        list.querySelectorAll('.model-dd-item[data-model]').forEach((it) => {
+          it.hidden = !!q && !(it.dataset.model || '').toLowerCase().includes(q);
+        });
+      });
+      d.appendChild(search);
+      ddSearch = search;
+    } else {
+      ddSearch = null;
+    }
     d.appendChild(list);
     ddLayer.appendChild(d);
     document.body.appendChild(ddLayer);
@@ -3694,7 +3713,8 @@
     ddLayer.addEventListener('wheel', nonListScroll, { passive: false });
     ddLayer.addEventListener('touchmove', nonListScroll, { passive: false });
     const first = list.querySelector('.model-dd-item.current') || list.querySelector('.model-dd-item');
-    if (first) first.focus({ preventScroll: true });
+    if (ddSearch) ddSearch.focus({ preventScroll: true });
+    else if (first) first.focus({ preventScroll: true });
     // Клавиатура: Esc — закрыть, стрелки — переход по пунктам (как в .ui-menu).
     // Слушатель вешаем на document (а не на окно) и снимаем в closeModelDd():
     // вложенные span'ы имени/бейджа не видны closest('button'), если слушать
@@ -3703,12 +3723,21 @@
       if (!ddEl) return;
       // Enter/Пробел на самой кнопке-триггере: не перехватываем — иначе клик по
       // кнопке открывал список и тут же «выбирал» первый пункт
+      // Поле поиска: печатаем свободно (Space и буквы не перехватываем);
+      // стрелка вниз / Enter — к первой видимой модели, Esc — закрыть
+      if (e.target && e.target.classList && e.target.classList.contains('model-dd-search')) {
+        const vis = Array.from(ddEl.querySelectorAll('.model-dd-item[data-model]:not([hidden])'));
+        if (e.key === 'Escape') { e.preventDefault(); closeModelDd(); btn.focus(); return; }
+        if (e.key === 'ArrowDown' && vis[0]) { e.preventDefault(); vis[0].focus({ preventScroll: true }); keepItemVisible(vis[0]); }
+        else if (e.key === 'Enter' && vis[0]) { e.preventDefault(); vis[0].click(); }
+        return;
+      }
       if ((e.key === 'Enter' || e.key === ' ') && e.target.closest('#modelSelectBtn')) return;
       if (e.key === 'Escape') { e.preventDefault(); closeModelDd(); btn.focus(); return; }
       if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         // только пункты-кнопки с реальным id модели: разделитель/статус-строка
         // не должны участвовать в навигации и «выборе»
-        const items = Array.from(ddEl.querySelectorAll('.model-dd-item[data-model]'));
+        const items = Array.from(ddEl.querySelectorAll('.model-dd-item[data-model]:not([hidden])'));
         if (!items.length) return;
         const active = e.target.closest ? e.target.closest('.model-dd-item') : null;
         let i = items.indexOf(active);

@@ -24,43 +24,45 @@
   ];
 
   const CSS = `
-  #msOverlay{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;z-index:9000;
-    align-items:center;justify-content:center;padding:16px;box-sizing:border-box}
+  #msOverlay{position:fixed;inset:0;background:rgba(8,9,12,.6);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);
+    display:none;z-index:9000;align-items:center;justify-content:center;padding:16px;box-sizing:border-box}
   #msOverlay.open{display:flex}
-  #msModal{width:min(860px,100%);max-height:90vh;display:flex;flex-direction:column;
-    background:var(--bg-secondary,#1b1d23);color:var(--text-main,#e8e8ea);border-radius:14px;
-    box-shadow:0 20px 60px rgba(0,0,0,.45);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-  #msModal header{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;
-    border-bottom:1px solid rgba(255,255,255,.08)}
-  #msModal header h2{font-size:16px;margin:0;font-weight:600}
-  #msModal .ms-x{background:none;border:0;color:inherit;font-size:22px;cursor:pointer;padding:0 4px}
-  #msBody{display:grid;grid-template-columns:260px 1fr;gap:0;min-height:0;flex:1;overflow:hidden}
+  #msModal{width:min(880px,100%);max-height:90vh;display:flex;flex-direction:column;overflow:hidden;
+    background:var(--bg-secondary,#1b1d23);color:var(--text-main,#e8e8ea);border:1px solid var(--border-color,rgba(255,255,255,.08));
+    border-radius:20px;box-shadow:0 24px 70px rgba(0,0,0,.5);font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  #msModal header{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--border-color,rgba(255,255,255,.08))}
+  #msModal header h2{font-size:16px;margin:0;font-weight:600;letter-spacing:-.01em}
+  #msModal .ms-x{background:none;border:0;color:var(--text-muted,#888);font-size:22px;line-height:1;cursor:pointer;padding:4px 8px;border-radius:8px}
+  #msModal .ms-x:hover{background:var(--bg-hover,rgba(255,255,255,.06));color:var(--text-main,#e8e8ea)}
+  #msBody{display:grid;grid-template-columns:270px 1fr;gap:0;min-height:0;flex:1;overflow:hidden}
   @media (max-width:720px){#msBody{grid-template-columns:1fr}}
-  #msList{overflow:auto;border-right:1px solid rgba(255,255,255,.08);padding:8px}
-  #msList .ms-item{display:block;width:100%;text-align:left;background:none;border:0;color:inherit;
-    padding:8px 10px;border-radius:8px;cursor:pointer}
-  #msList .ms-item:hover{background:rgba(255,255,255,.05)}
-  #msList .ms-item.sel{background:rgba(120,140,255,.18)}
-  #msList .ms-name{font-size:13px;word-break:break-all}
-  #msList .ms-meta{font-size:11px;opacity:.65;margin-top:2px}
-  #msList .ms-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#3ba55d;margin-right:6px}
-  #msForm{overflow:auto;padding:14px 18px;min-height:0}
-  #msForm .ms-row{display:grid;grid-template-columns:200px 1fr;gap:6px 14px;align-items:center;margin-bottom:10px}
+  #msList{overflow:auto;border-right:1px solid var(--border-color,rgba(255,255,255,.08));padding:10px}
+  #msList .ms-item{display:block;width:100%;text-align:left;background:none;border:0;color:inherit;font:inherit;
+    padding:9px 11px;border-radius:10px;cursor:pointer;transition:background .15s}
+  #msList .ms-item:hover{background:var(--bg-hover,rgba(255,255,255,.05))}
+  #msList .ms-item.sel{background:var(--accent-soft,rgba(120,140,255,.18))}
+  #msList .ms-name{font-size:13px;font-weight:500;word-break:break-all}
+  #msList .ms-meta{font-size:11.5px;color:var(--text-muted,#888);margin-top:2px}
+  #msList .ms-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--success-color,#3ba55d);
+    margin-right:7px;box-shadow:0 0 8px rgba(59,165,93,.6);vertical-align:middle}
+  #msForm{overflow:auto;padding:18px 20px;min-height:0}
+  #msForm .ms-row{display:grid;grid-template-columns:190px 1fr;gap:4px 16px;align-items:center;margin-bottom:12px}
   @media (max-width:520px){#msForm .ms-row{grid-template-columns:1fr}}
-  #msForm label{font-weight:500}
-  #msForm .ms-hint{grid-column:2;font-size:12px;opacity:.6;margin-top:-4px}
+  #msForm label{font-weight:500;color:var(--text-secondary,#b8bcc6)}
+  #msForm .ms-hint{grid-column:2;font-size:12px;color:var(--text-muted,#888);margin-top:-2px}
   #msForm input[type=number],#msForm input[type=text],#msForm select{
-    background:var(--bg-primary,#101115);color:inherit;border:1px solid rgba(255,255,255,.15);
-    border-radius:8px;padding:6px 8px;width:100%;box-sizing:border-box;font:inherit}
-  #msForm .ms-empty{opacity:.7;padding:20px 0}
-  #msFoot{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:12px 18px;
-    border-top:1px solid rgba(255,255,255,.08)}
-  #msFoot .ms-status{flex:1;min-width:180px;font-size:13px;opacity:.9}
-  #msFoot .ms-status.err{color:#ff7b7b}
-  #msFoot button{border:1px solid rgba(255,255,255,.18);background:none;color:inherit;
-    border-radius:8px;padding:7px 12px;cursor:pointer;font:inherit}
-  #msFoot button.primary{background:#5b6cff;border-color:#5b6cff;color:#fff}
-  #msFoot button:disabled{opacity:.5;cursor:default}`;
+    background:var(--bg-primary,#101115);color:var(--text-main,#e8e8ea);border:1px solid var(--border-color,rgba(255,255,255,.12));
+    border-radius:10px;padding:8px 10px;width:100%;box-sizing:border-box;font:inherit;outline:none;transition:border-color .15s,box-shadow .15s}
+  #msForm input:focus,#msForm select:focus{border-color:var(--border-focus,#6b8cff);box-shadow:0 0 0 3px var(--accent-glow,rgba(107,140,255,.25))}
+  #msForm .ms-empty{color:var(--text-muted,#888);padding:24px 0}
+  #msFoot{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:14px 20px;border-top:1px solid var(--border-color,rgba(255,255,255,.08))}
+  #msFoot .ms-status{flex:1;min-width:180px;font-size:13px;color:var(--text-secondary,#b8bcc6)}
+  #msFoot .ms-status.err{color:var(--danger-color,#ff7b7b)}
+  #msFoot button{border:1px solid var(--border-color,rgba(255,255,255,.14));background:transparent;color:var(--text-main,#e8e8ea);
+    border-radius:10px;padding:8px 14px;cursor:pointer;font:inherit;font-size:13.5px;transition:background .15s}
+  #msFoot button:hover:not(:disabled){background:var(--bg-hover,rgba(255,255,255,.06))}
+  #msFoot button.primary{background:var(--accent-gradient,#5b6cff);border-color:transparent;color:#fff;font-weight:600}
+  #msFoot button:disabled{opacity:.45;cursor:default}`;
 
   let state = null;      // ответ GET /ai/model-settings
   let selected = null;   // id выбранной модели

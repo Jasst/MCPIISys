@@ -3,12 +3,13 @@
  */
 // bump при изменении статики: новый текст sw.js заставляет браузер
 // перерегистрировать worker, а activate вычистит старый кеш
-const VERSION = 'ai-v16';
+const VERSION = 'ai-v17';
 const STATIC_CACHE = `static-${VERSION}`;
 const SHELL = [
   '/static/style.css',
   '/static/ai.css',
   '/static/ui.css',
+  '/static/ui-polish.css',
   '/static/js/ui.js',
   '/static/js/ai-app.js',
   '/static/js/ai-store.js',
