@@ -255,6 +255,16 @@ _SEARCH_TOOL_NAMES = frozenset({"internal__web_search", "web_search"})
 _global_mcp_manager: Optional[MCPToolManager] = None
 _global_mcp_initialized = False
 
+async def _warm_reranker() -> None:
+    """Фоновая загрузка CrossEncoder: первый deep_search не ждёт загрузку модели."""
+    try:
+        from GCN.web_search import Reranker
+        await asyncio.to_thread(Reranker._get)
+        logger.info("[warmup] реранкер прогрет")
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[warmup] реранкер не прогрет: {e}")
+
+
 async def init_global_mcp():
     """Инициализирует глобальный MCP-менеджер при старте приложения."""
     global _global_mcp_manager, _global_mcp_initialized
@@ -266,6 +276,7 @@ async def init_global_mcp():
         await _global_mcp_manager.initialize()
         _global_mcp_initialized = True
         logger.info("✅ Global MCP manager initialized successfully")
+        asyncio.create_task(_warm_reranker())   # не await: старт сервера не ждёт модель
     except Exception as e:
         logger.error(f"❌ Failed to initialize global MCP: {e}", exc_info=True)
         _global_mcp_initialized = False
@@ -294,6 +305,28 @@ SEARCH_TRIGGER_KEYWORDS = [
     'сколько стоит', 'какой сейчас', 'последние данные',
     'статистика', 'результаты', 'кто победил', 'когда выйдет',
 ]
+
+# Признаки задач кроме ответа на вопрос: память, цели, картинки, код, файлы, идентичность,
+# ссылки, действия. Если есть хоть один — ReAct остаётся. Список намеренно широкий:
+# ложный «пропуск» опаснее лишнего LLM-вызова.
+_OTHER_TASK_RE = re.compile(
+    r"запомн|напомн|вспомн|забуд|помни|цел[ьиюя]|добав|удал|"
+    r"нарису|картин|изображен|сгенерир|фото|"
+    r"код|файл|ошибк|структур|проект|github|репозитор|"
+    r"идентичн|себя|себе|ты сам|ты сама|"
+    r"https?://|ссылк|"
+    r"напиши|сохрани|сделай|создай|отправь",
+    re.IGNORECASE)
+
+
+def search_answer_needs_no_tools(message: str, search_done: bool, has_files: bool) -> bool:
+    """Пункт 4: поиск уже выполнен до ReAct, и в сообщении нет других задач.
+    Тогда LLM-проход ReAct (нестриминговый вызов со схемами инструментов) не нужен:
+    результаты поиска уже есть, и ответ идёт сразу в стрим."""
+    if not search_done or has_files:
+        return False
+    return not _OTHER_TASK_RE.search(message or "")
+
 
 def needs_search_heuristic(message: str) -> bool:
     # Единая эвристика временной чувствительности живёт в web_search
@@ -678,70 +711,71 @@ class CognitiveController:
 
         logger.info(f"CognitiveController (GCN) initialized for {user_id[:16]}")
 
-    async def _force_search_if_requested(self, message: str, search_meta: Dict) -> None:
-        """
-        Детерминированный веб-поиск (фикс «веб-поиск не всегда работает»).
+    def _start_forced_search(self, message: str, web_search: bool) -> Optional["asyncio.Task"]:
+        """Запускает принудительный поиск в фоне, ПАРАЛЛЕЛЬНО с _prepare_messages.
+        Условие то же, что в _prepare_messages: явный web_search, прямая ссылка
+        или временная эвристика needs_search_heuristic."""
+        has_url = bool(re.search(r'https?://\S+', message or ""))
+        requested = bool(web_search or has_url
+                         or (AUTO_SEARCH_ENABLED and needs_search_heuristic(message)))
+        if not requested:
+            return None
+        return asyncio.create_task(self._run_forced_search(message))
 
-        Раньше даже при web_search=True (кнопка «Интернет» во фронтенде) решение
-        «искать или нет» принимала локальная LLM внутри ToolRouter: если модель
-        не смогла сформировать tool_call (или невалидный JSON в fallback-режиме),
-        поиск молча не выполнялся, а ответ генерировался из памяти — при этом
-        выглядело всё так, будто поиск сработал.
-
-        Теперь при явном запросе (web_search=True или прямая ссылка в сообщении)
-        поиск выполняется сразу и безусловно, ДО ReAct-цикла. Результаты копятся
-        в self._web_search_results_this_turn и подхватываются существующим кодом
-        слияния (process_input / _stream_response_worker), а повторный вызов
-        internal__web_search самой моделью отдаёт уже накопленный контекст без
-        второго DDG-запроса (см. _internal_web_search).
-
-        Дополнительно оживлён мёртвый код: rewrite_query() и MAX_SEARCH_ATTEMPTS
-        раньше объявлялись, но нигде не вызывались. Если DDG вернул пусто,
-        делаем до MAX_SEARCH_ATTEMPTS повторов с переписанной формулировкой.
-
-        === ВОССТАНОВЛЕНО ===
-        Метод был потерян при одном из рефакторингов, но вызовы в
-        process_input/_stream_response_worker остались — отсюда
-        AttributeError: 'CognitiveController' object has no attribute
-        '_force_search_if_requested'. Возвращён без изменений логики.
-        """
-        if self._web_search_results_this_turn:
+    async def _await_forced_search(self, task: Optional["asyncio.Task"]) -> None:
+        """Дожидается фонового поиска и кладёт результат в _web_search_results_this_turn.
+        Вызывать ПОСЛЕ _prepare_messages: та сбрасывает список в начале хода."""
+        if task is None:
             return
-        has_url = bool(re.search(r'https?://\S+', message))
-        if not (search_meta.get("search_requested") or has_url):
+        try:
+            results = await task
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[ForcedSearch] фоновый поиск завершился ошибкой: {e}")
             return
+        if results:
+            self._web_search_results_this_turn.extend(results)
 
-        # Для прямой ссылки повторы бессмысленны (deep_search читает URL напрямую)
-        attempts = 1 if has_url else max(1, MAX_SEARCH_ATTEMPTS)
-        for attempt in range(attempts):
-            query = message if has_url else await rewrite_query(call_llm, message)
+    async def _run_forced_search(self, message: str) -> List[Dict]:
+        """Принудительный поиск до ReAct-цикла.
+        1-я попытка — без LLM-хуков (expander/refiner), быстро.
+        Если пусто и это не прямая ссылка — вторая: переписанный запрос (rewrite_query)
+        с expander/refiner. Возвращает записи для _web_search_results_this_turn."""
+        has_url = bool(re.search(r'https?://\S+', message or ""))
+        plan = [{"query": message, "budget": 20 if has_url else 10, "rewrite": False, "hooks": False}]
+        if not has_url:
+            plan.append({"query": None, "budget": 15, "rewrite": True, "hooks": True})
+        for step in plan:
+            q = step["query"]
+            if step["rewrite"]:
+                try:
+                    q = await rewrite_query(call_llm, message)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[ForcedSearch] rewrite не удался: {e}")
+                    continue
+            kwargs: Dict[str, Any] = {"max_results": 5, "time_budget": step["budget"]}
+            if step["hooks"]:
+                kwargs.update(query_expander=_search_query_expander, query_refiner=_search_query_refiner)
+            else:
+                kwargs.update(max_refinements=0)
             try:
-                data = await deep_search(query, max_results=5,
-                                         query_expander=_search_query_expander,
-                                         query_refiner=_search_query_refiner)
-            except Exception as e:
-                logger.warning(f"[ForcedSearch] попытка {attempt + 1}/{attempts}: исключение {e}")
+                data = await deep_search(q, **kwargs)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[ForcedSearch] {q[:60]!r}: исключение {e}")
                 continue
             if data.get("search_performed") and data.get("context"):
-                self._web_search_results_this_turn.append({
-                    "queries": [query],
-                    "sources": data.get("sources", []),
-                    "context": data["context"],
-                })
-                logger.info(f"[ForcedSearch] поиск выполнен с {attempt + 1}-й попытки: '{query[:80]}'")
-                return
-            logger.info(f"[ForcedSearch] попытка {attempt + 1}/{attempts}: пусто для '{query[:80]}'")
-        logger.warning(f"[ForcedSearch] поиск не дал результатов за {attempts} попыток")
+                logger.info(f"[ForcedSearch] найдено по '{q[:80]}' (хуки={step['hooks']})")
+                return [{"queries": [q], "sources": data.get("sources", []), "context": data["context"]}]
+            logger.info(f"[ForcedSearch] пусто для '{q[:80]}' (хуки={step['hooks']})")
+        logger.warning("[ForcedSearch] поиск не дал результатов")
         if self.autonomy is not None:
-            # Пользователю нужны данные, которых нет — ставим тему в очередь
-            # фонового доисследования (источник 'search_failure' имеет высокий буст).
+            # Пользователю нужны данные, которых нет — ставим тему в фоновую очередь.
             self.autonomy.on_search_failed(message)
-
+        return []
 
     async def _force_code_tool_if_requested(self, message: str,
                                             tool_trace: List[Dict[str, Any]]) -> None:
         """
-        Детерминированный вызов code-tools (аналог _force_search_if_requested).
+        Детерминированный вызов code-tools (аналог принудительного поиска).
 
         Логи 2026-09-15 показали: used_native=False, trace_len=0 — локальная
         LLM в fallback-режиме получает TOOL_DECISION_PROMPT с примерами
@@ -2197,17 +2231,21 @@ class CognitiveController:
 
         await self._ensure_external_tools_registered()
 
-        messages, search_meta = await self._prepare_messages(
-            message, web_search, image_base64, image_mime, reasoning
-        )
+        forced_task = self._start_forced_search(message, web_search)
+        try:
+            messages, search_meta = await self._prepare_messages(
+                message, web_search, image_base64, image_mime, reasoning, rerank=False,
+            )
+        except BaseException:
+            if forced_task is not None:
+                forced_task.cancel()
+            raise
         uncertainty = self._last_prepare_meta.get("uncertainty", 0.5)
         if self.autonomy is not None:
             self.autonomy.on_high_uncertainty(message, uncertainty)
 
-        # Детерминированный поиск: если пользователь явно запросил интернет
-        # (web_search=True) или дал прямую ссылку — ищем сразу, не полагаясь
-        # на решение локальной LLM вызвать internal__web_search.
-        await self._force_search_if_requested(message, search_meta)
+        # Детерминированный поиск (web_search=True, ссылка или временной запрос) — до ReAct.
+        await self._await_forced_search(forced_task)
 
         # === ИСПРАВЛЕНИЕ: активное уточнение перемещено ПОСЛЕ ReAct-цикла ===
         # Раньше clarification срабатывал до вызова инструментов, блокируя даже web_search.
@@ -2271,7 +2309,12 @@ class CognitiveController:
             except Exception as e:
                 logger.warning(f"[Metacognition] ошибка проверки: {e}")
 
-        tool_run = await self.tool_router.run(message, messages, history_tail=history_tail)
+        if search_answer_needs_no_tools(message, bool(self._web_search_results_this_turn),
+                                        getattr(self, "_turn_files", None) is not None):
+            logger.info("[router] ReAct пропущен: поиск выполнен, других задач нет")
+            tool_run = {"tool_trace": [], "used_native": False}
+        else:
+            tool_run = await self.tool_router.run(message, messages, history_tail=history_tail)
         tool_trace = tool_run.get("tool_trace", [])
         # Детерминированный вызов code-tools для явных code-запросов
         # (см. docstring метода — локи 2026-09-15 показали, что LLM не
@@ -2339,7 +2382,7 @@ class CognitiveController:
                 except Exception as e:
                     logger.warning(f"Fact extraction error: {e}")
 
-        if tool_trace:
+        if tool_trace or search_meta.get("context"):
             # ИСПРАВЛЕНИЕ (role-confusion + дублирование):
             #  1) Раньше результаты инструментов клались с role="assistant" —
             #     для модели это выглядело как ЕЁ СОБСТВЕННЫЙ предыдущий ответ,
@@ -2393,6 +2436,23 @@ class CognitiveController:
         return response, search_meta
 
     # ===== ИЗВЛЕЧЕНИЕ ФАКТОВ (без изменений) =====
+    async def _bg_extract_search_facts(self, context: str, sources: List[Dict]) -> None:
+        """Извлечение фактов из веб-поиска ПОСЛЕ ответа пользователя.
+        Ждём окончания хода (ActivityGate), чтобы не конкурировать с генерацией
+        за LLM. Задача не регистрируется в gate, поэтому её не отменяет новый ход."""
+        try:
+            await self.gate.wait_idle(max_wait=120.0, cooldown=1.0)
+            if EXTRACT_FACTS_WITH_LLM:
+                facts = await self._extract_facts_llm(context, sources)
+            else:
+                facts = self._extract_facts_from_text(context)
+            sanitized = intellect_mod.sanitize_search_facts(facts, sources)
+            await self._save_sanitized_facts(sanitized)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[bg] извлечение фактов из поиска: {e}")
+
     async def _extract_facts_llm(self, context: str, sources: List[Dict] = None) -> List[Dict]:
         """
         Извлекает факты с метаданными (источник, дата) из текста.
@@ -2687,6 +2747,36 @@ class CognitiveController:
             return ""
 
     # ===== ПОСТРОЕНИЕ СООБЩЕНИЙ =====
+    def set_turn_files(self, file_ids, message: str) -> None:
+        """Файлы, прикреплённые к этому сообщению: превью для промпта и доступ инструментам.
+        Вызывается на каждый запрос, поэтому вложение прошлого сообщения не просачивается дальше."""
+        from GCN import file_store as fs
+        self._turn_files = None
+        blocks = []
+        for fid in list(file_ids)[:10]:
+            try:
+                meta = fs.get_meta(self.user_id, fid)
+                if meta:
+                    blocks.append(fs.context_block(self.user_id, meta))
+            except fs.FileError:
+                continue
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[files] не удалось подготовить файл {str(fid)[:8]}: {e}")
+        if blocks:
+            self._turn_files = ("\n\n".join(blocks), (message or "").strip()[:200])
+        # Инструменты files_* видны модели только на ходе с вложениями (выполняется всегда)
+        from GCN.internal_tools import FILES_TOOL_PREFIX
+        reg = getattr(self, "tool_registry", None)
+        if reg is not None:
+            reg.set_hidden_prefix(FILES_TOOL_PREFIX, hidden=self._turn_files is None)
+
+    def _take_turn_files(self, message: str) -> Optional[str]:
+        tf = getattr(self, "_turn_files", None)
+        if not tf or (message or "").strip()[:200] != tf[1]:
+            return None
+        return ("Прикреплённые файлы (содержимое ниже; полный доступ — инструменты files_*):\n"
+                + tf[0])
+
     def _build_messages(self, message: str, web_search: bool, search_context: str,
                         memory_context: str, image_base64: Optional[str],
                         image_mime: Optional[str], reasoning: bool,
@@ -2869,9 +2959,18 @@ class CognitiveController:
             sb = intellect_mod.sources_block(sources)
             if sb:
                 user_blocks.append(sb)
+        turn_files = self._take_turn_files(message)
+        if turn_files:
+            user_blocks.append(turn_files)
+        if image_base64 and not LM_STUDIO_VISION_SUPPORTED:
+            user_blocks.append("[К сообщению приложено изображение, но текущая модель не принимает "
+                               "изображения. Скажите об этом и предложите vision-модель.]")
         user_blocks.append(f"Вопрос пользователя: {message}")
         user_text = "\n\n".join(user_blocks)
 
+        if image_base64 and LM_STUDIO_VISION_SUPPORTED:
+            from GCN.file_store import compress_for_model
+            image_base64, image_mime = compress_for_model(image_base64, image_mime)
         if image_base64 and LM_STUDIO_VISION_SUPPORTED:
             if not image_base64.startswith("data:image"):
                 if image_mime:
@@ -3294,16 +3393,23 @@ class CognitiveController:
             decision = self.fast_router.classify(message, force_slow=_pre_slow) if FAST_ROUTER_ENABLED else None
 
             await push(f"data: {json.dumps({'gen_phase': {'phase': 'prep'}})}\n\n")
-            messages, search_meta = await self._prepare_messages(
-                message, web_search, image_base64, image_mime, reasoning,
-                rerank=(decision is None or decision.route is Route.TOOLS),
-            )
+            # Поиск стартует параллельно с подготовкой контекста и не ждёт её.
+            forced_task = self._start_forced_search(message, web_search)
+            try:
+                messages, search_meta = await self._prepare_messages(
+                    message, web_search, image_base64, image_mime, reasoning,
+                    rerank=False,   # первый авто-recall без LLM-реранка; internal__recall реранжирует сам
+                )
+            except BaseException:
+                if forced_task is not None:
+                    forced_task.cancel()
+                raise
             uncertainty = self._last_prepare_meta.get("uncertainty", 0.5)
             if self.autonomy is not None:
                 self.autonomy.on_high_uncertainty(message, uncertainty)
 
-            # См. process_input: детерминированный поиск до ReAct-цикла.
-            await self._force_search_if_requested(message, search_meta)
+            # Результат принудительного поиска — до ReAct-цикла (см. _await_forced_search).
+            await self._await_forced_search(forced_task)
 
             # === ИСПРАВЛЕНИЕ: активное уточнение перемещено ПОСЛЕ ReAct-цикла ===
             has_url = bool(re.search(r'https?://', message))
@@ -3324,6 +3430,7 @@ class CognitiveController:
             reasoning_acc = ""          # рассуждения для снапшота (в history не попадают)
             tool_trace: List[Dict[str, Any]] = []
             already_verified = False
+            _bg_facts_args = None      # (context, sources) для фонового извлечения фактов
             # Флаг ошибки внутреннего стрима. Раньше inner except делал `return`,
             # из-за чего await push("[DONE]") никогда не достигался и frontend
             # оставался в _isSending=true с заблокированным полем ввода.
@@ -3344,7 +3451,12 @@ class CognitiveController:
                     if (decision is not None and search_meta.get("search_requested")
                             and not _pre_slow):
                         decision = self.fast_router.classify(message, force_slow=True)
-                    if decision is None or decision.route is Route.TOOLS:
+                    skip_react = search_answer_needs_no_tools(
+                        message, bool(self._web_search_results_this_turn),
+                        getattr(self, "_turn_files", None) is not None)
+                    if skip_react:
+                        logger.info("[router] ReAct пропущен: поиск выполнен, других задач нет")
+                    if (decision is None or decision.route is Route.TOOLS) and not skip_react:
                         await push(f"data: {json.dumps({'gen_phase': {'phase': 'tools'}})}\n\n")
                         tool_run = await self.tool_router.run(message, messages, history_tail=history_tail)
                         tool_trace = tool_run.get("tool_trace", [])
@@ -3402,19 +3514,9 @@ class CognitiveController:
                         search_meta["context"] = "\n\n---\n\n".join(context_parts)
 
                         if EXTRACT_FACTS_FROM_SEARCH and search_meta["context"]:
-                            try:
-                                if EXTRACT_FACTS_WITH_LLM:
-                                    # Используем улучшенную версию _extract_facts_llm с метаданными
-                                    facts = await self._extract_facts_llm(search_meta["context"], merged_sources)
-                                else:
-                                    facts = self._extract_facts_from_text(search_meta["context"])
-                                # ИНТЕЛЛЕКТ-ПАКЕТ (B): санитайзер фактов из поиска.
-                                # ИСПРАВЛЕНИЕ: сохранение по фактическому scope,
-                                # не всегда в global (см. _save_sanitized_facts).
-                                sanitized = intellect_mod.sanitize_search_facts(facts, merged_sources)
-                                await self._save_sanitized_facts(sanitized)
-                            except Exception as e:
-                                logger.warning(f"Fact extraction error: {e}")
+                            # Извлечение фактов НЕ блокирует ответ: запускается после стрима
+                            # (см. _bg_extract_search_facts ниже по ходу воркера).
+                            _bg_facts_args = (search_meta["context"], merged_sources)
 
                     if search_meta.get("sources"):
                         await push(f"data: {json.dumps({'sources': search_meta['sources']})}\n\n")
@@ -3473,7 +3575,7 @@ class CognitiveController:
                             else:
                                 logger.warning("generate_image result does not contain image_url")
 
-                    if tool_trace:
+                    if tool_trace or search_meta.get("context"):
                         # SSE-уведомление фронтенду о факте вызова инструмента —
                         # НЕ идёт в промпт LLM, только в UI.
                         for t in tool_trace:
@@ -3592,6 +3694,11 @@ class CognitiveController:
                 # иначе frontend остаётся с _isSending=true навсегда.
 
             timer.mark("stream")
+            if _bg_facts_args is not None:
+                self._spawn_background_task(
+                    self._bg_extract_search_facts(*_bg_facts_args),
+                    name="search-facts-bg",
+                )
             if not _stream_error and full_response and not already_verified:
                 # Единый хвост обработки (история, память, верификация,
                 # цели, prediction error) — см. _finalize_answer.
@@ -3862,6 +3969,7 @@ class AIRequest(BaseModel):
     web_search: bool = False
     image_base64: Optional[str] = Field(None, max_length=MAX_IMAGE_SIZE_BASE64 * 2)
     image_mime: Optional[str] = None
+    file_ids: Optional[List[str]] = Field(None, max_length=10)   # файлы из /ai/files
     reasoning: bool = False
     char_by_char: Optional[bool] = None
     # Прямая ссылка от фронтенда (JS отправляет url_to_fetch при URL в сообщении).
@@ -3889,7 +3997,7 @@ class EnhanceRequest(BaseModel):
 async def chat_with_ai(body: AIRequest, address: str = Depends(require_auth)):
     logger.info(f"Запрос от {address[:16]}, web={body.web_search}, reasoning={body.reasoning}")
     # url_to_fetch гарантированно попадает в текст сообщения, чтобы его увидел
-    # детерминированный поиск (см. CognitiveController._force_search_if_requested)
+    # детерминированный поиск (см. CognitiveController._start_forced_search)
     if body.url_to_fetch and body.url_to_fetch not in (body.message or ""):
         body.message = f"{body.message}\n{body.url_to_fetch}".strip()
     assistant = await get_assistant(address)
@@ -3899,6 +4007,7 @@ async def chat_with_ai(body: AIRequest, address: str = Depends(require_auth)):
             # Другая генерация уже идёт (другое устройство, другой чат): раньше новый
             # запрос молча подключался к её потоку и получал ЧУЖОЙ ответ.
             return JSONResponse({"detail": "generation_busy"}, status_code=409)
+        assistant.set_turn_files(body.file_ids, body.message)
         return StreamingResponse(
             assistant.stream_response(
                 message=body.message,

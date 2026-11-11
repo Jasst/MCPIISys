@@ -110,7 +110,7 @@ logger = logging.getLogger(__name__)
 _NATIVE_FLAG_PATH = Path(__file__).resolve().parent.parent / "ai_memory_v3" / "_native_flag.json"
 
 try:
-    from GCN.config_ai import (
+    from .config_ai import (
         TOOL_CALL_TIMEOUT_SECONDS,
         TOOL_PARALLEL_EXECUTION,
         MCP_TOOL_TIMEOUT_OVERRIDES,
@@ -209,6 +209,20 @@ class ToolRegistry:
     def __init__(self):
         self._tools: Dict[str, ToolSpec] = {}
         self._owner_server: Dict[str, str] = {}
+        # Группы инструментов, скрытые от модели на текущем ходу (по префиксу имени).
+        # Скрытый инструмент не попадает ни в нативные схемы, ни в текстовый каталог.
+        self._hidden_prefixes: set = set()
+
+    def set_hidden_prefix(self, prefix: str, hidden: bool) -> None:
+        if hidden:
+            self._hidden_prefixes.add(prefix)
+        else:
+            self._hidden_prefixes.discard(prefix)
+
+    def _visible(self) -> List["ToolSpec"]:
+        hidden = tuple(self._hidden_prefixes)
+        return [t for t in self._tools.values()
+                if not (hidden and t.qualified_name.startswith(hidden))]
 
     def register(self, name: str, description: str, parameters: Dict[str, Any],
                  handler: Callable[[Dict[str, Any]], Awaitable[Any]], server: str = "internal",
@@ -262,7 +276,7 @@ class ToolRegistry:
         return self._tools.get(qualified_name)
 
     def as_openai_tools(self) -> List[Dict[str, Any]]:
-        return [t.as_openai_tool() for t in self._tools.values()]
+        return [t.as_openai_tool() for t in self._visible()]
 
     def as_text_catalog(self) -> str:
         examples = {
@@ -286,7 +300,7 @@ class ToolRegistry:
                 '{"identity_id": "identity_abc123", "reason": "тестовая запись"}',
         }
         lines = []
-        for t in self._tools.values():
+        for t in self._visible():
             props = (t.parameters or {}).get("properties", {})
             arg_hint = ", ".join(props.keys()) if props else "без аргументов"
             ex = examples.get(t.qualified_name, "")
@@ -571,6 +585,12 @@ class ToolRouter:
     "suggested_tool": "название другого инструмента если нужно" или null,
     "new_plan": "новый план если требуется перепланирование" или null
 }}"""
+
+        # Однозначный случай без LLM: тот же диагноз, что и в эвристике ниже.
+        error_lower = (error or "").lower()
+        if "не найдено" in error_lower or "404" in error_lower or "not found" in error_lower:
+            return {"diagnosis": "Ресурс не найден", "next_action": "different_tool",
+                    "modified_args": {}, "suggested_tool": "internal__recall", "new_plan": None}
 
         try:
             raw = await self.llm_text_caller([{"role": "user", "content": prompt}], temp=0.0, max_tokens=400)

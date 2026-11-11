@@ -54,7 +54,7 @@ except ImportError:
         STREAMABLE_HTTP_AVAILABLE = False
 
 try:
-    from GCN.config_ai import (
+    from .config_ai import (
         TOOL_CALL_TIMEOUT_SECONDS,
         MCP_RECONNECT_INTERVAL,
         MEMORY_BASE_DIR,

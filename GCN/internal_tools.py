@@ -7,7 +7,7 @@ from datetime import datetime
 from dataclasses import asdict
 from typing import Any, Callable, Dict, List, Optional
 
-from GCN.config_ai import (
+from .config_ai import (
     ENABLE_CODE_SELF_REFLECTION,
     GENERATED_IMAGES_DIR,
     MAX_SUBTASKS,
@@ -17,8 +17,8 @@ from GCN.config_ai import (
     EASYDIFFUSION_DEFAULT_CFG,
     EASYDIFFUSION_DEFAULT_SAMPLER,
 )
-from GCN.tool_router import ToolRegistry
-from GCN.web_search import deep_search
+from .tool_router import ToolRegistry
+from .web_search import deep_search
 
 logger = logging.getLogger(__name__)
 
@@ -397,7 +397,7 @@ def _register_code(registry: ToolRegistry, controller) -> None:
         logger.info("Самоанализ кода отключён в конфигурации")
         return
 
-    from GCN.code_analyzer import get_analyzer
+    from .code_analyzer import get_analyzer
     code_analyzer = get_analyzer()
 
     async def _internal_read_code(args: Dict) -> str:
@@ -487,7 +487,7 @@ def _register_code(registry: ToolRegistry, controller) -> None:
 
 
 def _register_identity(registry: ToolRegistry, controller) -> None:
-    from GCN.GCN import (
+    from .GCN import (
         append_snapshot, merge_heads, invalidate_snapshot,
         get_chain, search_chain, get_heads,
     )
@@ -709,6 +709,103 @@ def _register_identity(registry: ToolRegistry, controller) -> None:
     )
 
 
+FILES_TOOL_PREFIX = "internal__files_"
+
+
+def _register_files(registry: ToolRegistry, controller) -> None:
+    """Инструменты работы с файлами пользователя (логика — GCN/file_store.py).
+    Модель видит только file_id; доступ ограничен папкой текущего пользователя.
+    Код из файлов НЕ выполняется: только чтение, разбор и обработка."""
+    from . import file_store as fs
+
+    def _wrap(fn):
+        async def handler(args: Dict) -> Dict:
+            try:
+                result = await asyncio.to_thread(fn, controller.user_id, args or {})
+                return {"status": "ok", **result}
+            except fs.FileError as e:
+                return {"status": "error", "message": str(e)}
+            except Exception as e:  # noqa: BLE001
+                logger.exception("[files] %s", e)
+                return {"status": "error", "message": f"Ошибка обработки файла: {e}"}
+        return handler
+
+    ID = {"file_id": {"type": "string", "description": "id файла из списка прикреплённых"}}
+    specs = [
+        ("files_list",
+         "Список файлов пользователя: id, имя, размер, тип.",
+         {"type": "object", "properties": {}},
+         lambda uid, a: {"files": fs.list_files(uid)}),
+        ("files_read",
+         "Читает текстовый файл частями. offset и limit в символах (limit до 60000). "
+         "Если next_offset не null — файл продолжается, читайте дальше.",
+         {"type": "object", "properties": {**ID,
+                                           "offset": {"type": "integer", "default": 0},
+                                           "limit": {"type": "integer", "default": 8000}},
+          "required": ["file_id"]},
+         lambda uid, a: fs.read_text(uid, a["file_id"], a.get("offset", 0), a.get("limit", 8000))),
+        ("files_search",
+         "Ищет по текстовому файлу регулярным выражением (или подстрокой при regex=false). "
+         "Возвращает совпадения с соседними строками.",
+         {"type": "object", "properties": {**ID,
+                                           "pattern": {"type": "string"},
+                                           "context": {"type": "integer", "default": 2},
+                                           "max_matches": {"type": "integer", "default": 30},
+                                           "regex": {"type": "boolean", "default": True}},
+          "required": ["file_id", "pattern"]},
+         lambda uid, a: fs.search_text(uid, a["file_id"], a["pattern"], a.get("context", 2),
+                                       a.get("max_matches", 30), a.get("regex", True))),
+        ("files_json",
+         "Открывает JSON по пути вида users[0].name (пусто — весь документ). "
+         "Возвращает тип, сводку по ключам/длине и значение.",
+         {"type": "object", "properties": {**ID,
+                                           "path": {"type": "string", "default": ""},
+                                           "max_chars": {"type": "integer", "default": 6000}},
+          "required": ["file_id"]},
+         lambda uid, a: fs.json_query(uid, a["file_id"], a.get("path", ""), a.get("max_chars", 6000))),
+        ("files_json_format",
+         "Форматирует JSON (minify=true — в одну строку) и сохраняет результат новым файлом.",
+         {"type": "object", "properties": {**ID, "minify": {"type": "boolean", "default": False}},
+          "required": ["file_id"]},
+         lambda uid, a: fs.json_format(uid, a["file_id"], bool(a.get("minify", False)))),
+        ("files_outline",
+         "Структура Python-файла: импорты, классы с методами, функции со строками. Код не запускается.",
+         {"type": "object", "properties": {**ID}, "required": ["file_id"]},
+         lambda uid, a: fs.python_outline(uid, a["file_id"])),
+        ("files_stats",
+         "Статистика текстового файла: строки, слова, символы; для CSV — колонки и число строк.",
+         {"type": "object", "properties": {**ID}, "required": ["file_id"]},
+         lambda uid, a: fs.text_stats(uid, a["file_id"])),
+        ("files_image_info",
+         "Размеры, формат и режим изображения.",
+         {"type": "object", "properties": {**ID}, "required": ["file_id"]},
+         lambda uid, a: fs.image_info(uid, a["file_id"])),
+        ("files_image_compress",
+         "Уменьшает и сжимает изображение, сохраняет новый файл и возвращает его id и url. "
+         "max_side — длинная сторона (по умолчанию 1600), format — webp/jpeg/png, quality 30–95.",
+         {"type": "object", "properties": {**ID,
+                                           "max_side": {"type": "integer", "default": 1600},
+                                           "format": {"type": "string", "enum": ["webp", "jpeg", "png"], "default": "webp"},
+                                           "quality": {"type": "integer", "default": 85}},
+          "required": ["file_id"]},
+         lambda uid, a: fs.process_image(uid, a["file_id"], a.get("max_side", 1600),
+                                         a.get("format", "webp"), a.get("quality", 85))),
+        ("files_write",
+         "Создаёт текстовый файл для пользователя (отчёт, результат обработки). "
+         "Аргументы: name, content. Возвращает id и url.",
+         {"type": "object", "properties": {"name": {"type": "string"}, "content": {"type": "string"}},
+          "required": ["name", "content"]},
+         lambda uid, a: fs.write_text(uid, a["name"], a["content"])),
+    ]
+    for name, description, parameters, fn in specs:
+        registry.register(name=name, description=description, parameters=parameters,
+                          handler=_wrap(fn), server="internal", timeout_seconds=60)
+    # По умолчанию скрыты: схемы уходят в каждый LLM-вызов, а без вложений они не нужны.
+    # Открываются на ходе с вложениями (CognitiveController.set_turn_files).
+    registry.set_hidden_prefix(FILES_TOOL_PREFIX, True)
+    logger.debug("[internal_tools.files] зарегистрировано %d инструментов", len(specs))
+
+
 def register_all(registry: ToolRegistry, controller,
                  query_expander: Optional[Callable] = None,
                  query_refiner: Optional[Callable] = None) -> None:
@@ -716,6 +813,7 @@ def register_all(registry: ToolRegistry, controller,
     _register_search(registry, controller, query_expander=query_expander,
                      query_refiner=query_refiner)
     _register_image(registry, controller)
+    _register_files(registry, controller)
     _register_code(registry, controller)
     _register_identity(registry, controller)
     logger.info("internal_tools: memory/search/image/code/identity OK")

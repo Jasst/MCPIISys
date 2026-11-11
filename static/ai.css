@@ -528,3 +528,21 @@ html.lb-open, html.lb-open body { overflow: hidden; }
 .gen-status.phase-done .gs-bar { display: none; }
 @keyframes gsPulse { 0%, 100% { transform: scale(.8); opacity: .5; } 50% { transform: scale(1.15); opacity: 1; } }
 @keyframes gsSlide { 0% { left: -40%; } 100% { left: 100%; } }
+
+/* ---------- файлы и картинки: чип файла, заглушка для неудавшейся картинки ---------- */
+.file-chip {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 100%;
+  margin: 4px 0; padding: 6px 10px; border-radius: 10px;
+  background: rgba(127, 127, 127, .12); color: inherit; text-decoration: none;
+  font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.file-chip:hover { background: rgba(127, 127, 127, .22); }
+.img-block.img-failed {
+  display: flex; align-items: center; justify-content: center; min-height: 56px;
+  border-radius: 12px; background: rgba(127, 127, 127, .10);
+}
+.img-block.img-failed img { display: none; }
+.img-block.img-failed::after {
+  content: "Изображение не загрузилось. Обновите страницу."; padding: 12px;
+  text-align: center; font-size: 12.5px; color: var(--text-muted);
+}

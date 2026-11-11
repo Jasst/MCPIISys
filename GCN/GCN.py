@@ -37,7 +37,7 @@ except ImportError:
     faiss = None
 
 try:
-    from GCN.config_ai import (
+    from .config_ai import (
         HYBRID_WEIGHT_SEMANTIC, HYBRID_WEIGHT_GRAPH, HYBRID_WEIGHT_FRESHNESS,
         HYBRID_WEIGHT_EVIDENCE, HYBRID_WEIGHT_CONFIDENCE,
         FAISS_NLIST, FAISS_NPROBE, FAISS_MIN_TRAIN_VECTORS,
@@ -286,7 +286,7 @@ class KnowledgeIngestion:
 
     def _compute_similarity(self, text1: str, text2: str) -> float:
         # Используем существующий метод из CognitiveMemory
-        from GCN.memory_graph import CognitiveMemory
+        from .memory_graph import CognitiveMemory
         return CognitiveMemory._compute_similarity(text1, text2)
 
 

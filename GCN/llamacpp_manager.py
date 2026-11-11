@@ -23,7 +23,7 @@ from typing import Dict, List, Optional
 
 import aiohttp
 
-from GCN.config_ai import (
+from .config_ai import (
     LLAMACPP_CUDA_DEVICE_ORDER,
     LLAMACPP_DEFAULTS,
     LLAMACPP_EXTRA_ARGS,

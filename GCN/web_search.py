@@ -72,7 +72,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 
 try:
-    from GCN.config_ai import (
+    from .config_ai import (
         SEARCH_CACHE_TTL,
         SEARCH_CACHE_MAX_SIZE,
         DDG_MIN_INTERVAL,
@@ -89,8 +89,8 @@ except ImportError:
     SEARCH_CACHE_MAX_SIZE = 200
     DDG_MIN_INTERVAL = 1.2
     DDG_MAX_RETRIES = 3
-    MAX_PAGES_TO_FETCH = 7
-    PAGE_CONTENT_MAX_CHARS = 6000
+    MAX_PAGES_TO_FETCH = int(os.getenv("MAX_PAGES_TO_FETCH", "7"))
+    PAGE_CONTENT_MAX_CHARS = int(os.getenv("PAGE_CONTENT_MAX_CHARS", "6000"))
     CHUNK_SIZE = 1200
     CHUNK_OVERLAP = 150
     PARALLEL_FETCH_LIMIT = 8
@@ -153,7 +153,7 @@ async def rewrite_with_context(query: str) -> str:
     if not _needs_rewrite(query, ctx):
         return query
     try:
-        from GCN.llm_client import call_llm   # ленивый импорт: без цикла с ai_assistant
+        from .llm_client import call_llm   # ленивый импорт: без цикла с ai_assistant
         prompt = (
             "Диалог:\n" + ctx + "\n\nПоследняя реплика пользователя: " + query + "\n\n"
             "Сформулируй ОДИН самостоятельный поисковый запрос по теме последней реплики: "

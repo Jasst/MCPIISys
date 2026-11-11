@@ -4,7 +4,7 @@ import aiohttp
 import logging
 from typing import Optional
 
-from GCN.config_ai import (
+from .config_ai import (
     EASYDIFFUSION_ENABLED,
     EASYDIFFUSION_URL,
     EASYDIFFUSION_ENDPOINT,
@@ -17,7 +17,7 @@ from GCN.config_ai import (
     EASYDIFFUSION_DEFAULT_LORA_WEIGHT,
     EASYDIFFUSION_DEFAULT_LORA_USE,
 )
-from GCN.llm_client import call_llm
+from .llm_client import call_llm
 
 logger = logging.getLogger(__name__)
 

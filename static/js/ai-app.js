@@ -26,6 +26,7 @@
     notify: '/ai/notifications/poll',
     health: '/health',
     media: '/ai/ui-media',
+  files: '/ai/files',
     adoptGenerated: '/ai/ui-media/adopt-generated',
     genStatus: '/ai/gen-status',
     genLock: '/ai/gen-lock',
@@ -668,7 +669,15 @@
     save.className = 'img-save';
     save.textContent = '⬇ Сохранить';
     save.addEventListener('click', (e) => { e.stopPropagation(); downloadImage(url, baseName); });
-    img.addEventListener('error', () => { save.hidden = true; });
+    img.addEventListener('error', () => {
+      if (!img.dataset.retried) {               // один повтор: сеть или кэш могли моргнуть
+        img.dataset.retried = '1';
+        setTimeout(() => { img.src = url + (url.includes('?') ? '&' : '?') + 'r=' + Date.now(); }, 800);
+        return;
+      }
+      save.hidden = true;
+      wrap.classList.add('img-failed');
+    });
     wrap.append(img, save);
     return { wrap, img, save };
   }
@@ -749,6 +758,14 @@
       bubble.appendChild(d);
     }
 
+    if (m.file) {
+      const a = document.createElement('a');
+      a.className = 'file-chip';
+      a.href = `${API.files}/${m.file.id}`;
+      a.download = m.file.name;
+      a.textContent = `📄 ${m.file.name} · ${fmtBytes(m.file.size || 0)}`;
+      bubble.appendChild(a);
+    }
     if (m.text) {
       const md = document.createElement('div');
       md.className = 'markdown-body';
@@ -1483,7 +1500,8 @@
   }
 
   function sendNow(override) {
-    const text = (override !== undefined ? override : els.input.value).trim();
+    let text = (override !== undefined ? override : els.input.value).trim();
+    if (!text && attachment && attachment.kind === 'file') text = `Проанализируй файл «${attachment.name}»`;
     if (!text && !attachment) return;
 
     if (gen) {
@@ -1534,15 +1552,18 @@
       gen_key: msgs[idx].id,
       chat_id: id, user_msg_id: userMsg.id || null,
     };
-    if (img) { body.image_base64 = img.base64; body.image_mime = img.mime; }
+    if (img && img.kind === 'file') body.file_ids = [img.id];
+    else if (img) { body.image_base64 = img.base64; body.image_mime = img.mime; }
 
     // Тяжёлое фото грузим в медиатеку параллельно с генерацией: ответ модели
     // не ждёт загрузки, а ссылка для истории появляется, как только готова.
     let pendingMedia = null;
-    if (img && img.url.length >= MAX_IMAGE_STORE) {
+    if (img && img.kind === 'file') userMsg.file = { id: img.id, name: img.name, size: img.size, mime: img.mime };
+    if (img && img.url && img.url.length >= MAX_IMAGE_STORE) {
       pendingMedia = ensureMediaUrl(img).then((u) => {
-        if (!u) return;
-        userMsg.image = u;
+        // медиатека недоступна — не теряем картинку, оставляем сжатую inline (если не слишком большая)
+        userMsg.image = u || (img.url.length < MAX_INLINE_FALLBACK ? img.url : null);
+        if (!userMsg.image) return;
         commit(id);                       // короткая ссылка вместо «фото пропало»
         if (currentId === id) renderMessages({ scroll: false });
       });
@@ -1687,11 +1708,103 @@
     }
   }
 
+  // ------------------------------------------------------------------ вложения: картинки и файлы
+  const MAX_FILE_BYTES = 5 * 1024 * 1024;        // как MAX_UPLOAD_BYTES на сервере
+  const IMAGE_MAX_SIDE = 1600;                    // длинная сторона перед отправкой
+  const IMAGE_COMPRESS_MIN_BYTES = 600 * 1024;    // меньше этого и уже в пределах — не пережимаем
+  const MAX_INLINE_FALLBACK = 1500000;            // если медиатека недоступна — оставить картинку inline
+  const FILE_ICON = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#8a8f98" ' +
+    'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>');
+
+  function fmtBytes(n) {
+    return n < 1024 ? `${n} Б` : n < 1048576 ? `${(n / 1024).toFixed(1)} КБ` : `${(n / 1048576).toFixed(1)} МБ`;
+  }
+
+  function blobToDataURL(blob) {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result));
+      r.onerror = () => reject(r.error);
+      r.readAsDataURL(blob);
+    });
+  }
+
+  // Картинка для чата: уменьшаем и пережимаем. Любая ошибка — исходный файл, как раньше.
+  async function imageAttachment(f) {
+    const asOriginal = async () => {
+      const url = await blobToDataURL(f);
+      return { kind: 'image', url, base64: url.split(',')[1] || '', mime: f.type, name: f.name, file: f };
+    };
+    if (f.type === 'image/gif') return asOriginal();          // анимацию не трогаем
+    try {
+      const bmp = await createImageBitmap(f);
+      const scale = Math.min(1, IMAGE_MAX_SIDE / Math.max(bmp.width, bmp.height));
+      if (scale === 1 && f.size <= IMAGE_COMPRESS_MIN_BYTES) { bmp.close?.(); return asOriginal(); }
+      const w = Math.max(1, Math.round(bmp.width * scale));
+      const h = Math.max(1, Math.round(bmp.height * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      const g = canvas.getContext('2d');
+      const mime = (f.type === 'image/png' || f.type === 'image/webp') ? 'image/webp' : 'image/jpeg';
+      if (mime === 'image/jpeg') { g.fillStyle = '#fff'; g.fillRect(0, 0, w, h); }
+      g.drawImage(bmp, 0, 0, w, h);
+      bmp.close?.();
+      const blob = await new Promise((res) => canvas.toBlob(res, mime, 0.85));
+      if (!blob || blob.size >= f.size) return asOriginal();
+      const url = await blobToDataURL(blob);
+      const base = f.name.replace(/\.[^.]+$/, '') || 'image';
+      return { kind: 'image', url, base64: url.split(',')[1] || '', mime,
+               name: base + (mime === 'image/webp' ? '.webp' : '.jpg'), file: blob, compressed: true };
+    } catch (e) {
+      console.warn('сжатие изображения не удалось, отправляю оригинал:', e);
+      return asOriginal();
+    }
+  }
+
+  async function uploadUserFile(f) {
+    try {
+      const fd = new FormData();
+      fd.append('file', f, f.name);
+      const r = await fetch(API.files, { method: 'POST', credentials: 'same-origin', body: fd });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        toast(typeof j.detail === 'string' ? j.detail : 'Не удалось загрузить файл');
+        return null;
+      }
+      return await r.json();
+    } catch {
+      toast('Нет связи с сервером: файл не загружен');
+      return null;
+    }
+  }
+
+  // Любой выбранный файл: картинка → сжатая картинка, остальное → файлы пользователя на сервере
+  async function handlePickedFile(f) {
+    if (!f) return;
+    if (f.type.startsWith('image/') && !f.type.includes('svg')) {
+      if (f.size > MAX_IMAGE_BYTES) { toast('Изображение больше 8 МБ'); return; }
+      attachment = await imageAttachment(f);
+    } else {
+      if (f.size > MAX_FILE_BYTES) { toast('Файл больше 5 МБ'); return; }
+      const meta = await uploadUserFile(f);
+      if (!meta) return;
+      attachment = { kind: 'file', id: meta.id, name: meta.name, size: meta.size, mime: meta.mime };
+    }
+    renderAttachment();
+  }
+
   function renderAttachment() {
     els.attachChip.hidden = !attachment;
     if (attachment) {
-      els.attachThumb.src = attachment.url;
-      els.attachName.textContent = attachment.name;
+      if (attachment.kind === 'file') {
+        els.attachThumb.src = FILE_ICON;
+        els.attachName.textContent = `${attachment.name} · ${fmtBytes(attachment.size)}`;
+      } else {
+        els.attachThumb.src = attachment.url;
+        els.attachName.textContent = attachment.name;
+      }
     }
     setSendState();
   }
@@ -2028,32 +2141,16 @@
   els.fileInput.addEventListener('change', () => {
     const f = els.fileInput.files[0];
     els.fileInput.value = '';
-    if (!f) return;
-    if (!f.type.startsWith('image/')) { toast('Можно прикреплять только изображения'); return; }
-    if (f.size > MAX_IMAGE_BYTES) { toast('Изображение больше 8 МБ'); return; }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const url = String(reader.result);
-      attachment = { url, base64: url.split(',')[1] || '', mime: f.type, name: f.name, file: f };
-      renderAttachment();
-    };
-    reader.readAsDataURL(f);
+    if (f) handlePickedFile(f);
   });
 
   // drag&drop изображения на область чата — тот же путь, что и через кнопку
   els.inner.addEventListener('dragover', (e) => { e.preventDefault(); });
   els.inner.addEventListener('drop', (e) => {
-    const f = [...(e.dataTransfer?.files || [])].find((x) => x.type.startsWith('image/'));
+    const f = (e.dataTransfer?.files || [])[0];
     if (!f) return;
     e.preventDefault();
-    if (f.size > MAX_IMAGE_BYTES) { toast('Изображение больше 8 МБ'); return; }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const url = String(reader.result);
-      attachment = { url, base64: url.split(',')[1] || '', mime: f.type, name: f.name, file: f };
-      renderAttachment();
-    };
-    reader.readAsDataURL(f);
+    handlePickedFile(f);
   });
 
   // ------------------------------------------------------------------ лайтбокс фото

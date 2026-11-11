@@ -25,25 +25,25 @@ import faiss
 import uuid
 
 # Импорт GCN-компонентов (папка GCN, файл GCN.py)
-from GCN.GCN import (
+from .GCN import (
     KnowledgeObject, KnowledgeType, KnowledgeEvent, EventType,
     MemoryStore, Provenance, MemoryHierarchy,
     MemoryScope, KnowledgeIngestion   # добавить эти два
 )
 
-from GCN.llm_client import call_llm
-from GCN import memory_trust as mt
-from GCN import inhibition as inh
-from GCN import stabilizer as stab
+from .llm_client import call_llm
+from . import memory_trust as mt
+from . import inhibition as inh
+from . import stabilizer as stab
 import statistics
 from collections import OrderedDict
-from GCN.plasticity import PlasticityParams, stdp_delta, stabilized_plasticity, normalize_strength
-from GCN.learned_rerank import RerankLearner
-from GCN.transition_model import TransitionModel, fit_with_gate
+from .plasticity import PlasticityParams, stdp_delta, stabilized_plasticity, normalize_strength
+from .learned_rerank import RerankLearner
+from .transition_model import TransitionModel, fit_with_gate
 
 logger = logging.getLogger(__name__)
 
-from GCN.config_ai import *  # единственный источник конфигурации (fallback-дубль констант удалён)
+from .config_ai import *  # единственный источник конфигурации (fallback-дубль констант удалён)
 
 
 def _plasticity_params() -> PlasticityParams:
@@ -1330,7 +1330,7 @@ class CognitiveMemory:
         (in-degree + out-degree), то есть "несущие стены" графа.
         """
         if top_k is None:
-            from GCN.config_ai import IDENTITY_CORE_SIZE
+            from .config_ai import IDENTITY_CORE_SIZE
             top_k = IDENTITY_CORE_SIZE
 
         if not self.synapses:
@@ -1564,7 +1564,7 @@ class CognitiveMemory:
         раньше здесь лежала вторая копия списка маркеров, расходившаяся
         с оригиналом (и уже один раз ломавшаяся на захардкоженных годах).
         """
-        from GCN.web_search import is_time_sensitive_query
+        from .web_search import is_time_sensitive_query
         return is_time_sensitive_query(query)
 
     def _is_factual(self, query: str) -> bool:
@@ -3452,7 +3452,7 @@ class MemoryService:
         и "Embeddings init failed ... Disabling". Закрываем только то, что
         реально жило в этом процессе; несуществующие слои не трогаем.
         """
-        from GCN.memory_graph import GCNMemoryRouter
+        from .memory_graph import GCNMemoryRouter
         if GCNMemoryRouter._shared_instance is not None:
             await GCNMemoryRouter._shared_instance.shutdown()
         if GCNMemoryRouter._global_instance is not None:
