@@ -32,11 +32,12 @@
   };
   // Чаты хранятся отдельно для каждого аккаунта: иначе другой человек на этом же
   // браузере увидит чужие разговоры. Настройки общие для браузера.
-  const KEY = { sessions: 'ai_sessions', msgs: 'ai_messages_', settings: 'ai_settings_v2', gen: 'ai_gen', cid: 'ai_cid' };
+  const KEY = { sessions: 'ai_sessions', msgs: 'ai_messages_', settings: 'ai_settings_v2', gen: 'ai_gen', cid: 'ai_cid', sync: 'ai_sync' };
   function setScope(uid) {
     KEY.sessions = uid ? `ai:${uid}:sessions` : 'ai_sessions';
     KEY.msgs = uid ? `ai:${uid}:messages_` : 'ai_messages_';
     KEY.gen = uid ? `ai:${uid}:gen` : 'ai_gen';
+    KEY.sync = uid ? `ai:${uid}:sync` : 'ai_sync';
     LS_MSGS = uid ? `ai:${uid}:messages_` : 'ai_messages_';
   }
   // Устойчивый id устройства (не аккаунта!): серверный генерационный лок знает,
@@ -697,6 +698,35 @@
       return;
     }
 
+    // Живая строка «что делает модель»: фаза, время, токены, скорость.
+    function genStatusNode(m) {
+      const g = m.gen || { phase: 'connecting' };
+      const LABEL = {
+        connecting: 'Подключаюсь к модели',
+        prep: 'Собираю контекст и память',
+        tools: 'Проверяю, нужны ли инструменты',
+        prompt: 'Модель читает промпт',
+        thinking: 'Модель думает',
+        generating: 'Пишет ответ',
+        done: 'Завершаю',
+      };
+      const fmtSec = (s) => (s < 60 ? `${Math.round(s)} с` : `${Math.floor(s / 60)} м ${Math.round(s % 60)} с`);
+      const el = document.createElement('div');
+      el.className = 'gen-status phase-' + (g.phase || 'connecting');
+      const dot = document.createElement('span'); dot.className = 'gs-dot';
+      const label = document.createElement('span'); label.className = 'gs-label';
+      label.textContent = LABEL[g.phase] || 'Работаю';
+      const meta = document.createElement('span'); meta.className = 'gs-meta';
+      const parts = [];
+      if (g.elapsed != null) parts.push(fmtSec(g.elapsed));
+      if (g.tokens) parts.push(`${g.tokens} ток`);
+      if (g.tps) parts.push(`${g.tps} ток/с`);
+      meta.textContent = parts.join(' · ');
+      const bar = document.createElement('span'); bar.className = 'gs-bar';
+      el.append(dot, label, meta, bar);
+      return el;
+    }
+
     if (m.reasoning) {
       const thinking = !!m.pending && !m.text;          // модель ещё думает
       const d = document.createElement('details');
@@ -719,12 +749,7 @@
       bubble.appendChild(d);
     }
 
-    if (m.pending && !m.text) {
-      const t = document.createElement('span');
-      t.className = 'typing';
-      t.innerHTML = '<span></span><span></span><span></span>';
-      bubble.appendChild(t);
-    } else if (m.text) {
+    if (m.text) {
       const md = document.createElement('div');
       md.className = 'markdown-body';
       if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') md.classList.add('plain');
@@ -732,6 +757,8 @@
       bubble.appendChild(md);
       highlight(md);
     }
+    // Пока генерация идёт — показываем, что происходит (вместо немых трёх точек)
+    if (m.pending) bubble.appendChild(genStatusNode(m));
 
     for (const url of m.images || []) {
       bubble.appendChild(imageBlock(url, 'Изображение', 'image').wrap);
@@ -1138,6 +1165,7 @@
       if (!m.rStart) m.rStart = Date.now();
       m.reasoning = (m.reasoning || '') + ev.reasoning_token;
     }
+    else if (ev.gen_phase) m.gen = Object.assign({}, ev.gen_phase, { at: Date.now() });
     else if (ev.sources) m.sources = (m.sources || []).concat(ev.sources);
     else if (ev.image_url) {
       // ИСПРАВЛЕНИЕ (мобильная версия): URL нормализуем сразу — абсолютные
@@ -1260,6 +1288,7 @@
       let none = false;
       const finished = await readSSE(res, (ev) => {
         if (ev.no_active_generation) { none = true; return; }
+        if (ev.gen_phase) { applyEvent(ev, bot); if (id === currentId) paintLive(idx); return; }
         applyEvent(ev, bot);
         // наблюдатель НЕ пишет в своё хранилище/на сервер: финальный commit
         // делает только владелец генерации — иначе два клиента гоняли бы
@@ -1471,6 +1500,7 @@
     const img = attachment;
     attachment = null;
     renderAttachment();
+    document.dispatchEvent(new Event('ai:send'));   // голос выключаем до очистки поля
     els.input.value = '';
     autoSize();
 
@@ -1951,6 +1981,21 @@
       els.input.placeholder = 'Говорите…';
       try { rec.start(); }
       catch (_) { rec = null; micBtn.classList.remove('on'); micBtn.setAttribute('aria-pressed', 'false'); els.input.placeholder = idlePlaceholder; }
+    });
+
+    // Текст отправлен — голос выключаем сразу. Хвост распознавания отбрасываем,
+    // иначе он дописался бы в уже очищенное поле, а микрофон остался бы включённым.
+    document.addEventListener('ai:send', () => {
+      if (!rec) return;
+      const r = rec;
+      rec = null;
+      r.onresult = null;
+      r.onerror = null;
+      try { r.abort(); } catch (_) { /* уже остановлен */ }
+      micBtn.classList.remove('on');
+      micBtn.setAttribute('aria-pressed', 'false');
+      micBtn.title = 'Голосовой ввод: нажмите и говорите';
+      if (!msgTimer) els.input.placeholder = idlePlaceholder;
     });
   }
 
@@ -2609,9 +2654,17 @@
       // (гонка чтения/записи), откат базы назад ломает delta-канал —
       // следующий since=<старый> не покрывается журналом -> need_full.
       SYNC.base = Math.max(st.updated || 0, SYNC.base || 0);
+      saveSyncMeta();
       return true;
     } catch { return false; }
     finally { if (killTimer) clearTimeout(killTimer); }
+  }
+
+  // База и ETag переживают перезагрузку: следующий старт тянет только дельту.
+  // Сохраняем ПОСЛЕ применения изменений к IndexedDB, иначе база опередит данные.
+  function saveSyncMeta() {
+    try { localStorage.setItem(KEY.sync, JSON.stringify({ base: SYNC.base, etag: SYNC.etag })); }
+    catch { /* квота localStorage — не критично, будет полный снимок */ }
   }
 
   // Дельта-канал: GET /ui-state/delta?since=base отдаёт только изменённые чаты.
@@ -2627,6 +2680,7 @@
       if (d.need_full) return 'full';         // базы нет — нужен полный снимок
       if (d.changed) await applyServerDelta(d);
       if (d.updated) SYNC.base = d.updated;
+      saveSyncMeta();
       return true;
     } catch { return null; }
   }
@@ -2878,8 +2932,22 @@
     // открытый чат читаем из IndexedDB до первой отрисовки (а не из localStorage-зеркала)
     const firstChat = sessions.slice().sort((a, b) => (b.updated || b.created) - (a.updated || a.created))[0];
     if (firstChat) await hydrateChat(firstChat.id);
-    SYNC.ready = await pullState();
-    init();
+
+    // Восстанавливаем базу с прошлого визита. Только если в IndexedDB реально есть
+    // чаты: иначе дельта от старой базы вернула бы лишь новое и чаты потерялись бы.
+    try {
+      const m = JSON.parse(localStorage.getItem(KEY.sync) || 'null');
+      if (m && m.base > 0 && sessions.length) { SYNC.base = m.base; SYNC.etag = m.etag || ''; }
+    } catch { /* повреждённая запись — начнём с полного снимка */ }
+
+    init();                                       // локальные чаты видны сразу, без ожидания сети
+    if (SYNC.base > 0) {
+      SYNC.ready = true;                          // pullDelta работает только при ready
+      const d = await pullDelta();                // только изменения с прошлого визита
+      if (d === 'full' || d === null) SYNC.ready = await pullState();
+    } else {
+      SYNC.ready = await pullState();
+    }
     startRemotePoll();
     startStateEvents();   // мгновенное получение чужих сохранений (откат к poll, если канал недоступен)
     if (SYNC.ready && (SYNC.base === 0 || sessions.length)) scheduleSync();

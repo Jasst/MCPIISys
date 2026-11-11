@@ -4,8 +4,8 @@ import logging
 import time
 from typing import List, Dict, Optional
 import contextvars
-from GCN.config_ai import LM_STUDIO_URL, LM_STUDIO_API_KEY, LM_STUDIO_TIMEOUT, LM_STUDIO_STREAM_TIMEOUT, DEFAULT_MAX_TOKENS, LM_STUDIO_MODEL
-from GCN.config_ai import LLM_BACKEND, LLAMACPP_URL
+from .config_ai import LM_STUDIO_URL, LM_STUDIO_API_KEY, LM_STUDIO_TIMEOUT, LM_STUDIO_STREAM_TIMEOUT, DEFAULT_MAX_TOKENS, LM_STUDIO_MODEL
+from .config_ai import LLM_BACKEND, LLAMACPP_URL
 
 # Модель, выбранная пользователем в чате. Ставится на время запроса (см. ai_assistant),
 # вне запроса — LM_STUDIO_MODEL.
@@ -36,7 +36,7 @@ import json
 logger = logging.getLogger(__name__)
 
 try:
-    from GCN.config_ai import LLM_NO_THINK_SUFFIX
+    from .config_ai import LLM_NO_THINK_SUFFIX
 except ImportError:  # старый config_ai без константы — поведение как раньше
     LLM_NO_THINK_SUFFIX = ""
 
@@ -176,7 +176,7 @@ async def call_llm(
     if not include_reasoning:
         # служебный вызов: рассуждения, которые модель вывела в content, не должны
         # попадать в гипотезы, JSON-парсеры и поисковые запросы
-        from GCN.llm_text import strip_thinking
+        from .llm_text import strip_thinking
         cleaned = strip_thinking(content)
         if cleaned != content.strip():
             logger.info("call_llm: вырезаны рассуждения из ответа (%d -> %d символов)",
@@ -197,6 +197,70 @@ async def call_llm(
     return f"<thought>{reasoning}</thought>\n\n{content}"
 
 
+HEARTBEAT_S = 1.0            # пока модель молчит — раз в секунду шлём статус с таймером
+STATUS_MIN_INTERVAL_S = 0.5  # при потоке токенов — не чаще двух раз в секунду
+
+
+class _ThinkSplitter:
+    """Отделяет <think>…</think> от ответа.
+
+    LM Studio (и llama-server без --reasoning-format) часто отдаёт рассуждения прямо
+    в content, а не в reasoning_content. Теги могут прийти разорванными между чанками,
+    поэтому хвост, который может оказаться началом тега, держим в буфере.
+    """
+
+    OPEN = "<think>"
+    CLOSE = "</think>"
+
+    def __init__(self):
+        self.in_think = False
+        self.buf = ""
+
+    @staticmethod
+    def _partial(low: str, tag: str) -> int:
+        """Длина хвоста low, который может быть началом tag."""
+        for k in range(min(len(tag) - 1, len(low)), 0, -1):
+            if low.endswith(tag[:k]):
+                return k
+        return 0
+
+    def _emit(self, text: str, out: list) -> None:
+        if not text:
+            return
+        if self.in_think:
+            out.append(("reasoning", text))
+        else:
+            out.append(("content", text))
+
+    def feed(self, text: str) -> list:
+        """Разбирает очередной кусок. Текст без явных тегов идёт как ответ/рассуждение
+        по текущему состоянию. Случай «</think> без открывающего тега» (часть шаблонов
+        Qwen3) здесь не угадываем: без явного тега невозможно отличить рассуждение от
+        ответа, не задерживая весь ответ. Для таких моделей надёжнее включить
+        «Separate reasoning_content» в LM Studio."""
+        self.buf += text
+        out: list = []
+        while True:
+            low = self.buf.lower()
+            tag = self.CLOSE if self.in_think else self.OPEN
+            i = low.find(tag)
+            if i == -1:
+                keep = self._partial(low, tag)
+                cut = len(self.buf) - keep
+                self._emit(self.buf[:cut], out)
+                self.buf = self.buf[cut:]
+                return out
+            self._emit(self.buf[:i], out)
+            self.buf = self.buf[i + len(tag):]
+            self.in_think = not self.in_think
+
+    def flush(self) -> list:
+        out: list = []
+        self._emit(self.buf, out)
+        self.buf = ""
+        return out
+
+
 async def _call_llm_stream_once(
     messages: List[Dict[str, str]],
     temp: float = 0.7,
@@ -204,19 +268,17 @@ async def _call_llm_stream_once(
     stop: Optional[List[str]] = None,
     include_reasoning: bool = True,
 ):
-    """Потоковый вызов LLM (LM Studio).
+    """Потоковый вызов LLM (LM Studio или llama-server — один OpenAI-совместимый протокол).
 
-    Yield-ит dict-события, чтобы разделить reasoning и content в потоке:
-      {"kind": "reasoning", "text": "..."} — reasoning-токен (нативный thinking)
+    Yield-ит dict-события:
+      {"kind": "reasoning", "text": "..."} — рассуждение (reasoning_content или <think>)
       {"kind": "content",   "text": "..."} — токен финального ответа
-      {"kind": "truncated", "reason": "no_done"|"length"} — поток закончился
-                                              без [DONE] или по лимиту токенов.
+      {"kind": "status", "phase", "elapsed", "tokens", "tps"} — что происходит сейчас:
+          connecting → prompt (модель читает промпт) → thinking → generating → done.
+          Шлётся и когда модель молчит (heartbeat), чтобы интерфейс не выглядел зависшим.
+      {"kind": "truncated", "reason": "no_done"|"length"} — поток закончился аварийно.
 
-    include_reasoning=False — reasoning-события не эмитятся (модель может
-    тратить токены на thinking, но UI его не увидит).
-
-    Обратная несовместимость: раньше функция yield-ила строки, теперь dict.
-    Единственный потребитель — _stream_response_worker в ai_assistant.py.
+    include_reasoning=False — рассуждения не эмитятся (статусы и счётчики идут).
     """
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LM_STUDIO_API_KEY}"}
     payload = {
@@ -226,12 +288,28 @@ async def _call_llm_stream_once(
         "temperature": temp,
         "max_tokens": max_tokens,
         "stream": True,
+        # usage приходит в финальном чанке: видно реальный размер промпта и ответа
+        "stream_options": {"include_usage": True},
     }
     if stop:
         payload["stop"] = stop
     timeout = aiohttp.ClientTimeout(total=LM_STUDIO_STREAM_TIMEOUT)
     stream_did_complete = False
     finish_reason = None
+    usage = None
+    splitter = _ThinkSplitter()
+    t0 = time.monotonic()
+    first_t: Optional[float] = None
+    n_tok = 0                 # ≈ токены: и llama-server, и LM Studio стримят по токену на чанк
+    phase = "connecting"
+    last_phase = ""
+    last_status = 0.0
+
+    def _status(now: float) -> Dict:
+        tps = round(n_tok / max(now - first_t, 0.5), 1) if first_t is not None else 0.0
+        return {"kind": "status", "phase": phase, "elapsed": round(now - t0, 1),
+                "tokens": n_tok, "tps": tps}
+
     try:
         session = await _get_session()
         async with session.post(_chat_url(), json=payload,
@@ -245,48 +323,90 @@ async def _call_llm_stream_once(
                     yield {"kind": "content",
                            "text": f"[Ошибка LLM: HTTP {resp.status}] {error_text[:200]}"}
                 return
-            async for line in resp.content:
-                if not line:
-                    break
-                line = line.decode('utf-8').strip()
-                if not line or not line.startswith('data: '):
-                    continue
-                data = line[6:]
-                if data == '[DONE]':
-                    stream_did_complete = True
-                    break
-                try:
-                    chunk = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                choice = chunk.get('choices', [{}])[0]
-                delta = choice.get('delta', {})
 
-                if 'finish_reason' in choice:
-                    finish_reason = choice['finish_reason']
+            phase = "prompt"           # ответ начал идти: модель читает промпт
+            yield _status(time.monotonic())
 
-                # Reasoning-токен — эмитим сразу, без накопления.
-                if include_reasoning:
-                    r_chunk = (
-                        delta.get('reasoning_content')
-                        or delta.get('reasoning')
-                        or ''
-                    )
-                    if r_chunk:
-                        yield {"kind": "reasoning", "text": r_chunk}
-
-                # Content-токен — тоже сразу.
-                content = delta.get('content', '')
-                if content:
-                    yield {"kind": "content", "text": content}
+            it = resp.content.__aiter__()
+            pending = asyncio.ensure_future(it.__anext__())
+            try:
+                while True:
+                    done, _ = await asyncio.wait({pending}, timeout=HEARTBEAT_S)
+                    now = time.monotonic()
+                    if not done:
+                        yield _status(now)     # модель молчит — показываем, что мы ждём
+                        continue
+                    try:
+                        raw = pending.result()
+                    except StopAsyncIteration:
+                        raw = None
+                    items: list = []
+                    finished = raw is None
+                    if raw is not None:
+                        pending = asyncio.ensure_future(it.__anext__())
+                        line = raw.decode("utf-8", errors="replace").strip()
+                        if line.startswith("data: "):
+                            data = line[6:]
+                            if data == "[DONE]":
+                                stream_did_complete = True
+                                finished = True
+                            else:
+                                try:
+                                    chunk = json.loads(data)
+                                except json.JSONDecodeError:
+                                    chunk = None
+                                if isinstance(chunk, dict):
+                                    if chunk.get("usage"):
+                                        usage = chunk["usage"]
+                                    # LM Studio в финальном usage-чанке шлёт choices: [] — не падаем
+                                    choice = (chunk.get("choices") or [{}])[0] or {}
+                                    if "finish_reason" in choice:
+                                        finish_reason = choice["finish_reason"]
+                                    delta = choice.get("delta") or {}
+                                    r_chunk = (delta.get("reasoning_content")
+                                               or delta.get("reasoning") or "")
+                                    content = delta.get("content") or ""
+                                    if r_chunk or content:
+                                        n_tok += 1
+                                        if first_t is None:
+                                            first_t = now
+                                    if r_chunk:
+                                        items.append(("reasoning", r_chunk))
+                                    if content:
+                                        items.extend(splitter.feed(content))
+                    if finished:
+                        items.extend(splitter.flush())
+                    for kind, text in items:
+                        if kind == "reasoning":
+                            phase = "thinking"
+                            if include_reasoning:
+                                yield {"kind": "reasoning", "text": text}
+                        else:
+                            phase = "generating"
+                            yield {"kind": "content", "text": text}
+                    if finished:
+                        break
+                    # смену фазы шлём сразу, счётчики — не чаще STATUS_MIN_INTERVAL_S
+                    if phase != last_phase or now - last_status >= STATUS_MIN_INTERVAL_S:
+                        last_status = now
+                        last_phase = phase
+                        yield _status(now)
+            finally:
+                pending.cancel()
 
             if not stream_did_complete:
                 logger.warning(
-                    f"LLM stream ended without [DONE] marker "
-                    f"(finish_reason={finish_reason})"
+                    f"LLM stream ended without [DONE] marker (finish_reason={finish_reason})"
                 )
                 yield {"kind": "truncated", "reason": "no_done"}
                 return
+            if usage:
+                phase = "done"
+                yield {"kind": "status", "phase": "done",
+                       "elapsed": round(time.monotonic() - t0, 1),
+                       "tokens": usage.get("completion_tokens", n_tok),
+                       "prompt_tokens": usage.get("prompt_tokens"),
+                       "tps": _status(time.monotonic())["tps"]}
             if finish_reason == "length":
                 logger.warning("LLM stream truncated by token limit (finish_reason=length)")
                 yield {"kind": "truncated", "reason": "length"}
@@ -364,7 +484,7 @@ async def call_llm_stream(
     Так длинная самопроверка не съедает весь лимит токенов и не оставляет
     пользователя без ответа.
     """
-    from GCN.config_ai import REASONING_MAX_CHARS
+    from .config_ai import REASONING_MAX_CHARS
 
     if not include_reasoning or REASONING_MAX_CHARS <= 0:
         async for ev in _call_llm_stream_once(messages, temp, max_tokens, stop, include_reasoning):
@@ -401,7 +521,7 @@ async def list_models() -> List[str]:
     """Идентификаторы моделей из LM Studio (/v1/models). Эмбеддинг-модели не нужны для чата.
     При LLM_BACKEND=llamacpp — GGUF-файлы из MODELS_DIR (сеть не нужна)."""
     if _is_llamacpp():
-        from GCN import llamacpp_manager as lm
+        from . import llamacpp_manager as lm
         return [m["id"] for m in lm.scan_models()]
     url = LM_STUDIO_URL.replace("/chat/completions", "/models")
     headers = {"Authorization": f"Bearer {LM_STUDIO_API_KEY}"}
@@ -456,6 +576,7 @@ def invalidate_models_cache() -> None:
 # упирается в медленную «холодную» загрузкуWeight'ов посреди генерации.
 _LMS_API_BASE = LM_STUDIO_URL.replace("/v1/chat/completions", "") + "/api/v0"
 _LMS_HEADERS = {"Authorization": f"Bearer {LM_STUDIO_API_KEY}"}
+_LMS_ROOT = LM_STUDIO_URL.replace("/v1/chat/completions", "")   # http://host:port
 
 # id модели, которая по нашему учёту сейчас в VRAM (None — неизвестно);
 # timestamp последней успешной загрузки — для блокировки смены модели
@@ -477,6 +598,9 @@ _last_ops_ts: float = 0.0
 # или рестарта процесса: если LM Studio уже держит эту модель в VRAM — заново
 # ничего НЕ загружается (см. reconcile_loaded_model / GET /ai/models).
 _desired_model_id: Optional[str] = None
+# контекст (n_ctx), с которым грузим/хотим грузить модель в LM Studio, и тот, что реально загружен
+_desired_ctx: Optional[int] = None
+_loaded_ctx: Optional[int] = None
 # глобальная блокировка: выгрузка/загрузка weights — эксклюзивная операция,
 # во время неё нельзя запускать генерацию и вторую смену модели
 model_ops_lock = asyncio.Lock()
@@ -548,7 +672,7 @@ async def reconcile_loaded_model(target: Optional[str]) -> Dict:
     asyncio.Lock не реентерабелен, будет взаимоблокировка. Поэтому логика
     unload+load продублирована здесь инлайн (лок уже удерживается).
     """
-    global _loaded_model_id, _last_ops_ts
+    global _loaded_model_id, _last_ops_ts, _loaded_ctx
     target = target or LM_STUDIO_MODEL
     if _is_llamacpp():
         return await _llamacpp_switch(target)
@@ -565,7 +689,8 @@ async def reconcile_loaded_model(target: Optional[str]) -> Dict:
         try:
             if current and current != target and current in known_ids:
                 await unload_model(current)
-            await load_model(target)
+            await load_model(target, _desired_ctx)
+            _loaded_ctx = _desired_ctx
             _remember_loaded(target)
             invalidate_models_cache()
             _notify_state_changed()
@@ -646,8 +771,13 @@ async def get_loaded_model() -> Optional[str]:
     """
     global _loaded_model_id
     if _is_llamacpp():
-        from GCN import llamacpp_manager as lm
+        from . import llamacpp_manager as lm
         loaded = lm.manager.loaded_id()
+        _remember_loaded(loaded)
+        return loaded
+    v1 = await _lms_loaded_v1()
+    if v1 is not None:
+        loaded = v1[0] if v1 else None
         _remember_loaded(loaded)
         return loaded
     try:
@@ -723,24 +853,79 @@ async def get_loaded_model() -> Optional[str]:
     return None
 
 
+def _lms_ctx(params: Optional[Dict]) -> Optional[int]:
+    """Размер контекста из настроек модели (params["ctx"]); None — не задан."""
+    try:
+        v = int((params or {}).get("ctx") or 0)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
+async def _lms_try(attempts, timeout: int, what: str) -> int:
+    """POST по первому поддержанному эндпоинту. LM Studio 0.4+ отдаёт нативный
+    /api/v1 (умеет context_length); старые версии — только /api/v0. 404/405 —
+    переходим к следующему варианту. Возвращает индекс успешного варианта."""
+    session = await _get_session()
+    last = ""
+    for idx, (url, body) in enumerate(attempts):
+        async with session.post(url, headers=_LMS_HEADERS, json=body,
+                                timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+            if resp.status in (404, 405):
+                last = f"{url} → HTTP {resp.status}"
+                continue
+            if resp.status >= 400:
+                text = await resp.text()
+                raise RuntimeError(f"LM Studio {what}: HTTP {resp.status}: {text[:150]}")
+            return idx
+    raise RuntimeError(f"LM Studio {what}: ни один эндпоинт не отвечает ({last})")
+
+
+async def _lms_loaded_v1() -> Optional[List[str]]:
+    """Загруженные модели по нативному /api/v1/models (LM Studio 0.4+).
+    None — эндпоинта нет или формат не распознан: тогда работает перебор по /api/v0."""
+    try:
+        session = await _get_session()
+        async with session.get(f"{_LMS_ROOT}/api/v1/models", headers=_LMS_HEADERS,
+                               timeout=aiohttp.ClientTimeout(total=5)) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json(content_type=None)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return None
+    items = (data.get("models") or data.get("data") or []) if isinstance(data, dict) else []
+    if not any(isinstance(m, dict) and "loaded_instances" in m for m in items):
+        return None
+    loaded: List[str] = []
+    for m in items:
+        if not isinstance(m, dict) or not m.get("loaded_instances"):
+            continue
+        mid = m.get("key") or m.get("id")
+        if mid:
+            loaded.append(mid)
+    return loaded
+
+
 async def unload_model(model_id: str) -> None:
-    url = f"{_LMS_API_BASE}/models/unload"
-    session = await _get_session()
-    async with session.post(url, headers=_LMS_HEADERS, json={"key": model_id},
-                            timeout=aiohttp.ClientTimeout(total=30)) as resp:
-        if resp.status >= 400:
-            text = await resp.text()
-            raise RuntimeError(f"LM Studio unload '{model_id}': HTTP {resp.status}: {text[:150]}")
+    await _lms_try([
+        (f"{_LMS_ROOT}/api/v1/models/unload", {"instance_id": model_id}),
+        (f"{_LMS_API_BASE}/models/unload", {"key": model_id}),
+    ], timeout=30, what=f"unload '{model_id}'")
 
 
-async def load_model(model_id: str) -> None:
-    url = f"{_LMS_API_BASE}/models/load"
-    session = await _get_session()
-    async with session.post(url, headers=_LMS_HEADERS, json={"key": model_id},
-                            timeout=aiohttp.ClientTimeout(total=180)) as resp:
-        if resp.status >= 400:
-            text = await resp.text()
-            raise RuntimeError(f"LM Studio load '{model_id}': HTTP {resp.status}: {text[:150]}")
+async def load_model(model_id: str, context_length: Optional[int] = None) -> None:
+    v1_body = {"model": model_id}
+    if context_length:
+        v1_body["context_length"] = int(context_length)
+    idx = await _lms_try([
+        (f"{_LMS_ROOT}/api/v1/models/load", v1_body),
+        (f"{_LMS_API_BASE}/models/load", {"key": model_id}),
+    ], timeout=180, what=f"load '{model_id}'")
+    if context_length and idx != 0:
+        logger.warning("LM Studio без /api/v1 не принимает context_length: "
+                       "контекст нужно задать в самой LM Studio")
 
 
 async def ensure_model_loaded(target: Optional[str], params: Optional[Dict] = None) -> Dict:
@@ -750,7 +935,7 @@ async def ensure_model_loaded(target: Optional[str], params: Optional[Dict] = No
     Идемпотентна: если целевая модель уже в VRAM — ничего не делаем.
     Вызывать ТОЛЬКО когда генерация не идёт (см. /ai/models/select).
     """
-    global _loaded_model_id, _load_ts, _last_ops_ts, _preload_task
+    global _loaded_model_id, _load_ts, _last_ops_ts, _preload_task, _desired_ctx, _loaded_ctx
     target = target or LM_STUDIO_MODEL
     set_desired_model(target)
     # Не отменяем самих себя: ensure_model_loaded вызывается и из задачи дозарядки
@@ -762,10 +947,13 @@ async def ensure_model_loaded(target: Optional[str], params: Optional[Dict] = No
         _preload_task = None
     if _is_llamacpp():
         return await _llamacpp_switch(target, params)
+    ctx = _lms_ctx(params) or _desired_ctx
+    if ctx:
+        _desired_ctx = ctx
     async with model_ops_lock:
         current = await get_loaded_model()
         _last_ops_ts = time.monotonic()
-        if current == target:
+        if current == target and (not ctx or ctx == _loaded_ctx):
             # Модель УЖЕ в VRAM (например, страница перезагрузилась и фронтенд
             # повторно прислал тот же выбор) — НЕ трогаем веса: никаких
             # unload/load, только сверка учёта. Это и есть защита от повторной
@@ -788,9 +976,11 @@ async def ensure_model_loaded(target: Optional[str], params: Optional[Dict] = No
             # Страховка: в unload уходит ТОЛЬКО реальный id модели. Пустые или
             # служебные значения ('current', 'default' и т.п.) LM Studio не
             # понимает и отвечает «Model with identifier 'current' not found».
-            if current and current != target and current in known_ids:
+            # Перезагрузка нужна и когда модель та же, но контекст другой (иначе слайдер не работает)
+            if current and current in known_ids and (current != target or ctx != _loaded_ctx):
                 await unload_model(current)
-            await load_model(target)
+            await load_model(target, ctx)
+            _loaded_ctx = ctx
             _remember_loaded(target)
             _load_ts = time.monotonic()
             invalidate_models_cache()
@@ -822,7 +1012,7 @@ async def unload_current_model() -> Dict:
     _reconcile_task = None
     async with model_ops_lock:
         if _is_llamacpp():
-            from GCN import llamacpp_manager as lm
+            from . import llamacpp_manager as lm
             await lm.manager.unload()
         else:
             current = await get_loaded_model()
@@ -845,7 +1035,7 @@ async def _llamacpp_switch(target: str, params: Optional[Dict] = None) -> Dict:
     params=None — взять сохранённые для модели параметры (или из .env).
     """
     global _load_ts, _last_ops_ts
-    from GCN import llamacpp_manager as lm
+    from . import llamacpp_manager as lm
     mgr = lm.manager
     async with model_ops_lock:
         current = mgr.loaded_id()

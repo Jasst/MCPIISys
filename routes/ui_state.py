@@ -876,6 +876,23 @@ async def adopt_generated_media(body: dict, user_id: str = Depends(require_auth)
     return {'url': f'/ai/ui-media/{h}{ext}', 'reused': reused}
 
 
+# Сериализованный снапшот на аккаунт: json.dumps на каждый GET — лишняя работа,
+# если файл не менялся. Ключ — сам объект из _cached_read: он меняется только
+# при записи (_write_state инвалидирует кэш), значит идентичность объекта = версия.
+_JSON_CACHE: dict[str, tuple[dict, str, str]] = {}   # uid -> (снапшот, json, etag)
+
+
+def _state_json(user_id: str) -> tuple[str, str]:
+    st = _cached_read(user_id)
+    hit = _JSON_CACHE.get(user_id)
+    if hit and hit[0] is st:
+        return hit[1], hit[2]
+    data = json.dumps(st, ensure_ascii=False)
+    etag = _state_etag(data)
+    _JSON_CACHE[user_id] = (st, data, etag)
+    return data, etag
+
+
 @router.get('/ui-state')
 async def get_state(request: Request, user_id: str = Depends(require_auth)):
     """Полный снимок состояния с ETag.
@@ -885,9 +902,7 @@ async def get_state(request: Request, user_id: str = Depends(require_auth)):
     клиенте. Это второй эшелон против «дёрганья»: даже когда дельта-канал
     недоступен и устройство тянет полный GET, повторяющийся опрос ничего не
     перерисовывает."""
-    st = _cached_read(user_id)
-    data = json.dumps(st, ensure_ascii=False)
-    etag = _state_etag(data)
+    data, etag = _state_json(user_id)
     if request.headers.get('if-none-match') == etag:
         return Response(status_code=304, headers={'ETag': etag})
     return Response(content=data, media_type='application/json',

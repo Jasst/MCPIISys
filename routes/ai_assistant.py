@@ -3293,6 +3293,7 @@ class CognitiveController:
                              or (AUTO_SEARCH_ENABLED and needs_search_heuristic(message)))
             decision = self.fast_router.classify(message, force_slow=_pre_slow) if FAST_ROUTER_ENABLED else None
 
+            await push(f"data: {json.dumps({'gen_phase': {'phase': 'prep'}})}\n\n")
             messages, search_meta = await self._prepare_messages(
                 message, web_search, image_base64, image_mime, reasoning,
                 rerank=(decision is None or decision.route is Route.TOOLS),
@@ -3344,6 +3345,7 @@ class CognitiveController:
                             and not _pre_slow):
                         decision = self.fast_router.classify(message, force_slow=True)
                     if decision is None or decision.route is Route.TOOLS:
+                        await push(f"data: {json.dumps({'gen_phase': {'phase': 'tools'}})}\n\n")
                         tool_run = await self.tool_router.run(message, messages, history_tail=history_tail)
                         tool_trace = tool_run.get("tool_trace", [])
                         if decision is not None and not decision.hard:
@@ -3552,6 +3554,9 @@ class CognitiveController:
                                 timer.mark("ttft")
                             full_response += text
                             await push(f"data: {json.dumps({'token': text})}\n\n")
+                        elif kind == "status":
+                            # что сейчас делает модель: фаза, таймер, токены, ток/с
+                            await push(f"data: {json.dumps({'gen_phase': {k: v for k, v in event.items() if k != 'kind'}})}\n\n")
                         elif kind == "truncated":
                             reason = event.get("reason")
                             logger.warning(
