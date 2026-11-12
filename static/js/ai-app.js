@@ -711,12 +711,12 @@
     function genStatusNode(m) {
       const g = m.gen || { phase: 'connecting' };
       const LABEL = {
-        connecting: 'Подключаюсь к модели',
+        connecting: 'Подключение к модели',
         prep: 'Собираю контекст и память',
         tools: 'Проверяю, нужны ли инструменты',
-        prompt: 'Модель читает промпт',
-        thinking: 'Модель думает',
-        generating: 'Пишет ответ',
+        prompt: 'Анализирую данные',
+        thinking: 'Думаю',
+        generating: 'Пишу ответ',
         done: 'Завершаю',
       };
       const fmtSec = (s) => (s < 60 ? `${Math.round(s)} с` : `${Math.floor(s / 60)} м ${Math.round(s % 60)} с`);
