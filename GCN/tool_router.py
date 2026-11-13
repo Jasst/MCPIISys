@@ -116,6 +116,7 @@ try:
         MCP_TOOL_TIMEOUT_OVERRIDES,
         MAX_TOOL_ITERATIONS,
         MAX_TOOL_ITERATIONS_DYNAMIC,
+        TOOL_RESULT_MAX_CHARS,
     )
 except ImportError:
     TOOL_CALL_TIMEOUT_SECONDS = 45
@@ -123,6 +124,7 @@ except ImportError:
     MCP_TOOL_TIMEOUT_OVERRIDES = {}
     MAX_TOOL_ITERATIONS = 3
     MAX_TOOL_ITERATIONS_DYNAMIC = 7
+    TOOL_RESULT_MAX_CHARS = 3000
 
 
 # ИСПРАВЛЕНИЕ (генерация изображений в чате "не всегда работает"): тяжёлые
@@ -195,7 +197,7 @@ class ToolSpec:
             "type": "function",
             "function": {
                 "name": self.qualified_name,
-                "description": self.description[:1000],
+                "description": self.description[:300],
                 "parameters": self.parameters or {"type": "object", "properties": {}},
             },
         }
@@ -524,7 +526,11 @@ class ToolRouter:
             return False, json.dumps(result, ensure_ascii=False, default=str)
         if not isinstance(result, str):
             result = json.dumps(result, ensure_ascii=False, default=str)
-        return not _is_error_text(result), result
+        ok = not _is_error_text(result)
+        if len(result) > TOOL_RESULT_MAX_CHARS:
+            result = (result[:TOOL_RESULT_MAX_CHARS]
+                      + f"\n[...обрезано, всего {len(result)} симв.]")
+        return ok, result
 
     async def _decide_native(self, running_messages: List[Dict], temp: float):
         """Возвращает (статус, решения, сырые tool_calls, текст ассистента).

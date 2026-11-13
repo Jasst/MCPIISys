@@ -66,7 +66,7 @@ LLAMACPP_DEFAULTS = {
 if LLM_BACKEND == "llamacpp" and LLAMACPP_DEFAULT_MODEL:
     # для всего приложения «модель по умолчанию» — выбранная в .env GGUF
     LM_STUDIO_MODEL = LLAMACPP_DEFAULT_MODEL
-DEFAULT_MAX_TOKENS = 8096         # увеличенная длина ответа по умолчанию (было 2048)
+DEFAULT_MAX_TOKENS = 4096         # увеличенная длина ответа по умолчанию (было 2048)
 
 # -------------------------------
 # Reasoning / теги <thought>
@@ -528,6 +528,10 @@ GROUNDED_ANSWER_TEMP = 0.4
 RESPONSE_VERIFICATION_ENABLED = True
 VERIFICATION_MIN_WORDS = 12
 VERIFICATION_MAX_TOKENS = 150
+# Лимит на «материалы» (память/поиск/инструменты), которые уходят верификатору
+VERIFY_EVIDENCE_MAX_CHARS = 4000
+# Лимит на один результат инструмента в контексте модели (символов)
+TOOL_RESULT_MAX_CHARS = 5000
 
 # -------------------------------
 # Планирование подзадач перед ReAct-циклом инструментов — пункт №4

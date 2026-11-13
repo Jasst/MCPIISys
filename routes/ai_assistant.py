@@ -1505,9 +1505,10 @@ class CognitiveController:
             return ("ответ описывает внутреннее устройство ассистента вместо сути "
                     "вопроса — переформулируйте запрос")
 
+        evidence_capped = (evidence_text or "").strip()[:VERIFY_EVIDENCE_MAX_CHARS]
         prompt = VERIFICATION_PROMPT.format(
-            message=message,
-            evidence=evidence_text.strip() or
+            message=message[:1000],
+            evidence=evidence_capped or
                      "(материалов не передавалось — ответ должен опираться только на общие "
                      "знания, без конкретных выдуманных фактов, цифр, дат, имён и источников)",
             response=response[:4000],
@@ -2753,7 +2754,7 @@ class CognitiveController:
         from GCN import file_store as fs
         self._turn_files = None
         blocks = []
-        for fid in list(file_ids)[:10]:
+        for fid in list(file_ids or [])[:10]:      # file_ids по умолчанию None — без вложений
             try:
                 meta = fs.get_meta(self.user_id, fid)
                 if meta:

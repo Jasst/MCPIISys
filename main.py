@@ -109,7 +109,13 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=['*'],
     allow_headers=['*'],
+    # MCP Streamable HTTP возвращает идентификатор сессии в этом заголовке.
+    # По умолчанию браузер скрывает от JS нестандартные заголовки ответа;
+    # без явного expose_headers BlockChat не сможет прочитать Mcp-Session-Id
+    # и не сможет отправить его обратно на следующем запросе (Missing session ID).
+    expose_headers=['Mcp-Session-Id'],
 )
+
 app.add_middleware(
     SessionMiddleware,
     secret_key=SECRET_KEY,

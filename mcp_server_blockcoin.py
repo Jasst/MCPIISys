@@ -502,16 +502,21 @@ _MCP_PUBLIC_HOSTS = [h.strip() for h in os.getenv("MCP_PUBLIC_HOSTS", "").split(
 _MCP_PUBLIC_HOSTS = sorted({x for h in _MCP_PUBLIC_HOSTS for x in (h, h if h.startswith("www.") else "www." + h)})
 _MCP_ALLOWED_HOSTS = ["127.0.0.1", "127.0.0.1:*", "localhost", "localhost:*"] + \
     [x for h in _MCP_PUBLIC_HOSTS for x in (h, h + ":*")]
-_MCP_ALLOWED_ORIGINS = ["http://localhost", "http://127.0.0.1"] + \
+
+_MCP_EXTRA_ORIGINS = [x.strip() for x in os.getenv("MCP_EXTRA_ORIGINS", "").split(",") if x.strip()]
+
+_MCP_ALLOWED_ORIGINS = ["http://localhost", "http://127.0.0.1"] + _MCP_EXTRA_ORIGINS + \
     [f"https://{h}" for h in _MCP_PUBLIC_HOSTS]
 
 mcp = FastMCP(
     "Local AI Memory",
     instructions="Когнитивная память с веб-поиском и генерацией",
     streamable_http_path="/",
+    #stateless_http=True,
     transport_security=TransportSecuritySettings(
         allowed_hosts=_MCP_ALLOWED_HOSTS,
         allowed_origins=_MCP_ALLOWED_ORIGINS,
+
     ),
 )
 
