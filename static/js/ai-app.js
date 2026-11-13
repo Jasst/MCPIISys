@@ -682,8 +682,133 @@
     return { wrap, img, save };
   }
 
+  // ---- единый рендер статуса/истории хода мыслей ----
+const PHASE_LABEL = {
+  connecting: 'Собираю контекст и память',   // «Подключение» слито с prep
+  prep:       'Собираю контекст и память',
+  tools:      'Проверяю, нужны ли инструменты',
+  prompt:     'Анализирую данные',
+  thinking:   'Думаю',
+  generating: 'Пишу ответ',
+  done:       'Готово',
+};
+const TRACE_ICON = { start: '▶', route: '🧭', understand: '🔎', round: '↻', tool: '🛠', done: '✓' };
+
+  function fmtSec(s) {
+  s = Math.max(0, Number(s) || 0);
+  return s < 60 ? `${Math.round(s)} с` : `${Math.floor(s / 60)} м ${Math.round(s % 60)} с`;
+}
+
+  function traceRows(trace) {
+  const wrap = document.createElement('div');
+  wrap.className = 'gt-list';
+  for (const ev of trace || []) {
+    const row = document.createElement('div');
+    row.className = 'gt-row gt-' + (ev.kind || 'info');
+    const ic = document.createElement('span'); ic.className = 'gt-ic';
+    ic.textContent = TRACE_ICON[ev.kind] || '•';
+    const tx = document.createElement('span'); tx.className = 'gt-tx';
+    tx.textContent = ev.text || '';
+    row.append(ic, tx);
+    wrap.appendChild(row);
+  }
+  return wrap;
+}
+
+// Живая строка статуса во время генерации (свёрнута — высота не скачет)
+  function genLiveNode(m) {
+  const g = m.gen || { phase: 'connecting' };
+  const phase = g.phase || 'connecting';
+  const d = document.createElement('details');
+  d.className = 'gen-live phase-' + phase;
+  d.open = !!m._liveOpen;
+  d.addEventListener('toggle', () => { m._liveOpen = d.open; });
+
+  const s = document.createElement('summary');
+  s.className = 'gl-summary';
+  const dot = document.createElement('span'); dot.className = 'gl-dot';
+  const label = document.createElement('span'); label.className = 'gl-label';
+  label.textContent = PHASE_LABEL[phase] || 'Работаю';
+  const meta = document.createElement('span'); meta.className = 'gl-meta';
+  const parts = [];
+  if (g.elapsed != null) parts.push(fmtSec(g.elapsed));
+  if (g.tokens) parts.push(`${g.tokens} ток`);
+  if (g.tps) parts.push(`${g.tps} ток/с`);
+  meta.textContent = parts.join(' · ');
+  const bar = document.createElement('span'); bar.className = 'gl-bar';
+  const chev = document.createElement('span'); chev.className = 'gl-chev'; chev.textContent = '▸';
+  s.append(dot, label, meta, bar, chev);
+  d.appendChild(s);
+
+  const body = document.createElement('div');
+  body.className = 'gl-body';
+  if (m.reasoning) {
+    const r = document.createElement('div');
+    r.className = 'gl-reasoning';
+    r.textContent = m.reasoning;
+    body.appendChild(r);
+  }
+  if (m.trace && m.trace.length) body.appendChild(traceRows(m.trace));
+  if (body.childNodes.length) {
+    d.appendChild(body);
+  } else {
+    d.classList.add('no-body');
+    s.addEventListener('click', (e) => { if (d.classList.contains('no-body')) e.preventDefault(); });
+  }
+  return d;
+}
+
+// История хода мыслей у завершённого ответа — одна свёрнутая строка
+  function historyNode(m) {
+  const d = document.createElement('details');
+  d.className = 'gen-history';
+  d.open = !!m._histOpen;
+  d.addEventListener('toggle', () => { m._histOpen = d.open; });
+  const s = document.createElement('summary');
+  const n = (m.trace || []).length;
+  const sec = (m.rStart && m.rEnd) ? Math.max(1, Math.round((m.rEnd - m.rStart) / 1000)) : 0;
+  s.textContent = n
+    ? `Ход мыслей (${n})` + (sec ? ` · раздумывал ${sec} с` : '')
+    : (sec ? `Раздумывал ${sec} с` : 'Раздумья');
+  d.appendChild(s);
+  const body = document.createElement('div');
+  body.className = 'gh-body';
+  if (m.reasoning) {
+    const r = document.createElement('div');
+    r.className = 'gh-reasoning';
+    r.textContent = m.reasoning;
+    body.appendChild(r);
+  }
+  if (m.trace && m.trace.length) body.appendChild(traceRows(m.trace));
+  d.appendChild(body);
+  return d;
+}
+
   function paintBubble(bubble, m) {
-    bubble.innerHTML = '';
+    // Сохраняем состояние до пересборки: иначе innerHTML='' убивает
+    // scrollTop у gl-body и раскрытый details — пользователь не может
+    // листать reasoning во время генерации.
+    const prevLive = bubble.querySelector('.gen-live');
+    const wasOpen = prevLive ? prevLive.open : !!m._liveOpen;
+    const prevBody = prevLive ? prevLive.querySelector('.gl-body') : null;
+    const prevScroll = prevBody ? prevBody.scrollTop : 0;
+    const wasBodyAtBottom = prevBody
+      ? (prevBody.scrollHeight - prevBody.scrollTop - prevBody.clientHeight < 20)
+      : true;
+
+        bubble.innerHTML = '';
+    // После полной пересборки выставляем кэш «инвалидации структуры» в
+    // СОСТОЯНИЕ, КОТОРОЕ ТОЛЬКО ЧТО НАРИСОВАНО. Тогда следующий
+    // paintBubbleLive увидит «счётчики совпадают» и пойдёт по in-place
+    // пути. Если поставить null — каждый чанк будет снова вызывать
+    // paintBubble (undefined !== 0 → stateChanged=true → paintBubble →
+    // null → ...), и весь смысл оптимизации пропадает.
+    bubble._liveState = {
+      notes: (m.notes || []).length,
+      images: (m.images || []).length,
+      sources: (m.sources || []).length,
+      err: m.error || '',
+    };
 
     if (m.role === 'user') {
       if (m.image) {
@@ -707,55 +832,26 @@
       return;
     }
 
-    // Живая строка «что делает модель»: фаза, время, токены, скорость.
-    function genStatusNode(m) {
-      const g = m.gen || { phase: 'connecting' };
-      const LABEL = {
-        connecting: 'Подключение к модели',
-        prep: 'Собираю контекст и память',
-        tools: 'Проверяю, нужны ли инструменты',
-        prompt: 'Анализирую данные',
-        thinking: 'Думаю',
-        generating: 'Пишу ответ',
-        done: 'Завершаю',
-      };
-      const fmtSec = (s) => (s < 60 ? `${Math.round(s)} с` : `${Math.floor(s / 60)} м ${Math.round(s % 60)} с`);
-      const el = document.createElement('div');
-      el.className = 'gen-status phase-' + (g.phase || 'connecting');
-      const dot = document.createElement('span'); dot.className = 'gs-dot';
-      const label = document.createElement('span'); label.className = 'gs-label';
-      label.textContent = LABEL[g.phase] || 'Работаю';
-      const meta = document.createElement('span'); meta.className = 'gs-meta';
-      const parts = [];
-      if (g.elapsed != null) parts.push(fmtSec(g.elapsed));
-      if (g.tokens) parts.push(`${g.tokens} ток`);
-      if (g.tps) parts.push(`${g.tps} ток/с`);
-      meta.textContent = parts.join(' · ');
-      const bar = document.createElement('span'); bar.className = 'gs-bar';
-      el.append(dot, label, meta, bar);
-      return el;
+    // Во время генерации — одна стабильная строка СВЕРХУ; текст стримится ниже.
+    // Всё «шумное» (reasoning + trace) внутри неё и свёрнуто: высота не скачет.
+    if (m.pending) bubble.appendChild(genLiveNode(m));
+
+    // Восстанавливаем open и scrollTop у только что созданной строки
+    const newLive = bubble.querySelector('.gen-live');
+    if (newLive && m.pending) {
+      newLive.open = wasOpen;
+      m._liveOpen = wasOpen;
+      const newBody = newLive.querySelector('.gl-body');
+      if (newBody) {
+        // если пользователь был у дна — прилипаем ко дну (видно новый reasoning)
+        // если он ушёл вверх читать — держим его позицию
+        newBody.scrollTop = wasBodyAtBottom ? newBody.scrollHeight : prevScroll;
+      }
     }
 
-    if (m.reasoning) {
-      const thinking = !!m.pending && !m.text;          // модель ещё думает
-      const d = document.createElement('details');
-      d.className = 'reasoning';
-      const s = document.createElement('summary');
-      if (thinking) {
-        s.textContent = 'Думаю…';
-      } else {
-        const sec = m.rStart && m.rEnd ? Math.max(1, Math.round((m.rEnd - m.rStart) / 1000)) : 0;
-        s.textContent = sec ? `Размышлял ${sec} с` : 'Ход рассуждений';
-      }
-      const body = document.createElement('div');
-      body.className = 'rbody';
-      body.textContent = m.reasoning;
-      d.append(s, body);
-      // Открываем во время размышления, сворачиваем, когда пошёл ответ.
-      // Если пользователь сам раскрыл блок, его выбор не сбиваем.
-      if (m._rWant !== thinking) { d.open = thinking; m._rWant = thinking; }
-      else d.open = d.open || thinking;
-      bubble.appendChild(d);
+    // Завершённый ответ: история хода мыслей — одна свёрнутая строка.
+    if (!m.pending && ((m.trace && m.trace.length) || m.reasoning)) {
+      bubble.appendChild(historyNode(m));
     }
 
     if (m.file) {
@@ -771,11 +867,14 @@
       md.className = 'markdown-body';
       if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') md.classList.add('plain');
       md.innerHTML = renderMd(m.text);
+      // ВАЖНО: запоминаем, какой текст уже отрисован в этот слот. Без этого
+      // paintBubbleLive после первой же stateChanged-пересборки (пришёл новый
+      // tool_call/warning/error) увидит md._lastText === undefined !== m.text
+      // и пересчитает markdown ещё раз на идентичном тексте — лишний CPU.
+      md._lastText = m.text;
       bubble.appendChild(md);
       highlight(md);
     }
-    // Пока генерация идёт — показываем, что происходит (вместо немых трёх точек)
-    if (m.pending) bubble.appendChild(genStatusNode(m));
 
     for (const url of m.images || []) {
       bubble.appendChild(imageBlock(url, 'Изображение', 'image').wrap);
@@ -958,7 +1057,10 @@
     else updateScrollButton();
   }
 
-  // Обновляет один пузырь во время генерации, не перерисовывая весь чат
+  // Обновляет один пузырь во время генерации, не перерисовывая весь чат.
+  // Используется «умное» in-place обновление (paintBubbleLive): строка статуса
+  // gen-live и её CSS-анимации (пульс точки, бегущая полоска) НЕ пересоздаются,
+  // markdown пересчитывается только при изменении текста — интерфейс не мигает.
   let paintQueued = false;
   function paintLive(idx) {
     if (paintQueued) return;
@@ -968,8 +1070,151 @@
       if (!currentId) return;
       const el = els.inner.querySelector(`.msg[data-idx="${idx}"] .bubble`);
       const m = loadMsgs(currentId)[idx];
-      if (el && m) { paintBubble(el, m); scrollEnd(); }
+      if (el && m) {
+        // wasAtBottom считаем ДО перерисовки: после paintBubbleLive() scrollHeight
+        // уже вырос, scrollTop — нет; isNearBottom() вернул бы false и прилипание
+        // к дну сломалось бы (пользователь видел бы «обрезанный» стрим).
+        const wasAtBottom = isNearBottom();
+        paintBubbleLive(el, m);
+        if (wasAtBottom) scrollEnd(true);
+      }
     });
+  }
+
+  // Точечное обновление pending-пузыря: не пересоздаём <details class="gen-live">
+  // (иначе CSS-анимации пульса/полоски стартуют с нуля 20+ раз в секунду), а
+  // меняем textContent у label/meta/reasoning и пересобираем markdown только
+  // если текст ответа реально изменился. При изменении counts (notes/images/
+  // sources/error) или при переходе pending→done — полная пересборка через
+  // paintBubble (это редко, дёргания не вызывает).
+    function paintBubbleLive(bubble, m) {
+    // Не-pending — завершённый ответ; пересобираем полностью (редко).
+    if (!m.pending) return paintBubble(bubble, m);
+
+    const live = bubble.querySelector('.gen-live');
+    if (!live) return paintBubble(bubble, m);   // первая отрисовка
+
+    // Инвалидация структуры: пришли новые notes/images/sources/error — их
+    // порядок и количество влияют на вёрстку пузыря, проще пересобрать целиком.
+    const st = bubble._liveState || {};
+    const notesN = (m.notes || []).length;
+    const imagesN = (m.images || []).length;
+    const sourcesN = (m.sources || []).length;
+    const err = m.error || '';
+    const stateChanged = st.notes !== notesN || st.images !== imagesN
+                      || st.sources !== sourcesN || st.err !== err;
+    bubble._liveState = { notes: notesN, images: imagesN, sources: sourcesN, err };
+    if (stateChanged) return paintBubble(bubble, m);
+
+    // 1. Фаза и классы строки статуса — in-place
+    const g = m.gen || { phase: 'connecting' };
+    const phase = g.phase || 'connecting';
+    const wantCls = 'gen-live phase-' + phase;
+    if (live.className !== wantCls && live.className !== wantCls + ' no-body') {
+      live.className = wantCls + (live.querySelector('.gl-body') ? '' : ' no-body');
+    }
+
+    // 2. label — только textContent, без пересоздания
+    const labelEl = live.querySelector('.gl-label');
+    if (labelEl) {
+      const wanted = PHASE_LABEL[phase] || 'Работаю';
+      if (labelEl.textContent !== wanted) labelEl.textContent = wanted;
+    }
+
+    // 3. meta (время/токены/ток-в-с) — только textContent
+    const metaEl = live.querySelector('.gl-meta');
+    if (metaEl) {
+      const parts = [];
+      if (g.elapsed != null) parts.push(fmtSec(g.elapsed));
+      if (g.tokens) parts.push(`${g.tokens} ток`);
+      if (g.tps) parts.push(`${g.tps} ток/с`);
+      const wanted = parts.join(' · ');
+      if (metaEl.textContent !== wanted) metaEl.textContent = wanted;
+    }
+
+    // 4. gl-body (reasoning + trace)
+    const hasReasoning = !!m.reasoning;
+    const hasTrace = m.trace && m.trace.length;
+    let body = live.querySelector('.gl-body');
+
+    if (!hasReasoning && !hasTrace) {
+      if (body) body.remove();
+      live.classList.add('no-body');
+    } else {
+      live.classList.remove('no-body');
+      if (!body) {
+        body = document.createElement('div');
+        body.className = 'gl-body';
+        live.appendChild(body);
+      }
+      // 4a. reasoning — append-only textContent, сохранение скролла
+      const oldR = body.querySelector('.gl-reasoning');
+      if (hasReasoning) {
+        if (!oldR) {
+          const r = document.createElement('div');
+          r.className = 'gl-reasoning';
+          r.textContent = m.reasoning;
+          body.insertBefore(r, body.firstChild);
+          body.scrollTop = body.scrollHeight;
+        } else if (oldR.textContent !== m.reasoning) {
+          const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 20;
+          oldR.textContent = m.reasoning;
+          if (atBottom) body.scrollTop = body.scrollHeight;
+        }
+      } else if (oldR) {
+        oldR.remove();
+      }
+
+      // 4b. trace — пересобрать, если изменилось число событий ИЛИ последнее
+      // событие. Второе условие нужно, когда m.trace уже на лимите (в
+      // applyEvent стоит .slice(-80)): число не растёт, но последний элемент
+      // меняется — без этой проверки новое событие не появилось бы в UI.
+      const oldTrace = body.querySelector('.gt-list');
+      const oldN = oldTrace ? oldTrace.children.length : 0;
+      const newN = hasTrace ? m.trace.length : 0;
+      let lastChanged = false;
+      if (hasTrace && oldN === newN && oldN > 0) {
+        const lastEv = m.trace[m.trace.length - 1];
+        const lastRow = oldTrace.children[oldN - 1];
+        const shownIc = lastRow.querySelector('.gt-ic');
+        const shownTx = lastRow.querySelector('.gt-tx');
+        const wantIc = TRACE_ICON[lastEv.kind] || '•';
+        const wantTx = lastEv.text || '';
+        if ((shownIc && shownIc.textContent !== wantIc)
+            || (shownTx && shownTx.textContent !== wantTx)) {
+          lastChanged = true;
+        }
+      }
+      if (oldN !== newN || lastChanged) {
+        if (oldTrace) oldTrace.remove();
+        if (hasTrace) body.appendChild(traceRows(m.trace));
+      }
+    }
+
+    // 5. Текст ответа (markdown) — пересобираем только внутренний HTML слота.
+    // Слот .markdown-body стабилен: создаём один раз, дальше меняем innerHTML
+    // только при изменении текста (сравнение по строке — дешёвое).
+    let md = bubble.querySelector('.markdown-body');
+    if (m.text) {
+      if (!md) {
+        md = document.createElement('div');
+        md.className = 'markdown-body';
+        if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') {
+          md.classList.add('plain');
+        }
+        // сразу после live, до notes/images/sources/error
+        live.insertAdjacentElement('afterend', md);
+        md._lastText = '';
+      }
+      if (md._lastText !== m.text) {
+        const freshHtml = renderMd(m.text);
+        if (md.innerHTML !== freshHtml) md.innerHTML = freshHtml;
+        md._lastText = m.text;
+        highlight(md);
+      }
+    } else if (md) {
+      md.remove();
+    }
   }
 
   // ------------------------------------------------------------------ состояние панели
@@ -1183,6 +1428,7 @@
       m.reasoning = (m.reasoning || '') + ev.reasoning_token;
     }
     else if (ev.gen_phase) m.gen = Object.assign({}, ev.gen_phase, { at: Date.now() });
+    else if (ev.trace) m.trace = (m.trace || []).concat([ev.trace]).slice(-80);
     else if (ev.sources) m.sources = (m.sources || []).concat(ev.sources);
     else if (ev.image_url) {
       // ИСПРАВЛЕНИЕ (мобильная версия): URL нормализуем сразу — абсолютные
@@ -1305,7 +1551,7 @@
       let none = false;
       const finished = await readSSE(res, (ev) => {
         if (ev.no_active_generation) { none = true; return; }
-        if (ev.gen_phase) { applyEvent(ev, bot); if (id === currentId) paintLive(idx); return; }
+        if (ev.gen_phase || ev.trace) { applyEvent(ev, bot); if (id === currentId) paintLive(idx); return; }
         applyEvent(ev, bot);
         // наблюдатель НЕ пишет в своё хранилище/на сервер: финальный commit
         // делает только владелец генерации — иначе два клиента гоняли бы
@@ -2598,6 +2844,7 @@
     const out = Object.assign({}, item);
     if (dst.text && !item.text) out.text = dst.text;
     if (dst.reasoning && !item.reasoning) out.reasoning = dst.reasoning;
+    if (dst.trace && !item.trace) out.trace = dst.trace;
     if (dst.pending === false && item.pending) out.pending = false;
     return out;
   }

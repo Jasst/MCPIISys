@@ -133,6 +133,73 @@ except ImportError:
 # LLM + генерация до 140с). Теперь таймаут берётся из ToolSpec, а для
 # MCP-инструментов — из того же MCP_TOOL_TIMEOUT_OVERRIDES, что и в
 # mcp_client_manager (generate_image 300с, research_topic 240с, web_search 90с).
+# ===== ПРЕДВАРИТЕЛЬНЫЙ ОТБОР ИНСТРУМЕНТОВ (без LLM) =====
+# Меньше инструментов в запросе к модели -> короче промпт и меньше раундов.
+TOOL_PRESELECT_ENABLED = True
+TOOL_PRESELECT_MAX = 8
+TOOL_RESULT_CONTEXT_CHARS = 1200     # в контекст модели уходит сокращённый результат; полный — в трассе
+
+_INTENT_RULES = [
+    (("запомни", "сохрани", "запиши", "добавь в память"), ["internal__remember"]),
+    (("вспомни", "напомни", "что я говорил", "что ты знаешь", "помнишь"), ["internal__recall"]),
+    (("цель", "цели"), ["internal__add_goal", "internal__get_goals"]),
+    (("нарисуй", "картинк", "изображени", "сгенерируй"), ["internal__generate_image"]),
+    (("поищи", "найди", "новост", "курс ", "погода", "в интернете", "актуальн"), ["internal__web_search"]),
+    (("github", "гитхаб"), ["internal__fetch_github_file"]),
+    (("код", "файл", "архитектур", "структур", "проект", "модул", "функци"),
+     ["internal__project_structure", "internal__read_code", "internal__search_code"]),
+    (("ошибк", "traceback", "exception"), ["internal__analyze_error"]),
+    (("цепочк", "идентичност"), ["internal__get_identity_chain"]),
+    (("инструмент", "что ты умеешь", "твои возможности"), ["internal__list_tools"]),
+]
+
+
+def preselect_tools(message: str, specs) -> Tuple[List[str], str]:
+    """Выбирает подмножество инструментов по намерению и совпадению слов с описаниями.
+    Возвращает (имена, пояснение для трассы). Пустой список = инструменты не нужны,
+    и цикл роутера не запускается вовсе."""
+    msg = (message or "").lower()
+    visible = {s.qualified_name for s in specs}
+    chosen: List[str] = []
+    reasons: List[str] = []
+    for markers, names in _INTENT_RULES:
+        hit = next((m for m in markers if m in msg), None)
+        if hit is None:
+            continue
+        reasons.append(f"«{hit.strip()}»")
+        for n in names:
+            if n in visible and n not in chosen:
+                chosen.append(n)
+    if not chosen:
+        words = set(re.findall(r"[a-zа-яё]{5,}", msg))
+        scored = []
+        for s in specs:
+            text = f"{s.qualified_name} {s.description or ''}".lower()
+            score = sum(1 for w in words if w in text)
+            if score >= 2:
+                scored.append((score, s.qualified_name))
+        for _, n in sorted(scored, reverse=True)[:3]:
+            chosen.append(n)
+        if chosen:
+            reasons.append("совпадение слов с описаниями")
+    return chosen[:TOOL_PRESELECT_MAX], ", ".join(reasons)
+
+
+def _clip_result(text) -> str:
+    text = str(text or "")
+    if len(text) <= TOOL_RESULT_CONTEXT_CHARS:
+        return text
+    return text[:TOOL_RESULT_CONTEXT_CHARS] + "\n[…результат обрезан для контекста модели]"
+
+
+def _short_args(args) -> str:
+    try:
+        s = json.dumps(args or {}, ensure_ascii=False)
+    except Exception:
+        s = str(args)
+    return s if len(s) <= 120 else s[:120] + "…"
+
+
 def _resolve_timeout(tool_name: str):
     low = (tool_name or "").lower()
     for marker, t in MCP_TOOL_TIMEOUT_OVERRIDES.items():
@@ -280,7 +347,7 @@ class ToolRegistry:
     def as_openai_tools(self) -> List[Dict[str, Any]]:
         return [t.as_openai_tool() for t in self._visible()]
 
-    def as_text_catalog(self) -> str:
+    def as_text_catalog(self, only=None) -> str:
         examples = {
             "internal__fetch_github_file": '{"path": "GCN/config_ai.py"}',
             "internal__recall": '{"query": "проект", "top_k": 5}',
@@ -303,6 +370,8 @@ class ToolRegistry:
         }
         lines = []
         for t in self._visible():
+            if only is not None and t.qualified_name not in only:
+                continue
             props = (t.parameters or {}).get("properties", {})
             arg_hint = ", ".join(props.keys()) if props else "без аргументов"
             ex = examples.get(t.qualified_name, "")
@@ -538,6 +607,9 @@ class ToolRouter:
                 'no_tool'    — ответ получен, вызовов нет;
                 'error'      — запрос не удался (пустой ответ, _error, исключение)."""
         tools = self.registry.as_openai_tools()
+        only = getattr(self, "_only", None)
+        if only is not None:
+            tools = [t for t in tools if t.get("function", {}).get("name") in only]
         try:
             msg = await self.llm_raw_caller(running_messages, temp=temp, max_tokens=500, tools=tools)
         except Exception as e:
@@ -618,7 +690,7 @@ class ToolRouter:
     async def _decide_fallback(self, message: str, history_tail: str,
                                 tool_results_so_far: str, temp: float) -> Optional[Dict]:
         prompt = TOOL_DECISION_PROMPT.format(
-            tools_catalog=self.registry.as_text_catalog(),
+            tools_catalog=self.registry.as_text_catalog(getattr(self, "_only", None)),
             history_tail=history_tail or "(пусто)",
             message=message,
             tool_results_so_far=tool_results_so_far or "(ещё не было)",
@@ -627,7 +699,8 @@ class ToolRouter:
         return _strict_parse_json_object(raw)
 
     # ===== ОСНОВНОЙ МЕТОД =====
-    async def run(self, message: str, base_messages: List[Dict], history_tail: str = "") -> Dict[str, Any]:
+    async def run(self, message: str, base_messages: List[Dict], history_tail: str = "",
+                  on_event=None) -> Dict[str, Any]:
         """
         ReAct-цикл: до max_iterations раундов вызова инструментов.
 
@@ -643,6 +716,29 @@ class ToolRouter:
             return {"tool_trace": [], "used_native": False}
 
         self._scratchpad = []
+
+        async def emit(kind: str, text: str, **extra) -> None:
+            """Событие трассы для пользователя. Сбой доставки не должен ломать ответ."""
+            if on_event is None:
+                return
+            try:
+                await on_event({"kind": kind, "text": text, **extra})
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"ToolRouter: trace emit failed: {e}")
+
+        visible_specs = self.registry._visible()
+        ctx_text = message if len(message or "") > 40 else f"{message or ''} {(history_tail or '')[-600:]}"
+        if TOOL_PRESELECT_ENABLED:
+            plan, why = preselect_tools(ctx_text, visible_specs)
+            self._only = set(plan)
+        else:
+            plan, why = [t.qualified_name for t in visible_specs], "отбор выключен"
+            self._only = None
+        if not plan:
+            await emit("understand", "инструменты не нужны — отвечаю напрямую")
+            return {"tool_trace": [], "used_native": False, "plan": [], "rounds": 0}
+        await emit("understand", f"понял запрос ({why}); инструменты: {', '.join(plan)}", tools=plan)
+
         message_lower = (message or "").lower()
 
         tool_trace: List[Dict[str, Any]] = []
@@ -690,6 +786,13 @@ class ToolRouter:
             running_messages = running_messages + [{"role": "user", "content": code_hint}]
             history_tail = f"{code_hint}\n\n{history_tail}" if history_tail else code_hint
 
+        if TOOL_PRESELECT_ENABLED:
+            running_messages = running_messages + [{
+                "role": "user",
+                "content": ("[Вызови сразу все нужные инструменты в ОДНОМ ответе — за один раунд. "
+                            "Если результатов уже достаточно, не вызывай инструменты.]"),
+            }]
+
         # Одна таблица на весь запуск: сигнатура -> текст результата (успех или ошибка).
         # Повтор той же сигнатуры не выполняется: модель получает прежний результат.
         seen_results: Dict[str, str] = {}
@@ -735,6 +838,8 @@ class ToolRouter:
                 break
 
             logger.info(f"ToolRouter: round {round_idx}, decisions: {decisions}")
+            await emit("round", f"раунд {round_idx + 1}: " + "; ".join(
+                f"{d.get('tool') or '?'}({_short_args(d.get('arguments'))})" for d in decisions))
 
             # 1. Разбор решений: имена, дедупликация, ответы на каждый вызов.
             responses: Dict[int, str] = {}
@@ -776,6 +881,8 @@ class ToolRouter:
                         "verification": "sufficient" if ok else "error",
                     }
                     tool_trace.append(entry)
+                    await emit("tool", ("✓ " if ok else "✗ ") + d["tool"] + ": "
+                               + str(text)[:140].replace("\n", " "), ok=ok)
                     round_results.append(entry)
                     if ok:
                         continue
@@ -810,7 +917,7 @@ class ToolRouter:
                     running_messages.append({
                         "role": "tool",
                         "tool_call_id": raw.get("id", ""),
-                        "content": responses.get(idx, "(нет результата)"),
+                        "content": _clip_result(responses.get(idx, "(нет результата)")),
                     })
             elif round_results:
                 running_messages.append({
@@ -824,6 +931,9 @@ class ToolRouter:
             for hint in round_hints:
                 running_messages.append({"role": "user", "content": hint})
 
+            if (round_results and all(r["ok"] for r in round_results)
+                    and not _looks_compound(message)):
+                break  # один успешный раунд покрыл простой запрос — финальный раунд не нужен
             if not to_execute:
                 break  # все вызовы были повторами — новой информации нет
 
@@ -858,7 +968,9 @@ class ToolRouter:
 
             round_idx += 1
 
-        return {"tool_trace": tool_trace, "used_native": used_native}
+        await emit("done", f"инструментов: {len(tool_trace)}, раундов: {round_idx + 1}; перехожу к ответу")
+        return {"tool_trace": tool_trace, "used_native": used_native,
+                "plan": plan, "rounds": round_idx + 1}
 
 
 def build_tool_trace_context(tool_trace: List[Dict[str, Any]]) -> str:

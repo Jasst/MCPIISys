@@ -88,7 +88,9 @@ REASONING_STOP_TOKENS: tuple = ()
 # Поэтому для ходов с включённым reasoning используем буст к обычному
 # DEFAULT_MAX_TOKENS. 4096 + 4096 = 8192 — комфортный запас и для thinking,
 # и для ответа. Если у модели context window меньше 16k — уменьшай.
-REASONING_MAX_TOKENS_BOOST = 4096
+REASONING_MAX_TOKENS_BOOST = max(
+    256, min(16000, int(os.getenv("REASONING_MAX_TOKENS_BOOST", "2048") or "2048"))
+)
 
 # -------------------------------
 # Параметры памяти (GCN)
@@ -246,7 +248,7 @@ MAX_TOOL_ITERATIONS_DYNAMIC = _int_env("MAX_TOOL_ITERATIONS_DYNAMIC", 7)
 
 # Лимит рассуждений модели (в символах), прежде чем ответ начат. Если модель думает
 # дольше, запрос повторяется без рассуждений. 0 — лимит выключен.
-REASONING_MAX_CHARS = _int_env("REASONING_MAX_CHARS", 6000, lo=0, hi=200000)
+REASONING_MAX_CHARS = _int_env("REASONING_MAX_CHARS", 3000, lo=0, hi=200000)
 
 # ИСПРАВЛЕНИЕ (рассинхронизация клиентского и серверного таймаута MCP):
 # mcp_client_manager.MCPToolManager.call_tool раньше всегда ждал ровно

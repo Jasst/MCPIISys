@@ -301,7 +301,7 @@ def _now() -> float:
 # =====================================================================
 SEARCH_TRIGGER_KEYWORDS = [
     'сегодня', 'сейчас', 'новости', 'курс', 'погода', 'свежие',
-    'последние', 'завтра', 'найди', 'поищи', 'актуальные',
+    'последние', 'завтра', 'актуальные',
     'сколько стоит', 'какой сейчас', 'последние данные',
     'статистика', 'результаты', 'кто победил', 'когда выйдет',
 ]
@@ -1151,6 +1151,20 @@ class CognitiveController:
                     os.remove(tmp_path)
                 except OSError:
                     pass
+
+    def _make_trace_emitter(self, push, sink=None):
+        """Трасса хода для фронтенда: события {'trace': {...}} идут по тому же SSE-потоку,
+        что и токены. Сбой доставки трассы не должен ломать генерацию."""
+        async def _emit(ev: Dict[str, Any]) -> None:
+            try:
+                payload = dict(ev)
+                payload["t"] = round(time.time(), 2)
+                if sink is not None and len(sink) < 200:
+                    sink.append(payload)
+                await push(f"data: {json.dumps({'trace': payload}, ensure_ascii=False)}\n\n")
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"[trace] не отправлено: {e}")
+        return _emit
 
     def _start_background_tasks(self):
         loop = asyncio.get_event_loop()
@@ -2893,6 +2907,7 @@ class CognitiveController:
                 "- Используй ТОЛЬКО XML-теги <thought> и </thought>\n"
                 "- Убедись, что после </thought> есть ДВА перевода строки перед ответом"
             )
+
             # Добавляем few-shot примеры если включено
             if REASONING_FEW_SHOT:
                 system_parts.append(
@@ -2906,6 +2921,14 @@ class CognitiveController:
                     "</thought>\n\n"
                     "Ответ: Лев Толстой"
                 )
+        if reasoning and not REASONING_FORCE_TAGS:
+            # Модель с нативным reasoning_content (Qwen3 и т.п.) не слушает
+            # инструкции о формате, но реагирует на инструкцию о краткости.
+            system_parts.append(
+                "=== РЕЖИМ РАССУЖДЕНИЙ ===\n"
+                "Рассуждай кратко: не более 10–15 предложений. Если вопрос простой — "
+                "не рассуждай, сразу переходи к ответу."
+            )
         if search_context:
             system_parts.append(
                 "Ты выполнил поиск в интернете, используй полученные данные как основной источник фактов.")
@@ -3371,7 +3394,10 @@ class CognitiveController:
                 await push("data: [DONE]\n\n")
                 return
 
-            await self._ensure_external_tools_registered()
+            # Регистрация MCP и проверка vision идут параллельно с подготовкой контекста.
+            _reg_task = asyncio.ensure_future(self._ensure_external_tools_registered())
+            _vision_task = (asyncio.ensure_future(model_supports_vision())
+                            if (image_base64 and LM_STUDIO_VISION_SUPPORTED) else None)
 
             self._set_search_context(message)
             # Если пользователь приложил фото, а модель его не «видит» — честно
@@ -3379,7 +3405,7 @@ class CognitiveController:
             # про картинку выглядит как галлюцинация.
             if image_base64:
                 # Проверяем реальную модель в LM Studio, а не захардкоженный флаг.
-                vision = await model_supports_vision() if LM_STUDIO_VISION_SUPPORTED else False
+                vision = (await _vision_task) if _vision_task is not None else False
                 if vision is False:   # None (сервер не сообщил) — пробуем отправить
                     await push(f"data: {json.dumps({'warning': 'Текущая модель не поддерживает анализ изображений — фото не будет учтено в ответе'})}\n\n")
                     # Картинку не отправляем вовсе: иначе текстовая модель вернёт 500
@@ -3389,11 +3415,15 @@ class CognitiveController:
             # Классификация (без LLM) ДО подготовки сообщений: на быстром маршруте
             # пропускаем LLM-реранк памяти. force_slow считаем так же, как это делает
             # _prepare_messages для search_requested.
-            _pre_slow = bool(web_search or reasoning or image_base64
+            # reasoning больше не форсирует цикл инструментов: решает роутер по содержанию запроса
+            _pre_slow = bool(web_search or image_base64
                              or (AUTO_SEARCH_ENABLED and needs_search_heuristic(message)))
             decision = self.fast_router.classify(message, force_slow=_pre_slow) if FAST_ROUTER_ENABLED else None
 
             await push(f"data: {json.dumps({'gen_phase': {'phase': 'prep'}})}\n\n")
+            trace_log: List[Dict[str, Any]] = []
+            _trace = self._make_trace_emitter(push, trace_log)
+            await _trace({"kind": "start", "text": "запрос принят, собираю контекст и память"})
             # Поиск стартует параллельно с подготовкой контекста и не ждёт её.
             forced_task = self._start_forced_search(message, web_search)
             try:
@@ -3411,6 +3441,7 @@ class CognitiveController:
 
             # Результат принудительного поиска — до ReAct-цикла (см. _await_forced_search).
             await self._await_forced_search(forced_task)
+            await _reg_task   # инструменты должны быть зарегистрированы до роутера
 
             # === ИСПРАВЛЕНИЕ: активное уточнение перемещено ПОСЛЕ ReAct-цикла ===
             has_url = bool(re.search(r'https?://', message))
@@ -3457,9 +3488,23 @@ class CognitiveController:
                         getattr(self, "_turn_files", None) is not None)
                     if skip_react:
                         logger.info("[router] ReAct пропущен: поиск выполнен, других задач нет")
-                    if (decision is None or decision.route is Route.TOOLS) and not skip_react:
+                    # Детерминированные инструменты (код/память) не зависят от роутера:
+                    # стартуем их параллельно с решением роутера, результаты мержим после.
+                    _det_code_trace: List[Dict[str, Any]] = []
+                    _det_mem_trace: List[Dict[str, Any]] = []
+                    _det_task = asyncio.gather(
+                        self._force_code_tool_if_requested(message, _det_code_trace),
+                        self._force_memory_tool_if_requested(message, _det_mem_trace),
+                        return_exceptions=True,
+                    )
+                    _route_tools = (decision is None or decision.route is Route.TOOLS) and not skip_react
+                    await _trace({"kind": "route", "text": (
+                        "маршрут: инструменты, роутер решает, что вызвать" if _route_tools
+                        else "маршрут: прямой ответ" + (" (поиск уже выполнен)" if skip_react else ""))})
+                    if _route_tools:
                         await push(f"data: {json.dumps({'gen_phase': {'phase': 'tools'}})}\n\n")
-                        tool_run = await self.tool_router.run(message, messages, history_tail=history_tail)
+                        tool_run = await self.tool_router.run(message, messages, history_tail=history_tail,
+                                                              on_event=_trace)
                         tool_trace = tool_run.get("tool_trace", [])
                         if decision is not None and not decision.hard:
                             # метка из реальности: понадобились ли инструменты на самом деле
@@ -3469,10 +3514,19 @@ class CognitiveController:
                         tool_trace = []
                     logger.info(f"[router] {decision}")
                     timer.mark("route+tools")
-                    # Детерминированный вызов code-tools (см. _force_code_tool_if_requested)
-                    await self._force_code_tool_if_requested(message, tool_trace)
-                    # Детерминированный вызов memory-инструментов («запомни X» / «вспомни Y»)
-                    await self._force_memory_tool_if_requested(message, tool_trace)
+                    # Ждём детерминированные инструменты (шли параллельно с роутером) и мержим без дублей.
+                    for _exc in await _det_task:
+                        if isinstance(_exc, BaseException):
+                            logger.warning(f"[det-tools] {_exc}")
+                    _call_key = lambda t: (t.get("tool"), json.dumps(t.get("arguments") or {}, sort_keys=True, ensure_ascii=False))
+                    _seen_calls = {_call_key(t) for t in tool_trace}
+                    for _t in _det_code_trace + _det_mem_trace:
+                        if _call_key(_t) in _seen_calls:
+                            continue
+                        _seen_calls.add(_call_key(_t))
+                        tool_trace.append(_t)
+                        await _trace({"kind": "tool", "text": ("✓ " if _t.get("ok") else "✗ ")
+                                      + str(_t.get("tool")) + ": " + str(_t.get("result", ""))[:140].replace("\n", " ")})
 
                     # === ИСПРАВЛЕНИЕ: активное уточнение ПОСЛЕ ReAct-цикла (для stream) ===
                     if not skip_clarification_before_react:
@@ -3803,6 +3857,9 @@ class CognitiveController:
                                   if isinstance(t, dict) and isinstance(t.get("image_url"), str) and t["image_url"]]
                     if _turn_imgs:
                         _bot["images"] = _turn_imgs
+                    _turn_trace = (locals().get("trace_log") or [])[-120:]
+                    if _turn_trace:
+                        _bot["trace"] = _turn_trace
                     _user = ({"id": user_msg_id, "role": "user", "text": message, "time": _now_ms}
                              if user_msg_id else None)
                     commit_final_message(str(self.user_id), chat_id, _user, _bot)
