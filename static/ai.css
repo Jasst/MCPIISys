@@ -102,7 +102,12 @@ body[data-fs="l"] { --chat-fs: 17px; }
 
 /* ---------- сообщения ---------- */
 .messages { flex: 1; overflow-y: auto; padding: 22px 16px 10px; position: relative; }
-.msgs-inner { max-width: 780px; min-height: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+.msgs-inner {
+  max-width: 780px; min-height: 100%; margin: 0 auto;
+  display: flex; flex-direction: column; gap: 18px;
+  width: 100%;
+  min-width: 0;
+}
 
 /* Обёртка сообщений: кнопка «к концу переписки» закреплена внизу видимой области
    и не зависит от прокрутки (раньше была sticky внутри прокручиваемого блока). */
@@ -158,7 +163,10 @@ body[data-fs="l"] { --chat-fs: 17px; }
 
 .bubble {
   padding: 11px 15px; border-radius: 16px; font-size: var(--chat-fs, 15px);
-  overflow-wrap: anywhere; word-wrap: break-word;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  min-width: 0;
+  max-width: 100%;
 }
 .msg.user .bubble {
   background: var(--accent-solid); color: var(--on-accent);
@@ -172,8 +180,10 @@ body[data-fs="l"] { --chat-fs: 17px; }
 
 .msg-foot {
   display: flex; align-items: center; gap: 2px; margin-top: 4px;
+  flex-wrap: wrap; row-gap: 2px;
   opacity: 0; transition: opacity var(--transition-fast);
 }
+
 .msg:hover .msg-foot, .msg:focus-within .msg-foot { opacity: 1; }
 .msg-foot .time { font-size: 11.5px; color: var(--text-muted); margin-right: 6px; }
 .act {
@@ -191,13 +201,25 @@ body[data-fs="l"] { --chat-fs: 17px; }
   white-space: pre-wrap; margin-top: 6px; padding: 6px 0 6px 12px; border-left: 2px solid var(--border-color);
 }
 
+.markdown-body {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  min-width: 0;
+  max-width: 100%;
+}
+.markdown-body p { margin: .4em 0; }
+.markdown-body ul, .markdown-body ol { padding-left: 1.4em; }
+.markdown-body.plain { white-space: pre-wrap; }
+
 .markdown-body p { margin: .4em 0; }
 .markdown-body ul, .markdown-body ol { padding-left: 1.4em; }
 /* Fallback без marked/DOMPurify (CDN недоступен): сохраняем переносы строк текста */
 .markdown-body.plain { white-space: pre-wrap; }
+
 .markdown-body pre {
   background: #0a0b0e; border: 1px solid var(--border-color); border-radius: 10px;
   padding: 12px; overflow-x: auto; font-size: 13px;
+  max-width: 100%;
 }
 .markdown-body code { font-family: ui-monospace, Consolas, monospace; }
 .code-wrap { position: relative; margin: 8px 0; }
@@ -208,6 +230,8 @@ body[data-fs="l"] { --chat-fs: 17px; }
 }
 .markdown-body :not(pre) > code {
   background: var(--bg-tertiary); padding: 1px 6px; border-radius: 6px; font-size: .92em;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .markdown-body img, .bubble img.gen {
   max-width: 100%; border-radius: 12px; margin-top: 8px; display: block;
