@@ -625,3 +625,21 @@ html.lb-open, html.lb-open body { overflow: hidden; }
   border: 1px solid currentColor; background: transparent; color: inherit; opacity: .8; cursor: pointer; }
 .gen-live .gl-skip:hover:not(:disabled) { opacity: 1; }
 .gen-live .gl-skip:disabled { opacity: .5; cursor: default; }
+
+
+/* Подсветка зоны сброса, пока над окном тянут файл */
+.app.drag-over::after {
+  content: "Отпустите файл, чтобы прикрепить";
+  position: fixed;
+  inset: 16px;
+  z-index: 9999;
+  pointer-events: none;
+  display: grid;
+  place-items: center;
+  border: 2px dashed var(--border-focus, #6b8cff);
+  border-radius: 20px;
+  background: rgba(107, 140, 255, 0.08);
+  color: var(--text-main, #e8e8ea);
+  font: 600 16px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  backdrop-filter: blur(2px);
+}

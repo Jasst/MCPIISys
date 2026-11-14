@@ -2421,14 +2421,86 @@ function skipToolsBtn() {
     if (f) handlePickedFile(f);
   });
 
-  // drag&drop изображения на область чата — тот же путь, что и через кнопку
-  els.inner.addEventListener('dragover', (e) => { e.preventDefault(); });
-  els.inner.addEventListener('drop', (e) => {
-    const f = (e.dataTransfer?.files || [])[0];
-    if (!f) return;
+  // ------------------------------------------------------------------ drag&drop
+// Приём файлов на ЛЮБУЮ область окна. Раньше обработчики висели только на
+// els.inner (область сообщений). Если пользователь отпускал файл над полем
+// ввода / композером / шапкой — срабатывало стандартное поведение браузера:
+// путь к файлу вставлялся в textarea как текст ("file:/C:/..."), а сам файл
+// не загружался. Ещё одна проблема: e.preventDefault() вызывался ПОСЛЕ
+// `if (!f) return`, поэтому при пустом dataTransfer.files (некоторые IDE/
+// терминалы/оболочки отдают только text/uri-list с file://) URI успевал
+// вставиться в textarea.
+//
+// Теперь:
+//   • dragover/dragenter/dragleave/drop висят на document — ловят файл над
+//     любой точкой окна;
+//   • preventDefault в drop вызывается ПЕРВЫМ, до любых проверок, — это
+//     отменяет вставку URI в textarea;
+//   • если dataTransfer.files есть — грузим файл как раньше (handlePickedFile);
+//   • если файлов нет, но есть file:// URI — это НЕ сам файл, а ссылка на
+//     него; браузер не даёт прочитать байты по file://, поэтому показываем
+//     понятную подсказку вместо молчаливой вставки текста.
+
+let dragDepth = 0;
+
+function _dtHasFiles(dt) {
+  if (!dt) return false;
+  const types = dt.types ? Array.from(dt.types) : [];
+  if (types.includes('Files')) return true;
+  return !!(dt.files && dt.files.length);
+}
+
+function _dtHasFileUrlOnly(dt) {
+  if (!dt) return false;
+  const types = dt.types ? Array.from(dt.types) : [];
+  if (types.includes('Files')) return false;
+  return types.includes('text/uri-list') || types.includes('text/plain');
+}
+
+document.addEventListener('dragenter', (e) => {
+  if (!_dtHasFiles(e.dataTransfer)) return;
+  e.preventDefault();
+  dragDepth++;
+  els.app?.classList.add('drag-over');
+});
+
+document.addEventListener('dragover', (e) => {
+  // preventDefault на dragover ОБЯЗАТЕЛЕН: без него браузер блокирует drop.
+  if (_dtHasFiles(e.dataTransfer) || _dtHasFileUrlOnly(e.dataTransfer)) {
     e.preventDefault();
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = _dtHasFiles(e.dataTransfer) ? 'copy' : 'none';
+    }
+  }
+});
+
+document.addEventListener('dragleave', (e) => {
+  if (!_dtHasFiles(e.dataTransfer) && !_dtHasFileUrlOnly(e.dataTransfer)) return;
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) els.app?.classList.remove('drag-over');
+});
+
+document.addEventListener('drop', (e) => {
+  // ВАЖНО: preventDefault ДО проверок. Если files пустой, а есть только
+  // text/uri-list — браузер по умолчанию вставит "file:/C:/..." в textarea;
+  // preventDefault отменяет именно это.
+  const dt = e.dataTransfer;
+  if (!_dtHasFiles(dt) && !_dtHasFileUrlOnly(dt)) return;   // обычный текст — не наш случай
+  e.preventDefault();
+  e.stopPropagation();
+  dragDepth = 0;
+  els.app?.classList.remove('drag-over');
+
+  const f = dt && dt.files && dt.files.length ? dt.files[0] : null;
+  if (f) {
     handlePickedFile(f);
-  });
+    return;
+  }
+  // Файлов нет, но URI есть: перетащили «ярлык»/ссылку на файл, а не сам
+  // файл. Браузер по security-политике не даёт прочитать его байты — просим
+  // перетащить файл из Проводника/Finder или выбрать через 📎.
+  toast('Перетащите сам файл из Проводника/Finder — или нажмите 📎 и выберите его', 4000);
+});
 
   // ------------------------------------------------------------------ лайтбокс фото
   // Клик по любому изображению в чате открывает полноэкранный просмотр:
