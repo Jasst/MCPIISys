@@ -16,6 +16,8 @@ from .config_ai import (
     EASYDIFFUSION_DEFAULT_LORA,
     EASYDIFFUSION_DEFAULT_LORA_WEIGHT,
     EASYDIFFUSION_DEFAULT_LORA_USE,
+    EASYDIFFUSION_DEFAULT_SAMPLER,
+
 )
 from .llm_client import call_llm
 
@@ -125,6 +127,9 @@ async def generate_image(
     safe_height = min(_MAX_IMAGE_DIMENSION, _round_to_multiple(
         height if height is not None else EASYDIFFUSION_DEFAULT_HEIGHT))
     safe_steps = max(1, min(_MAX_IMAGE_STEPS, steps if steps is not None else EASYDIFFUSION_DEFAULT_STEPS))
+
+    if sampler_name is None:
+        sampler_name = EASYDIFFUSION_DEFAULT_SAMPLER
 
     payload = {
         "prompt": prompt,
