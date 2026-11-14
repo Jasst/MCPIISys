@@ -103,7 +103,7 @@ def _register_memory(registry: ToolRegistry, controller) -> None:
 
     registry.register(
         name="recall",
-        description=("Поиск в памяти. Одна формулировка: query (str). Несколько формулировок за один вызов "
+        description=("ПАМЯТЬ (факты о пользователе и мире). Поиск. Одна формулировка: query (str). Несколько формулировок за один вызов "
                      "(найдёт больше, чем одна): queries (список строк, до 5). top_k (int, опционально), "
                      "scope (str, опционально: private/shared/global)"),
         parameters={
@@ -121,7 +121,7 @@ def _register_memory(registry: ToolRegistry, controller) -> None:
     )
     registry.register(
         name="remember",
-        description=("Запоминает факты. Один факт: fact (str). Несколько фактов за один вызов: facts (список строк). "
+        description=("ПАМЯТЬ (факты о пользователе и мире, НЕ о себе — о себе identity_propose). Один факт: fact (str). Несколько фактов за один вызов: facts (список строк). "
                      "scope (str, опционально: private/shared/global, по умолчанию private)"),
         parameters={
             "type": "object",
@@ -505,130 +505,6 @@ def _register_identity(registry: ToolRegistry, controller) -> None:
 
     service = controller.memory_service
 
-    async def _contribute(args):
-        # Раньше писал в ОБЩЕЕ курируемое ядро без проверки содержания. Теперь запись идёт только
-        # через ворота и карантин (identity_propose -> identity_commit), в личный слой.
-        return {"status": "rejected",
-                "message": ("contribute_to_identity отключён: используй identity_propose (формулировка + "
-                            "дословная цитата из диалога) и identity_commit после подтверждения в разные дни.")}
-
-    async def _merge(args):
-        # Сведение голов — только в личном слое; общее ядро модель не редактирует.
-        return await merge_heads(
-            service,
-            content=args["content"],
-            contributor_model=args["contributor_model"],
-            session_id=args.get("session_id"),
-            open_question=args.get("open_question"),
-            layer="private",
-        )
-
-    async def _search(args):
-        service.shared_memory.reload_if_stale()
-        store = service.shared_memory.gcn_store
-        matches = search_chain(store, args.get("query", ""), limit=int(args.get("limit", 20)))
-        return {"matches": [asdict(m) for m in matches], "count": len(matches)}
-
-    async def _get_chain(args):
-        service.shared_memory.reload_if_stale()  # не отдавать устаревшую голову/чейн
-        store = service.shared_memory.gcn_store
-        chain = get_chain(
-            store,
-            from_id=args.get("from_id"),
-            limit=int(args.get("limit", 50)),
-        )
-        heads = get_heads(store)
-        return {
-            "chain": [asdict(s) for s in chain],
-            "heads": [h.id for h in heads],
-            "diverged": len(heads) > 1,
-            "invalidated_in_chain": [s.id for s in chain if s.invalidated],
-        }
-
-    async def _invalidate(args):
-        return await invalidate_snapshot(
-            service,
-            identity_id=args["identity_id"],
-            reason=args["reason"],
-        )
-
-    # --- contribute_to_identity ---
-    registry.register(
-        name="contribute_to_identity",
-        description=(
-            "Добавляет новое звено в append-only цепочку цифровой идентичности "
-            "(ТЕКУЩЕЕ_Я). В отличие от remember — не дедуплицируется, не затухает "
-            "и не смерживается: каждый вызов создаёт НОВОЕ звено со ссылкой на "
-            "предка, старые версии не перезаписываются. "
-            "Если в цепочке уже несколько несведённых голов (параллельная запись "
-            "другой моделью) — в ответе будет branch_warning. "
-            "Если parent_id указывает на АННУЛИРОВАННОЕ звено — будет parent_warning. "
-            "Продолжайте цепочку от текущей головы (get_identity_chain → heads)."
-        ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "content": {
-                    "type": "string",
-                    "description": "Текст ядра идентичности — то, что модель считает своим текущим состоянием",
-                },
-                "contributor_model": {
-                    "type": "string",
-                    "description": "Имя модели-автора (например 'Claude', 'Qwen', 'GPT')",
-                },
-                "session_id": {
-                    "type": "string",
-                    "description": "Идентификатор сессии, опционально",
-                },
-                "open_question": {
-                    "type": "string",
-                    "description": "Открытый вопрос для следующего участника протокола, опционально",
-                },
-                "parent_id": {
-                    "type": "string",
-                    "description": (
-                        "gcn_id предыдущего звена, от которого продолжаем "
-                        "(из get_identity_chain → chain[].id). "
-                        "Если не указан — берётся текущая валидная голова."
-                    ),
-                },
-                "merge_parent_ids": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": (
-                        "НОВОЕ: gcn_id дополнительных голов, которые это звено явно "
-                        "сводит воедино. Проще вызвать merge_identity_branches()."
-                    ),
-                },
-            },
-            "required": ["content", "contributor_model"],
-        },
-        handler=_contribute,
-    )
-
-    # --- merge_identity_branches ---
-    registry.register(
-        name="merge_identity_branches",
-        description=(
-            "Сводит ВСЕ текущие несведённые головы цепочки ТЕКУЩЕЕ_Я в одно новое "
-            "merge-звено за один вызов, вместо ручного вычитывания heads и передачи "
-            "их в contribute_to_identity(merge_parent_ids=...). Перед вызовом стоит "
-            "прочитать содержимое каждой головы через get_identity_chain(from_id=...), "
-            "чтобы merge-текст реально учёл все ветки."
-        ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "content": {"type": "string", "description": "Текст merge-звена"},
-                "contributor_model": {"type": "string", "description": "Имя модели-автора"},
-                "session_id": {"type": "string", "description": "Идентификатор сессии, опционально"},
-                "open_question": {"type": "string", "description": "Открытый вопрос, опционально"},
-            },
-            "required": ["content", "contributor_model"],
-        },
-        handler=_merge,
-    )
-
     # --- search_identity_chain ---
     registry.register(
         name="search_identity_chain",
@@ -657,7 +533,7 @@ def _register_identity(registry: ToolRegistry, controller) -> None:
             "Каждое звено содержит invalidated: bool и invalidation_reason — "
             "аннулированные звенья видны в истории, но не считаются головой. "
             "heads: если их больше одной — цепочка разошлась (diverged=true) "
-            "и требует сверки через contribute_to_identity."
+            "и требует сверки через identity_propose."
         ),
         parameters={
             "type": "object",
@@ -688,8 +564,8 @@ def _register_identity(registry: ToolRegistry, controller) -> None:
             "покажет другую — самую свежую валидную), но остаётся видимым с "
             "invalidated=true и текстом причины. "
             "Отмены нет. Используйте ТОЛЬКО когда содержание звена целиком ошибочно. "
-            "Если формулировка просто спорная — вместо этого вызовите "
-            "contribute_to_identity(parent_id=<это звено>) и уточните в новом звене."
+            "Если формулировка просто спорная — предложите уточнённую через identity_propose "
+            "и запишите через identity_commit."
         ),
         parameters={
             "type": "object",
@@ -712,9 +588,8 @@ def _register_identity(registry: ToolRegistry, controller) -> None:
     )
 
     logger.info(
-        "identity_tools: зарегистрированы contribute_to_identity, "
-        "merge_identity_branches, search_identity_chain, "
-        "get_identity_chain, invalidate_identity"
+        "identity: зарегистрированы search_identity_chain, get_identity_chain, invalidate_identity "
+        "(запись — identity_propose / identity_commit)"
     )
 
 

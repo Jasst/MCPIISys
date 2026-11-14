@@ -349,8 +349,8 @@ CHAT_TOOL_EXCLUDE = {
     # внешний ИИ: сеанс и повторная идентичность, в чате не нужны
     "session_start", "remember_with_handshake",
     # идентичность: в чате есть internal__*, MCP-версии нужны только внешнему ИИ
-    "contribute_to_identity", "merge_identity_branches", "search_identity_chain",
-    "get_identity_chain", "invalidate_identity",
+    # (запись личности — только в чате: identity_propose / identity_commit; MCP её не пишет)
+    "search_identity_chain", "get_identity_chain",
 }
 
 # -------------------------------

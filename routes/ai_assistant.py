@@ -2863,6 +2863,10 @@ class CognitiveController:
                 if len(heads) > 1:
                     parts.append(f"⚠️ в личной цепочке {len(heads)} несведённых голов — нужна сверка")
                 parts.append("=== КОНЕЦ ТЕКУЩЕЕ_Я ===")
+            if parts:
+                parts.insert(0, "Правило слоёв: факты о мире и пользователе — remember (память); "
+                                "о себе — identity_propose → identity_commit (личность); "
+                                "общее ядро ты только читаешь и не меняешь.")
             return "\n".join(parts)
         except Exception as e:
             logger.debug(f"_get_identity_block failed: {e}")

@@ -53,3 +53,18 @@
 - `IDENTITY_MIN_DAYS` (по умолчанию 2) — сколько разных дней нужно для личной записи.
 - `MCP_ADMIN_USERS` — администраторы (через запятую).
 - `CORE_MIN_INTERVAL_HOURS` (по умолчанию 24) — минимальный интервал между изменениями ядра.
+
+## Какие инструменты в каком слое
+
+Правило одно: **ни один инструмент не пишет в общее ядро напрямую.** Ядро меняется только через `core_command` (MCP, только администратор) или команды в чате (тот же модуль `core_admin`).
+
+| Слой | Чат (модель) | MCP (внешний ИИ) |
+|---|---|---|
+| **Память** (факты о пользователе и мире) | `recall`, `remember`, `memory_search`, `memory_update`, `memory_forget`, `memory_explain` | `recall`, `remember`, `forget`, `update_fact` |
+| **Личность** (ТЕКУЩЕЕ_Я, только о себе) | `identity_propose` → `identity_commit`, `get_identity_chain`, `search_identity_chain`, `invalidate_identity` (только личное звено) | `get_identity_chain`, `search_identity_chain` (только чтение; запись — в чате) |
+| **Общее ядро** (одинаково для всех) | только чтение (блок контекста) | `core_command` (только администратор) |
+| **Утилиты** | `web_search`, `generate_image`, `inspect_image`, `read_code`, `analyze_error`, `fetch_github_file`, `add_goal`, `ask_user` | `web_search`, `generate_image`, `fetch_github_file`, `analyze_error`, `get_goals`, `add_goal`, `session_start` |
+
+Инструменты разработки (`semantic_search`, `graph_explore`, `get_memory_stats`, `get_autonomy_status`, `research_topic`, `remember_batch`, `remember_with_handshake`, `read_code_file`, `search_in_code`, `execute_command` и др.) в MCP скрыты по умолчанию. Включить: `MCP_DEV_TOOLS=1`.
+
+Удалено как мёртвое или дублирующее: `contribute_to_identity` и `merge_identity_branches` (и в чате, и в MCP), `invalidate_identity` в MCP (откат ядра — `core_command`), `list_tools` остаётся в чате; дубли `read_code_file` и `search_in_code` скрыты в чате (есть `read_code` и `search_code`).
