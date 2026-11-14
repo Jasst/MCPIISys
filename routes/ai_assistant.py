@@ -940,6 +940,113 @@ class CognitiveController:
     # «Подключить ИИ» в профиле).
     _LOCAL_TOOLS_SKIP = {"identify", "request_login", "verify_login", "login", "logout"}
 
+    async def _force_image_tool_if_requested(self, message: str,
+                                              tool_trace: List[Dict[str, Any]]) -> None:
+        """Детерминированная генерация изображения для явных запросов.
+
+        Симметрично _force_code_tool_if_requested и _force_memory_tool_if_requested.
+
+        Зачем: fast_router корректно отправляет «сгенерируй картинку» в TOOLS,
+        offered_tools включает internal__generate_image, НО локальная LLM
+        иногда отвечает no_tool (reasoning съел бюджет, нет /no_think,
+        недостаточно max_tokens) — и без этого fallback'а пользователь
+        получает текстовый ответ без картинки вообще (именно этот баг
+        воспроизведён в логе: «инструментов: 0, раундов: 0»).
+
+        Здесь на явный image-запрос вызываем internal__generate_image
+        НАПРЯМУЮ (если модель не вызвала сама), чтобы картинка была
+        сгенерирована детерминированно. Пропускает вызов, если в
+        tool_trace уже есть успешный internal__generate_image.
+
+        НЕ пушит image_url и не вызывает _adopt_generated_image —
+        это сделает существующий цикл в _stream_response_worker ниже
+        (см. комментарий в теле), чтобы картинка не дублировалась.
+        """
+        _IMAGE_RE = re.compile(
+            r"(?<![а-яёa-z])(?:"
+            r"сгенерир\w*|нарису\w*|"
+            r"созда\w*\s+(?:картин\w*|изображени\w*|рисунок|фото)|"
+            r"сдела\w*\s+(?:картин\w*|изображени\w*|рисунок|фото)|"
+            r"нарису\w*\s+(?:картин\w*|изображени\w*|рисунок|фото)|"
+            r"generate\s+image|draw\s+(?:a\s+)?(?:picture|image)"
+            r")",
+            re.IGNORECASE,
+        )
+        if not _IMAGE_RE.search(message or ""):
+            return
+        # Не дублировать, если модель уже вызвала сама.
+        if any((t.get("tool") or "") == "internal__generate_image"
+               for t in tool_trace):
+            logger.debug(
+                "[force-image] internal__generate_image уже была в tool_trace — пропуск"
+            )
+            return
+        # Извлекаем промпт: текст после глагола. Иначе в EasyDiffusion
+        # уходит вся реплика целиком («сгенерируй картинку кота в шляпе»),
+        # что даёт мусорный результат.
+        prompt = (message or "").strip()
+        m = re.search(
+            r"(?:сгенерир\w*|нарису\w*|созда\w*|сдела\w*)\s+"
+            r"(?:картинку|картинка|изображение|рисунок|фото)?\s*"
+            r"(?:с|про|о|об|по|со)?\s*(.+)$",
+            message or "",
+            re.IGNORECASE | re.DOTALL,
+        )
+        if m and m.group(1).strip():
+            prompt = m.group(1).strip()
+        # Убираем вежливые хвосты, которые не относятся к сюжету.
+        prompt = re.sub(
+            r"\s+(?:пожалуйста|плиз|побыстрее|срочно|заранее\s+спасибо)[!.?]*\s*$",
+            "", prompt, flags=re.IGNORECASE,
+        ).strip()
+        if len(prompt) < 3:
+            logger.info(f"[ForceImageTool] промпт слишком короткий: {prompt!r}, пропуск")
+            return
+        spec = self.tool_registry.get("internal__generate_image")
+        if spec is None:
+            logger.warning("[ForceImageTool] internal__generate_image не зарегистрирован")
+            return
+        try:
+            # Тот же handler, что и при нативном вызове: сохранит файл,
+            # вернёт {"status": "ok", "image_url": "/generated_images/..."}.
+            result = await spec.handler({
+                "prompt": prompt,
+                "enhance_prompt": True,
+            })
+        except Exception as e:
+            logger.warning(f"[ForceImageTool] handler упал: {e}")
+            return
+        if not isinstance(result, dict) or result.get("status") != "ok":
+            logger.warning(f"[ForceImageTool] неуспешный результат: {result!r}")
+            return
+        image_url = result.get("image_url")
+        if not image_url:
+            logger.warning("[ForceImageTool] в результате нет image_url")
+            return
+        # ВАЖНО: не пушим событие и не вызываем _adopt_generated_image здесь —
+        # это сделает существующий цикл в _stream_response_worker:
+        #     for t in tool_trace:
+        #         if t.get("tool") == "internal__generate_image":
+        #             result = t.get("result")
+        #             result["image_url"] = _adopt_generated_image(...)
+        #             await push(f"data: {json.dumps({'image_url': image_url})}\n\n")
+        # Если запушить здесь — картинка придёт дважды.
+        tool_trace.append({
+            "tool": "internal__generate_image",
+            "arguments": {"prompt": prompt, "enhance_prompt": True},
+            "result": {
+                "status": "ok",
+                "image_url": image_url,
+                "prompt": result.get("prompt", prompt),
+            },
+            "ok": True,
+            "verification": "sufficient",
+            "image_url": image_url,
+        })
+        logger.info(
+            f"[ForceImageTool] сгенерировано для '{message[:60]!r}': {image_url}"
+        )
+
     async def _register_local_memory_tools(self):
         if getattr(self, "_local_tools_registered", False):
             return
@@ -2347,13 +2454,10 @@ class CognitiveController:
             tool_run = {"tool_trace": [], "used_native": False}
         else:
             tool_run = await self.tool_router.run(message, messages, history_tail=history_tail)
-        tool_trace = tool_run.get("tool_trace", [])
-        # Детерминированный вызов code-tools для явных code-запросов
-        # (см. docstring метода — локи 2026-09-15 показали, что LLM не
-        # выбирает project_structure сама, хотя hint и примеры есть).
-        await self._force_code_tool_if_requested(message, tool_trace)
-        # Детерминированный вызов memory-инструментов для «запомни X» / «вспомни Y»
-        await self._force_memory_tool_if_requested(message, tool_trace)
+            tool_trace = tool_run.get("tool_trace", [])
+            await self._force_code_tool_if_requested(message, tool_trace)
+            await self._force_memory_tool_if_requested(message, tool_trace)
+            await self._force_image_tool_if_requested(message, tool_trace)  # NEW
 
         # === ИСПРАВЛЕНИЕ: активное уточнение ПОСЛЕ ReAct-цикла ===
         # Теперь, после того как инструменты отработали, пересчитываем уверенность
@@ -3523,9 +3627,11 @@ class CognitiveController:
                     # стартуем их параллельно с решением роутера, результаты мержим после.
                     _det_code_trace: List[Dict[str, Any]] = []
                     _det_mem_trace: List[Dict[str, Any]] = []
+
                     _det_task = asyncio.gather(
                         self._force_code_tool_if_requested(message, _det_code_trace),
                         self._force_memory_tool_if_requested(message, _det_mem_trace),
+
                         return_exceptions=True,
                     )
                     # Прямой ответ — только если роутер уверен и в запросе нет маркеров инструментов.
@@ -3574,7 +3680,23 @@ class CognitiveController:
                         _seen_calls.add(_call_key(_t))
                         tool_trace.append(_t)
                         await _trace({"kind": "tool", "text": ("✓ " if _t.get("ok") else "✗ ")
-                                      + str(_t.get("tool")) + ": " + str(_t.get("result", ""))[:140].replace("\n", " ")})
+                                                              + str(_t.get("tool")) + ": " + str(_t.get("result", ""))[
+                                                                                             :140].replace("\n", " ")})
+
+                    # ── IMAGE-форс: ПОСЛЕ роутера, НЕ в параллель ──────────────
+                    # Передаём уже заполненный tool_trace (роутер + code/mem форс).
+                    # Внутри функции проверка `if any(generate_image in tool_trace)`
+                    # сразу увидит результат роутера и не будет генерировать второй раз.
+                    # Если роутер не справился — сгенерируем детерминированно.
+                    _len_before_image = len(tool_trace)
+                    try:
+                        await self._force_image_tool_if_requested(message, tool_trace)
+                    except Exception as _ie:
+                        logger.warning(f"[force-image] ошибка: {_ie}")
+                    for _t in tool_trace[_len_before_image:]:
+                        await _trace({"kind": "tool", "text": ("✓ " if _t.get("ok") else "✗ ")
+                                                              + str(_t.get("tool")) + ": "
+                                                              + str(_t.get("result", ""))[:140].replace("\n", " ")})
 
                     # === ИСПРАВЛЕНИЕ: активное уточнение ПОСЛЕ ReAct-цикла (для stream) ===
                     if not skip_clarification_before_react:
@@ -4110,7 +4232,10 @@ async def chat_with_ai(body: AIRequest, address: str = Depends(require_auth)):
     # Человеческий гейт общего ядра личности: короткий ответ администратора («да»/«нет»/«откатить ядро»)
     # на предложение обновления. Обычные сообщения сюда не попадают.
     from GCN.core_admin import handle_admin_message
-    gate_reply = await handle_admin_message(address, body.message or "", assistant.memory_service)
+    gate_reply = await handle_admin_message(
+        address, body.message or "", assistant.memory_service,
+        history=assistant.history,
+        drafter=lambda msgs: call_llm(msgs, temp=0.3, max_tokens=200))
     if gate_reply is not None:
         if body.stream:
             async def _gate_sse():

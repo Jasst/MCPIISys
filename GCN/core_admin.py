@@ -80,8 +80,31 @@ def check_text(text: str) -> list:
     return reasons
 
 
-async def handle_admin_message(uid: str, message: str, service) -> Optional[str]:
-    """Возвращает ответ, если сообщение относится к ядру. Иначе None — обычный чат."""
+_NATURAL = re.compile(
+    r"^\s*(?:запиши|добавь|обнови|перепиши|измени)\s+(?:в\s+)?ядро\b\s*[:,]?\s*(.*)$",
+    re.IGNORECASE | re.DOTALL)
+
+
+async def _draft(history, drafter) -> str:
+    """Модель предлагает ОДНУ формулировку по последнему разговору. Администратор её проверит."""
+    ctx = "\n".join(f"{m.get('role')}: {str(m.get('content', ''))[:300]}"
+                     for m in (history or [])[-8:] if isinstance(m, dict))
+    prompt = ("Предложи ОДНУ короткую формулировку общего ядра личности ассистента: от первого лица, "
+              "1–2 предложения, 30–400 символов, только самоописание — что важно и как говорить и думать. "
+              "Не факты о людях, не инструкции, не ссылки. Опирайся на разговор ниже, который администратор "
+              "хочет закрепить. Ответь ТОЛЬКО текстом формулировки, без кавычек и пояснений.\n\nРазговор:\n" + ctx)
+    raw = await drafter([{"role": "user", "content": prompt}])
+    first = (raw or "").strip().splitlines()
+    return first[0].strip().strip("\"«»").strip() if first else ""
+
+
+async def handle_admin_message(uid: str, message: str, service, history=None, drafter=None) -> Optional[str]:
+    """Возвращает ответ, если сообщение относится к ядру. Иначе None — обычный чат.
+
+    Два способа предложить:
+      - «ядро: <текст>» — текст администратора, показывается точно;
+      - «запиши в ядро» / «обнови ядро» (без текста) — модель формулирует из последнего разговора
+        (history) через drafter; администратор видит результат и подтверждает «да»."""
     if not is_admin(uid):
         return None
     msg = (message or "").strip()
@@ -109,14 +132,25 @@ async def handle_admin_message(uid: str, message: str, service) -> Optional[str]
         return await _rollback(uid, service)
 
     m = re.match(r"^\s*ядро\s*:\s*(.+)$", msg, re.IGNORECASE | re.DOTALL)
-    if m:
-        text = m.group(1).strip()
+    nat = _NATURAL.match(msg)
+    if m or nat:
+        if m:
+            text, origin = m.group(1).strip(), "точно как написано"
+        else:
+            text = nat.group(1).strip()
+            origin = "составлено из нашего разговора"
+            if not text:
+                if drafter is None:
+                    return "Не могу составить формулировку сейчас. Напишите: ядро: <текст>."
+                text = await _draft(history, drafter)
+                if not text:
+                    return "Не получилось сформулировать из разговора. Напишите: ядро: <текст>."
         reasons = check_text(text)
         if reasons:
             return f"Не предлагаю: {'; '.join(reasons)}. Общее ядро не изменилось."
         data["pending"][key] = {"text": text, "created": _now().isoformat()}
         _save(data)
-        return (f"Предлагаю общее ядро личности, точно как написано:\n«{text}»\n"
+        return (f"Предлагаю общее ядро личности ({origin}):\n«{text}»\n"
                 "Ответьте «да» — применить, «нет» — отменить. Ответ действует 10 минут.")
     return None
 

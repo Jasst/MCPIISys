@@ -111,7 +111,27 @@ _INTENT_GROUPS: List[Tuple[Tuple[str, ...], List[str]]] = [
     ((r"инструмент", r"что ты умеешь", r"твои возможност"), ["internal__list_tools"]),
     ((r"github", r"гитхаб"), ["internal__fetch_github_file"]),
 ]
-
+# Явные action-глаголы. Используются не для жёсткой маршрутизации
+# (см. _INTENT_GROUPS), а как страховка: если модель в нативном режиме
+# вернула "no_tool", но пользователь явно попросил действие — не даём
+# роутеру сразу завершиться с model_done, а пробуем текстовый fallback
+# (_decide_fallback). Иначе при «сгенерируй картинку» — где модель
+# почему-то не вызвала tool_call (мало max_tokens, reasoning съел
+# бюджет, нет /no_think) — ассистент отвечал текстом без вызова
+# инструмента вообще.
+_ACTION_INTENT_RE = re.compile(
+    r"(?<![а-яёa-z])(?:"
+    # Генерация изображений (основной сценарий, для которого это добавлено)
+    r"сгенерир\w*|нарису\w*|"
+    r"созда\w*\s+(?:картин\w*|изображени\w*|рисунок|фото)|"
+    r"сдела\w*\s+(?:картин\w*|изображени\w*|рисунок|фото)|"
+    # Явный поиск (тоже требует инструмента, не терпит no_tool)
+    r"поищи\w*|загугли\w*|погугли\w*|"
+    # Явная память
+    r"запомни\w*|забудь\w*|вспомни\w*"
+    r")",
+    re.IGNORECASE,
+)
 
 def _match_markers(msg: str, markers) -> Optional[str]:
     for mk in markers:
@@ -536,7 +556,15 @@ class ToolRouter:
         if not tools:
             return "no_tool", None, None, ""
         try:
-            msg = await self.llm_raw_caller(running_messages, temp=temp, max_tokens=600, tools=tools)
+            msg = await self.llm_raw_caller(
+                running_messages, temp=temp,
+                # БЫЛО 600 — reasoning-моделям (Qwen3/DeepSeek-R1) этого
+                # не хватает: thinking съедает весь лимит, tool_calls
+                # приходит пустым и роутер ошибочно видит "no_tool".
+                # 2048 хватает и на короткое рассуждение, и на tool_call.
+                max_tokens=2048,
+                tools=tools,
+            )
         except Exception as e:  # noqa: BLE001
             logger.warning(f"ToolRouter: нативный запрос упал: {e}")
             return "error", None, None, ""
@@ -691,10 +719,25 @@ class ToolRouter:
                 if native_status == "tool_calls":
                     used_native = True
                     self._confirm_native()
-                elif native_status == "no_tool" and (used_native or self._native_confirmed):
-                    # Модель уже доказала, что понимает протокол, и сама решила, что инструменты не нужны.
-                    stop_reason = "model_done"
-                    break
+                elif native_status == "no_tool":
+                    # КЛЮЧЕВОЙ ФИКС: раньше при native_status=="no_tool" и
+                    # уже подтверждённом нативном протоколе (self._native_confirmed)
+                    # роутер СРАЗУ останавливался с model_done и НЕ пробовал
+                    # текстовый fallback. Из-за этого при явном «сгенерируй
+                    # картинку» — где модель по какой-то причине не вызвала
+                    # tool_call (не хватило max_tokens, reasoning съел бюджет,
+                    # нет /no_think) — ассистент отвечал текстом без вызова
+                    # инструмента вообще. Теперь: если в сообщении есть явный
+                    # action-глагол (сгенерируй/нарисуй/поищи/запомни/...),
+                    # не доверяем no_tool и падаем в текстовый fallback ниже —
+                    # модель увидит каталог инструментов текстом и сама выберет
+                    # нужный. Если action-глаголов нет — доверяем модели и
+                    # штатно завершаемся.
+                    if self._native_confirmed and not _ACTION_INTENT_RE.search(message or ""):
+                        stop_reason = "model_done"
+                        break
+                    # не break — управление уйдёт в fallback-блок ниже
+                    # (if decisions is None and not used_native:)
                 elif used_native:
                     stop_reason = "native_error"
                     break

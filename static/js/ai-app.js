@@ -1810,7 +1810,7 @@ function skipToolsBtn() {
       role: 'user',
       text,
       time: Date.now(),
-      image: img && img.url.length < MAX_IMAGE_STORE ? img.url : null,
+      image: (img && img.kind === 'image' && img.url.length < MAX_IMAGE_STORE) ? img.url : null,
     };
     msgs.push(userMsg);
     msgs.push(newBotMessage());
