@@ -53,11 +53,21 @@ async def _autostart_llamacpp():
         return
     await asyncio.sleep(2)
     from GCN.llm_client import ensure_model_loaded, list_models_cached
+    from GCN.llamacpp_manager import normalize_model_id
     models = await list_models_cached(force=True)
-    target = LM_STUDIO_MODEL if LM_STUDIO_MODEL in models else (models[0] if models else None)
+    wanted = normalize_model_id(LM_STUDIO_MODEL)
+    if wanted in models:
+        target = wanted
+    else:
+        # Раньше тихий откат на models[0]: сервер грузил не ту модель, и страница потом
+        # переключала её на нужную — выглядело как двойная загрузка. Теперь — явное предупреждение.
+        target = models[0] if models else None
+        logger.warning(f"llama-server autostart: модель {LM_STUDIO_MODEL!r} не найдена в MODELS_DIR; "
+                       f"берём {target!r}. Доступные: {models[:10]}")
     if not target:
         logger.warning("llama-server autostart: в MODELS_DIR нет .gguf моделей")
         return
+    logger.info(f"llama-server autostart: стартовая загрузка {target!r} (инициатор: автозапуск)")
     res = await ensure_model_loaded(target)
     logger.info(f"llama-server autostart: {res}")
 

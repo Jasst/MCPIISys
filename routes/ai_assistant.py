@@ -221,7 +221,7 @@ from GCN.llm_client import (call_llm, call_llm_raw, call_llm_stream, model_suppo
                             _MODELS_CACHE_TTL_S)
 from GCN.web_search import deep_search, is_time_sensitive_query
 from GCN.image_utils import enhance_prompt, generate_image
-from GCN.tool_router import ToolRegistry, ToolRouter, build_tool_trace_context
+from GCN.tool_router import ToolRegistry, ToolRouter, build_tool_trace_context, might_need_tools
 from GCN.fast_router import (ComplexityRouter, ActivityGate, StageTimer, Route,
                             make_background_llm, heuristic_only_llm)  # [fast-path-patch]
 # ИНТЕЛЛЕКТ-ПАКЕТ: заземлённые ответы, санитайзер фактов, подзапросный retrieval
@@ -309,8 +309,12 @@ SEARCH_TRIGGER_KEYWORDS = [
 # Признаки задач кроме ответа на вопрос: память, цели, картинки, код, файлы, идентичность,
 # ссылки, действия. Если есть хоть один — ReAct остаётся. Список намеренно широкий:
 # ложный «пропуск» опаснее лишнего LLM-вызова.
+# Причины остановки цикла, при которых задача осталась незавершённой.
+_UNFINISHED_STOP_REASONS = {"round_limit", "call_limit", "stuck", "failures", "user_skip", "no_progress"}
+
 _OTHER_TASK_RE = re.compile(
-    r"запомн|напомн|вспомн|забуд|помни|цел[ьиюя]|добав|удал|"
+    r"запомн|напомн|вспомн|забуд|помни|цел[ьиюя]|добав|удал|исправ|измени|обнови|поправ|замени|"
+    r"отредактир|сравни|затем|потом|после этого|также|ещё раз|"
     r"нарису|картин|изображен|сгенерир|фото|"
     r"код|файл|ошибк|структур|проект|github|репозитор|"
     r"идентичн|себя|себе|ты сам|ты сама|"
@@ -639,6 +643,10 @@ class CognitiveController:
             llm_raw_caller=call_llm_raw,
             llm_text_caller=call_llm,
         )
+        # Изображение текущего хода (base64) — для инструмента inspect_image.
+        self._turn_image: Optional[str] = None
+        # Краткие записи о вызовах инструментов последних ходов (fact_id и т.п.) — для роутера.
+        self._tool_digests: List[str] = []
 
         # ===== Быстрый / медленный контур [fast-path-patch] =====
         self.gate = ActivityGate()
@@ -705,7 +713,11 @@ class CognitiveController:
         try:
             from GCN.autonomy import AutonomyEngine
             self.autonomy = AutonomyEngine(self)
-            self.autonomy.start()
+            # AUTONOMY_ENABLED=0 — движок не запускаем вовсе (объект остаётся для статуса в API).
+            if AUTONOMY_ENABLED:
+                self.autonomy.start()
+            else:
+                logger.info("[Autonomy] выключен (AUTONOMY_ENABLED=0): движок не запущен")
         except Exception as _autonomy_err:
             logger.error(f"AutonomyEngine init failed, falling back to legacy loops: {_autonomy_err}")
 
@@ -1169,10 +1181,15 @@ class CognitiveController:
     def _start_background_tasks(self):
         loop = asyncio.get_event_loop()
         if loop.is_running():
+            # Консолидация памяти и idle-обслуживание не используют LLM для целей и остаются всегда.
             self._consolidation_task = asyncio.create_task(self._periodic_consolidation())
-            self._planner_task = asyncio.create_task(self._periodic_planning())
-            self._research_task = asyncio.create_task(self._periodic_research())
-            self._reflection_task = asyncio.create_task(self._periodic_reflection())
+            # Фоновые LLM-циклы (генерация целей, рефлексия, исследования) — только при включённой
+            # автономности. Раньше они запускались всегда и флагом AUTONOMY_ENABLED не гасились.
+            if AUTONOMY_ENABLED:
+                self._planner_task = asyncio.create_task(self._periodic_planning())
+                self._reflection_task = asyncio.create_task(self._periodic_reflection())
+            if AUTONOMY_ENABLED or AUTO_RESEARCH_ENABLED:
+                self._research_task = asyncio.create_task(self._periodic_research())
             self._idle_task = asyncio.create_task(self._idle_consolidation())
 
     def _consume_autonomous_llm_budget(self, n: int = 1) -> bool:
@@ -2762,6 +2779,33 @@ class CognitiveController:
             return ""
 
     # ===== ПОСТРОЕНИЕ СООБЩЕНИЙ =====
+    def _digest_notes(self) -> List[str]:
+        return list(self._tool_digests[-4:])
+
+    def _record_tool_digest(self, message: str, tool_trace: List[Dict[str, Any]],
+                            stop_reason: str = "") -> None:
+        """Сохраняет, что инструменты вернули в этом ходе (например, id фактов), чтобы в следующем
+        ходе можно было сослаться: «удали то, что я сказал выше». Не попадает в историю диалога."""
+        ok = [t for t in tool_trace if t.get("ok")]
+        unfinished = stop_reason in _UNFINISHED_STOP_REASONS
+        if not ok and not unfinished:
+            return
+        parts = []
+        for t in ok[:6]:
+            name = str(t.get("tool", "")).replace("internal__", "")
+            res = " ".join(str(t.get("result", "")).split())[:200]
+            parts.append(f"{name} → {res}")
+        note = f"на «{message[:80]}»: " + (" | ".join(parts) if parts else "инструменты не вернули данных")
+        if unfinished:
+            # Прерванный ход: следующий ход должен знать, что задача не доведена до конца.
+            note += f" [ход не завершён: {stop_reason}; можно продолжить с того же места]"
+        self._tool_digests.append(note)
+        self._tool_digests = self._tool_digests[-4:]
+
+    def current_turn_image(self) -> Optional[str]:
+        """Base64 изображения текущего хода (для inspect_image) или None."""
+        return self._turn_image
+
     def set_turn_files(self, file_ids, message: str) -> None:
         """Файлы, прикреплённые к этому сообщению: превью для промпта и доступ инструментам.
         Вызывается на каждый запрос, поэтому вложение прошлого сообщения не просачивается дальше."""
@@ -3412,6 +3456,7 @@ class CognitiveController:
                     image_base64 = None
                     image_mime = None
 
+            self._turn_image = image_base64 or None   # после проверки vision: None, если модель не видит фото
             # Классификация (без LLM) ДО подготовки сообщений: на быстром маршруте
             # пропускаем LLM-реранк памяти. force_slow считаем так же, как это делает
             # _prepare_messages для search_requested.
@@ -3485,7 +3530,7 @@ class CognitiveController:
                         decision = self.fast_router.classify(message, force_slow=True)
                     skip_react = search_answer_needs_no_tools(
                         message, bool(self._web_search_results_this_turn),
-                        getattr(self, "_turn_files", None) is not None)
+                        getattr(self, "_turn_files", None) is not None) and not might_need_tools(message)
                     if skip_react:
                         logger.info("[router] ReAct пропущен: поиск выполнен, других задач нет")
                     # Детерминированные инструменты (код/память) не зависят от роутера:
@@ -3497,15 +3542,29 @@ class CognitiveController:
                         self._force_memory_tool_if_requested(message, _det_mem_trace),
                         return_exceptions=True,
                     )
-                    _route_tools = (decision is None or decision.route is Route.TOOLS) and not skip_react
+                    # Прямой ответ — только если роутер уверен и в запросе нет маркеров инструментов.
+                    # Раньше fast-router мог молча увести запрос «исправь факт» в прямой ответ.
+                    _route_tools = ((decision is None or decision.route is Route.TOOLS
+                                     or might_need_tools(message)) and not skip_react)
                     await _trace({"kind": "route", "text": (
                         "маршрут: инструменты, роутер решает, что вызвать" if _route_tools
                         else "маршрут: прямой ответ" + (" (поиск уже выполнен)" if skip_react else ""))})
                     if _route_tools:
                         await push(f"data: {json.dumps({'gen_phase': {'phase': 'tools'}})}\n\n")
                         tool_run = await self.tool_router.run(message, messages, history_tail=history_tail,
-                                                              on_event=_trace)
+                                                              on_event=_trace,
+                                                              context_notes=self._digest_notes())
                         tool_trace = tool_run.get("tool_trace", [])
+                        self._record_tool_digest(message, tool_trace, tool_run.get("stop_reason", ""))
+                        pending_q = tool_run.get("pending_question")
+                        if pending_q:
+                            # ask_user: отдаём вопрос пользователю как ответ хода (без LLM-пересказа).
+                            await push(f"data: {json.dumps({'token': pending_q})}\n\n")
+                            await push("data: [DONE]\n\n")
+                            self.history.append({"role": "user", "content": message})
+                            self.history.append({"role": "assistant", "content": pending_q})
+                            await self._save_history_async()
+                            return
                         if decision is not None and not decision.hard:
                             # метка из реальности: понадобились ли инструменты на самом деле
                             self.fast_router.learn(message, used_tools=bool(tool_trace))
@@ -3518,7 +3577,10 @@ class CognitiveController:
                     for _exc in await _det_task:
                         if isinstance(_exc, BaseException):
                             logger.warning(f"[det-tools] {_exc}")
-                    _call_key = lambda t: (t.get("tool"), json.dumps(t.get("arguments") or {}, sort_keys=True, ensure_ascii=False))
+                    # Ключ дубля нормализован: регистр и пробелы в строковых аргументах не важны.
+                    _call_key = lambda t: (t.get("tool"), json.dumps(
+                        {k: (v.strip().lower() if isinstance(v, str) else v) for k, v in (t.get("arguments") or {}).items()},
+                        sort_keys=True, ensure_ascii=False))
                     _seen_calls = {_call_key(t) for t in tool_trace}
                     for _t in _det_code_trace + _det_mem_trace:
                         if _call_key(_t) in _seen_calls:
@@ -4591,6 +4653,18 @@ async def stop_active_stream(address: str = Depends(require_auth)):
         return {"stopped": False, "reason": "no_task"}
     task.cancel()
     return {"stopped": True}
+
+@router.post("/chat/skip_tools")
+async def skip_tool_step(address: str = Depends(require_auth)):
+    """Пропустить текущий шаг инструментов: прервать ожидание инструмента и ответить
+    по уже собранным данным. Генерация продолжается, в отличие от /chat/stop."""
+    assistant = await get_assistant(address)
+    state = assistant._active_stream
+    if not state or state.get("done"):
+        return {"skipped": False, "reason": "no_active_generation"}
+    assistant.tool_router.request_skip()
+    return {"skipped": True}
+
 
 @router.get("/notifications/poll")
 async def poll_notifications(address: str = Depends(require_auth)):

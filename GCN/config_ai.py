@@ -150,7 +150,7 @@ RESOURCE_BUDGET_LLM_CALLS = 100
 # BUGFIX: флаг был False, из-за чего AutonomyEngine (enqueue_topic/_pump_queue)
 # молча отклонял/вычищал все темы — фоновое исследование не работало вообще.
 # Legacy _auto_research по-прежнему гасится этим флагом в ai_assistant._periodic_research.
-AUTO_RESEARCH_ENABLED = True
+AUTO_RESEARCH_ENABLED = os.getenv("AUTO_RESEARCH_ENABLED", "1").strip() == "1"
 
 # -------------------------------
 # Веб-поиск
@@ -245,6 +245,12 @@ def _int_env(name: str, default: int, lo: int = 1, hi: int = 10) -> int:
 MAX_TOOL_ITERATIONS = _int_env("MAX_TOOL_ITERATIONS", 3)
 # Максимум раундов, если модель попросила перепланирование после ошибки
 MAX_TOOL_ITERATIONS_DYNAMIC = _int_env("MAX_TOOL_ITERATIONS_DYNAMIC", 7)
+# Агентный цикл (GCN/tool_router.py): модель сама решает, вызывать ли следующий инструмент.
+AGENT_MAX_ROUNDS = _int_env("AGENT_MAX_ROUNDS", 6)          # раундов решения на один ход
+AGENT_MAX_CALLS = _int_env("AGENT_MAX_CALLS", 12)           # всего вызовов инструментов на ход
+AGENT_STUCK_LIMIT = _int_env("AGENT_STUCK_LIMIT", 2)        # повторов одного вызова до остановки
+AGENT_MAX_CONSECUTIVE_FAILURES = _int_env("AGENT_MAX_CONSECUTIVE_FAILURES", 4)
+TOOL_NATIVE_MAX = _int_env("TOOL_NATIVE_MAX", 14)           # сколько инструментов видит модель за раз
 
 # Лимит рассуждений модели (в символах), прежде чем ответ начат. Если модель думает
 # дольше, запрос повторяется без рассуждений. 0 — лимит выключен.
@@ -614,7 +620,8 @@ PLAN_CRITIC_MAX_MISSED = 3
 # Автономность и проактивность (GCN/autonomy.py)
 # =====================================================================
 # Мастер-выключатель движка. False — прежние фоновые циклы работают как раньше.
-AUTONOMY_ENABLED = True
+# Включено по умолчанию (прежнее поведение). Выключить: AUTONOMY_ENABLED=0 в .env.
+AUTONOMY_ENABLED = os.getenv("AUTONOMY_ENABLED", "1").strip() == "1"
 # Базовый интервал главного цикла движка (сек) + дробный джиттер, чтобы
 # несколько пользователей не будили локальную LLM синхронно.
 AUTONOMY_LOOP_INTERVAL = 45

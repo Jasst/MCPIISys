@@ -23,6 +23,7 @@
     attach: '/ai/chat/attach',
     last: '/ai/chat/last_response',
     stop: '/ai/chat/stop',
+    skipTools: '/ai/chat/skip_tools',
     notify: '/ai/notifications/poll',
     health: '/health',
     media: '/ai/ui-media',
@@ -692,7 +693,7 @@ const PHASE_LABEL = {
   generating: 'Пишу ответ',
   done:       'Готово',
 };
-const TRACE_ICON = { start: '▶', route: '🧭', understand: '🔎', round: '↻', tool: '🛠', done: '✓' };
+const TRACE_ICON = { start: '▶', route: '🧭', understand: '🔎', round: '↻', tool: '🛠', done: '✓', skip: '⏭', stuck: '⚠' };
 
   function fmtSec(s) {
   s = Math.max(0, Number(s) || 0);
@@ -713,6 +714,25 @@ const TRACE_ICON = { start: '▶', route: '🧭', understand: '🔎', round: '�
     wrap.appendChild(row);
   }
   return wrap;
+}
+
+// Кнопка «Пропустить шаг»: прерывает зависший инструмент и отвечает по собранному.
+function skipToolsBtn() {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'gl-skip';
+  b.title = 'Пропустить шаг инструментов и ответить по уже собранному';
+  b.textContent = 'Пропустить';
+  b.addEventListener('click', async (e) => {
+    e.preventDefault(); e.stopPropagation();
+    b.disabled = true; b.textContent = 'Пропускаю…';
+    try {
+      const r = await fetch(API.skipTools, { method: 'POST', credentials: 'same-origin' });
+      const j = r.ok ? await r.json() : null;
+      if (!j || !j.skipped) b.textContent = 'Нечего пропускать';
+    } catch { b.textContent = 'Нет связи'; }
+  });
+  return b;
 }
 
 // Живая строка статуса во время генерации (свёрнута — высота не скачет)
@@ -737,7 +757,9 @@ const TRACE_ICON = { start: '▶', route: '🧭', understand: '🔎', round: '�
   meta.textContent = parts.join(' · ');
   const bar = document.createElement('span'); bar.className = 'gl-bar';
   const chev = document.createElement('span'); chev.className = 'gl-chev'; chev.textContent = '▸';
-  s.append(dot, label, meta, bar, chev);
+  s.append(dot, label, meta, bar);
+  if (phase === 'tools') s.appendChild(skipToolsBtn());
+  s.appendChild(chev);
   d.appendChild(s);
 
   const body = document.createElement('div');
@@ -1112,6 +1134,15 @@ const TRACE_ICON = { start: '▶', route: '🧭', understand: '🔎', round: '�
     const wantCls = 'gen-live phase-' + phase;
     if (live.className !== wantCls && live.className !== wantCls + ' no-body') {
       live.className = wantCls + (live.querySelector('.gl-body') ? '' : ' no-body');
+    }
+
+    // 1b. кнопка пропуска — только в фазе инструментов
+    const hasSkip = !!live.querySelector('.gl-skip');
+    if (phase === 'tools' && !hasSkip) {
+      const sum = live.querySelector('.gl-summary');
+      if (sum) sum.insertBefore(skipToolsBtn(), sum.querySelector('.gl-chev'));
+    } else if (phase !== 'tools' && hasSkip) {
+      live.querySelector('.gl-skip').remove();
     }
 
     // 2. label — только textContent, без пересоздания

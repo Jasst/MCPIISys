@@ -152,6 +152,17 @@ def _register_memory(registry: ToolRegistry, controller) -> None:
     logger.debug("[internal_tools.memory] зарегистрированы: recall, remember, add_goal")
 
 
+def _register_memory_edit(registry: ToolRegistry, controller) -> None:
+    from .memory_tools import register_memory_edit_tools
+    register_memory_edit_tools(registry, controller)
+
+
+def _register_vision(registry: ToolRegistry, controller) -> None:
+    from .llm_client import call_llm
+    from .vision_tools import register_vision_tools
+    register_vision_tools(registry, controller, call_llm)
+
+
 def _register_search(registry: ToolRegistry, controller,
                      query_expander: Optional[Callable] = None,
                      query_refiner: Optional[Callable] = None) -> None:
@@ -810,9 +821,13 @@ def register_all(registry: ToolRegistry, controller,
                  query_expander: Optional[Callable] = None,
                  query_refiner: Optional[Callable] = None) -> None:
     _register_memory(registry, controller)
+    _register_memory_edit(registry, controller)   # memory_search / memory_explain / memory_forget / memory_update
     _register_search(registry, controller, query_expander=query_expander,
                      query_refiner=query_refiner)
     _register_image(registry, controller)
+    _register_vision(registry, controller)        # inspect_image: повторный осмотр с вырезкой области
+    from .agent_tools import register_agent_tools
+    register_agent_tools(registry)                # ask_user: уточняющий вопрос вместо угадывания
     _register_files(registry, controller)
     _register_code(registry, controller)
     _register_identity(registry, controller)

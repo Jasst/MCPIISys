@@ -1768,7 +1768,9 @@ class CognitiveMemory:
             if STABILIZER_ENABLED:
                 try:
                     self._stabilize_deterministic()
-                    if STABILIZER_AI_REVIEW and not getattr(self, "_stab_review_running", False):
+                    # AI-ревью стабилизатора — фоновый LLM-вызов: при AUTONOMY_ENABLED=0 не запускаем.
+                    if (STABILIZER_AI_REVIEW and AUTONOMY_ENABLED
+                            and not getattr(self, "_stab_review_running", False)):
                         asyncio.create_task(self._ai_review_stabilizer())
                 except Exception as e:
                     logger.debug(f"stabilizer failed: {e}")

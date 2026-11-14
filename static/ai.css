@@ -620,3 +620,8 @@ html.lb-open, html.lb-open body { overflow: hidden; }
 
 @keyframes gsPulse { 0%, 100% { transform: scale(.8); opacity: .5; } 50% { transform: scale(1.15); opacity: 1; } }
 @keyframes gsSlide { 0% { left: -40%; } 100% { left: 100%; } }
+/* Кнопка «Пропустить шаг» в строке статуса инструментов */
+.gen-live .gl-skip { flex: none; margin-left: 8px; padding: 2px 8px; font-size: 12px; border-radius: 999px;
+  border: 1px solid currentColor; background: transparent; color: inherit; opacity: .8; cursor: pointer; }
+.gen-live .gl-skip:hover:not(:disabled) { opacity: 1; }
+.gen-live .gl-skip:disabled { opacity: .5; cursor: default; }

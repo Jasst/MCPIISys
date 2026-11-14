@@ -1047,6 +1047,11 @@ async def _llamacpp_switch(target: str, params: Optional[Dict] = None) -> Dict:
         if current == target and (params is None or mgr.params() == want):
             _remember_loaded(target)
             return {"ok": True, "loaded": target, "changed": False, "error": None}
+        # Причина перезагрузки — в лог: иначе не видно, почему llama-server запустился повторно.
+        why = (f"смена модели {current!r} -> {target!r}" if current != target
+               else "параметры загрузки отличаются от запущенного сервера")
+        initiator = (asyncio.current_task().get_name() if asyncio.current_task() else "?")
+        logger.info(f"llama-server: запуск {target!r} ({why}; инициатор задача: {initiator})")
         try:
             await mgr.load(target, want)
             _load_ts = time.monotonic()
