@@ -2729,51 +2729,37 @@ class CognitiveController:
         return memory_context
 
     def _get_identity_block(self) -> str:
-        """
-        Возвращает текстовый блок с последним валидным звеном ТЕКУЩЕЕ_Я для
-        инжекта в user-message. Пустая строка — цепочка пуста или недоступна.
-
-        Зачем: без этого блока модель вообще не знает, что у неё есть
-        append-only цепочка идентичности — identity_core пишет в shared-слой,
-        а автопоиск памяти (recall/retrieve_hybrid) добирается только до
-        фактов/концептов, но не до IDENTITY_CORE-объектов (они не проходят
-        через _add_fact и не имеют эмбеддингов в FAISS). Единственный способ
-        для модели узнать текущее состояние — этот явный блок.
-        """
+        """Два слоя личности для инжекта в контекст:
+        1) ОБЩЕЕ ядро — одинаково для всех пользователей, только чтение. Меняется только по решению
+           администратора (см. GCN/core_admin.py), модель его не редактирует.
+        2) ТЕКУЩЕЕ_Я — личная цепочка ЭТОГО пользователя (через ворота и карантин, GCN/identity_tools.py).
+        Пустая строка — если чтение не удалось или записей нет."""
         try:
             from GCN.GCN import get_latest_head, get_heads
-            # Личное ТЕКУЩЕЕ_Я приоритетнее; общее ядро — фолбэк, если личной цепочки нет.
+            parts: List[str] = []
+            g = get_latest_head(self.memory_service.shared_memory.gcn_store)
+            if g is not None:
+                gm = g.object if isinstance(g.object, dict) else {}
+                gtext = (gm.get("content") or "").strip()[:400]
+                if gtext:
+                    parts += ["=== ОБЩЕЕ ЯДРО ЛИЧНОСТИ (одинаково для всех; только чтение; "
+                              "меняется только по решению администратора) ===", gtext,
+                              "=== КОНЕЦ ОБЩЕГО ЯДРА ==="]
             store = self.memory_service.private_memory.gcn_store
             head = get_latest_head(store)
-            if head is None:
-                store = self.memory_service.shared_memory.gcn_store
-                head = get_latest_head(store)
-            if head is None:
-                return ""
-            heads = get_heads(store)
-            meta = head.object if isinstance(head.object, dict) else {}
-            content = (meta.get("content") or "").strip()
-            open_question = (meta.get("open_question") or "").strip()
-
-            lines = [
-                "=== ТЕКУЩЕЕ_Я (последнее звено цепочки идентичности) ===",
-                f"id: {head.id}",
-                f"автор: {head.author}",
-                f"записано: {head.created.isoformat() if hasattr(head.created, 'isoformat') else head.created}",
-                f"содержание: {content}",
-            ]
-            if open_question:
-                lines.append(f"открытый вопрос для тебя: {open_question}")
-            if len(heads) > 1:
-                lines.append(
-                    f"⚠️ ВНИМАНИЕ: в цепочке {len(heads)} несведённых голов. "
-                    f"Расхождение требует сверки."
-                )
-                for h in heads:
-                    hmeta = h.object if isinstance(h.object, dict) else {}
-                    lines.append(f"  - {h.id}: {hmeta.get('content', '')[:200]}")
-            lines.append("=== КОНЕЦ ТЕКУЩЕЕ_Я ===")
-            return "\n".join(lines)
+            if head is not None:
+                heads = get_heads(store)
+                meta = head.object if isinstance(head.object, dict) else {}
+                content = (meta.get("content") or "").strip()[:600]
+                open_q = (meta.get("open_question") or "").strip()
+                parts += ["=== ТЕКУЩЕЕ_Я (личная цепочка этого пользователя) ===",
+                          f"id: {head.id}", f"содержание: {content}"]
+                if open_q:
+                    parts.append(f"открытый вопрос для тебя: {open_q}")
+                if len(heads) > 1:
+                    parts.append(f"⚠️ в личной цепочке {len(heads)} несведённых голов — нужна сверка")
+                parts.append("=== КОНЕЦ ТЕКУЩЕЕ_Я ===")
+            return "\n".join(parts)
         except Exception as e:
             logger.debug(f"_get_identity_block failed: {e}")
             return ""
@@ -4121,6 +4107,17 @@ async def chat_with_ai(body: AIRequest, address: str = Depends(require_auth)):
     if body.url_to_fetch and body.url_to_fetch not in (body.message or ""):
         body.message = f"{body.message}\n{body.url_to_fetch}".strip()
     assistant = await get_assistant(address)
+    # Человеческий гейт общего ядра личности: короткий ответ администратора («да»/«нет»/«откатить ядро»)
+    # на предложение обновления. Обычные сообщения сюда не попадают.
+    from GCN.core_admin import handle_admin_message
+    gate_reply = await handle_admin_message(address, body.message or "", assistant.memory_service)
+    if gate_reply is not None:
+        if body.stream:
+            async def _gate_sse():
+                yield f"data: {json.dumps({'token': gate_reply}, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+            return StreamingResponse(_gate_sse(), media_type="text/event-stream")
+        return {"reply": gate_reply, "meta": {"source": "human_gate"}}
     if body.stream:
         busy = assistant._active_stream
         if busy is not None and not busy.get("done"):

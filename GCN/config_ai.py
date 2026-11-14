@@ -694,6 +694,8 @@ IDENTITY_CONSISTENCY_THRESHOLD = 0.35
 
 # Сколько фактов составлять "Ядро" (несущие стены графа)
 IDENTITY_CORE_SIZE = 7
+# Сколько РАЗНЫХ дней должна подтвердиться формулировка, прежде чем она станет идентичностью.
+IDENTITY_MIN_DAYS = int(os.getenv("IDENTITY_MIN_DAYS", "2"))
 
 
 # [fast-path-patch]

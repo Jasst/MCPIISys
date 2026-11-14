@@ -506,23 +506,21 @@ def _register_identity(registry: ToolRegistry, controller) -> None:
     service = controller.memory_service
 
     async def _contribute(args):
-        return await append_snapshot(
-            service,
-            content=args["content"],
-            contributor_model=args["contributor_model"],
-            session_id=args.get("session_id"),
-            open_question=args.get("open_question"),
-            parent_id=args.get("parent_id"),
-            merge_parent_ids=args.get("merge_parent_ids"),
-        )
+        # Раньше писал в ОБЩЕЕ курируемое ядро без проверки содержания. Теперь запись идёт только
+        # через ворота и карантин (identity_propose -> identity_commit), в личный слой.
+        return {"status": "rejected",
+                "message": ("contribute_to_identity отключён: используй identity_propose (формулировка + "
+                            "дословная цитата из диалога) и identity_commit после подтверждения в разные дни.")}
 
     async def _merge(args):
+        # Сведение голов — только в личном слое; общее ядро модель не редактирует.
         return await merge_heads(
             service,
             content=args["content"],
             contributor_model=args["contributor_model"],
             session_id=args.get("session_id"),
             open_question=args.get("open_question"),
+            layer="private",
         )
 
     async def _search(args):
@@ -826,6 +824,8 @@ def register_all(registry: ToolRegistry, controller,
                      query_refiner=query_refiner)
     _register_image(registry, controller)
     _register_vision(registry, controller)        # inspect_image: повторный осмотр с вырезкой области
+    from .identity_tools import register_identity_tools
+    register_identity_tools(registry, controller)  # identity_propose / identity_commit: ворота + карантин
     from .agent_tools import register_agent_tools
     register_agent_tools(registry)                # ask_user: уточняющий вопрос вместо угадывания
     _register_files(registry, controller)

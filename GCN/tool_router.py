@@ -106,8 +106,8 @@ _INTENT_GROUPS: List[Tuple[Tuple[str, ...], List[str]]] = [
     ((r"код", r"файл", r"функци", r"модул", r"архитектур", r"структур", r"проект", r"класс"),
      ["internal__project_structure", "internal__read_code", "internal__search_code"]),
     ((r"ошибк", r"traceback", r"exception"), ["internal__analyze_error"]),
-    ((r"идентичн", r"цепочк", r"текущее_я", r"продолжи себя", r"как ты себя"),
-     ["internal__get_identity_chain", "internal__contribute_to_identity"]),
+    ((r"идентичн", r"цепочк", r"текущее_я", r"продолжи себя", r"как ты себя", r"о себе", r"себя\b"),
+     ["internal__get_identity_chain", "internal__identity_propose", "internal__identity_commit"]),
     ((r"инструмент", r"что ты умеешь", r"твои возможност"), ["internal__list_tools"]),
     ((r"github", r"гитхаб"), ["internal__fetch_github_file"]),
 ]
