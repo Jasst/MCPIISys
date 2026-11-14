@@ -57,3 +57,68 @@ async def delete_user_file(fid: str, user_id: str = Depends(require_auth)):
     except fs.FileError as e:
         raise HTTPException(e.status, detail=str(e))
     return {"ok": True}
+
+@router.get("/files/{fid}/preview")
+async def preview_file(fid: str, user_id: str = Depends(require_auth)):
+    """Содержимое файла для модального просмотра в чате (JSON, не бинарь).
+
+    Отдаёт ровно то, что нужно клиенту для отрисовки:
+      • image  → url для <img>
+      • text   → text + language (markdown/code/text) + truncated
+      • binary → download_only=true (только скачивание)
+    Отдельный эндпоинт нужен потому, что GET /ai/files/{fid} принудительно
+    отдаёт attachment для не-картинок (защита от XSS из .html/.svg) — браузер
+    такое скачивает, а не открывает.
+    """
+    try:
+        meta = await asyncio.to_thread(fs.get_meta, user_id, fid)
+    except fs.FileError as e:
+        raise HTTPException(e.status, detail=str(e))
+    if meta is None:
+        raise HTTPException(404, detail="Файл не найден")
+
+    kind = meta.get("kind")
+    if kind == "image":
+        return {"kind": "image", "name": meta["name"],
+                "url": f"/ai/files/{fid}", "size": meta["size"]}
+    if kind == "binary":
+        return {"kind": "binary", "name": meta["name"],
+                "size": meta["size"], "download_only": True}
+
+    # text
+    try:
+        info = await asyncio.to_thread(fs.read_text, user_id, fid, 0, fs.MAX_READ_CHARS)
+    except fs.FileError as e:
+        raise HTTPException(e.status, detail=str(e))
+
+    # Язык по расширению — для hljs на клиенте. markdown выделен отдельно,
+    # потому что для него клиент использует marked+DOMPurify, а не <pre><code>.
+    import os
+    ext = os.path.splitext(meta["name"])[1].lower()
+    lang_map = {
+        ".md": "markdown", ".markdown": "markdown", ".mdx": "markdown",
+        ".py": "python", ".pyw": "python",
+        ".js": "javascript", ".mjs": "javascript", ".jsx": "javascript",
+        ".ts": "typescript", ".tsx": "typescript",
+        ".json": "json",
+        ".html": "html", ".htm": "html",
+        ".css": "css", ".scss": "scss", ".sass": "scss",
+        ".xml": "xml", ".yml": "yaml", ".yaml": "yaml", ".toml": "toml", ".ini": "ini",
+        ".sh": "bash", ".bash": "bash", ".zsh": "bash", ".fish": "bash",
+        ".bat": "dos", ".ps1": "powershell",
+        ".sql": "sql",
+        ".go": "go", ".rs": "rust", ".java": "java", ".kt": "kotlin",
+        ".c": "c", ".h": "c", ".cpp": "cpp", ".hpp": "cpp", ".cc": "cpp",
+        ".cs": "csharp", ".rb": "ruby", ".php": "php", ".swift": "swift",
+        ".r": "r", ".lua": "lua", ".pl": "perl", ".dart": "dart",
+        ".csv": "csv", ".tsv": "tsv", ".log": "text",
+    }
+    return {
+        "kind": "text",
+        "name": meta["name"],
+        "language": lang_map.get(ext, "text"),
+        "text": info["text"],
+        "total_chars": info["total_chars"],
+        "truncated": info["next_offset"] is not None,
+        "mime": meta.get("mime") or "text/plain",
+    }

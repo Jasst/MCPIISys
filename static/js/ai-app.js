@@ -818,13 +818,12 @@ function skipToolsBtn() {
       ? (prevBody.scrollHeight - prevBody.scrollTop - prevBody.clientHeight < 20)
       : true;
 
-        bubble.innerHTML = '';
+    bubble.innerHTML = '';
+
     // После полной пересборки выставляем кэш «инвалидации структуры» в
     // СОСТОЯНИЕ, КОТОРОЕ ТОЛЬКО ЧТО НАРИСОВАНО. Тогда следующий
     // paintBubbleLive увидит «счётчики совпадают» и пойдёт по in-place
-    // пути. Если поставить null — каждый чанк будет снова вызывать
-    // paintBubble (undefined !== 0 → stateChanged=true → paintBubble →
-    // null → ...), и весь смысл оптимизации пропадает.
+    // пути.
     bubble._liveState = {
       notes: (m.notes || []).length,
       images: (m.images || []).length,
@@ -832,6 +831,9 @@ function skipToolsBtn() {
       err: m.error || '',
     };
 
+    // ------------------------------------------------------------------
+    // USER-СООБЩЕНИЕ: картинка + файл + текст
+    // ------------------------------------------------------------------
     if (m.role === 'user') {
       if (m.image) {
         const fig = imageBlock(m.image, 'Прикреплённое изображение', 'photo');
@@ -846,6 +848,22 @@ function skipToolsBtn() {
         });
         bubble.appendChild(fig.wrap);
       }
+      // ВАЖНО: файлы пользователя — тоже ЧАСТЬ user-сообщения, а не bot.
+      // Раньше этот блок стоял ПОСЛЕ `return`, то есть НЕ выполнялся для
+      // user-пузырей: attach → отправка → в чате ничего не появляется.
+      // Теперь рендерим здесь, до return.
+      if (m.file) {
+  const a = document.createElement('a');
+  a.className = 'file-chip';
+  a.href = '#';
+  a.textContent = `📄 ${m.file.name} · ${fmtBytes(m.file.size || 0)}`;
+  a.title = 'Открыть для просмотра';
+  a.addEventListener('click', (e) => {
+    e.preventDefault();
+    openFilePreview(m.file);
+  });
+  bubble.appendChild(a);
+}
       if (m.text) {
         const p = document.createElement('div');
         p.textContent = m.text;
@@ -853,6 +871,10 @@ function skipToolsBtn() {
       }
       return;
     }
+
+    // ------------------------------------------------------------------
+    // BOT-СООБЩЕНИЕ: live-статус, история мыслей, ответ, картинки, источники, ошибки
+    // ------------------------------------------------------------------
 
     // Во время генерации — одна стабильная строка СВЕРХУ; текст стримится ниже.
     // Всё «шумное» (reasoning + trace) внутри неё и свёрнуто: высота не скачет.
@@ -876,23 +898,13 @@ function skipToolsBtn() {
       bubble.appendChild(historyNode(m));
     }
 
-    if (m.file) {
-      const a = document.createElement('a');
-      a.className = 'file-chip';
-      a.href = `${API.files}/${m.file.id}`;
-      a.download = m.file.name;
-      a.textContent = `📄 ${m.file.name} · ${fmtBytes(m.file.size || 0)}`;
-      bubble.appendChild(a);
-    }
+    // Текст ответа (markdown). _lastText — кэш для paintBubbleLive,
+    // чтобы не пересчитывать markdown на идентичном тексте.
     if (m.text) {
       const md = document.createElement('div');
       md.className = 'markdown-body';
       if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') md.classList.add('plain');
       md.innerHTML = renderMd(m.text);
-      // ВАЖНО: запоминаем, какой текст уже отрисован в этот слот. Без этого
-      // paintBubbleLive после первой же stateChanged-пересборки (пришёл новый
-      // tool_call/warning/error) увидит md._lastText === undefined !== m.text
-      // и пересчитает markdown ещё раз на идентичном тексте — лишний CPU.
       md._lastText = m.text;
       bubble.appendChild(md);
       highlight(md);
@@ -1806,19 +1818,29 @@ function skipToolsBtn() {
     // фото покажем ссылкой сразу после загрузки на сервер (см. ниже): тяжёлые
     // data URL в истории не храним — они забивали квоту и роняли показ после перезагрузки
     const userMsg = {
-      id: uid(),   // устойчивый id: по нему сервер схлопывает повторы при слиянии
-      role: 'user',
-      text,
-      time: Date.now(),
-      image: (img && img.kind === 'image' && img.url.length < MAX_IMAGE_STORE) ? img.url : null,
-    };
-    msgs.push(userMsg);
-    msgs.push(newBotMessage());
-    const idx = msgs.length - 1;
-    commit(id);
-    scheduleSync(true);   // форс-пул начального состояния ДО genFlag в startGeneration
-    renderMessages();
-    refreshUI();
+  id: uid(),
+  role: 'user',
+  text,
+  time: Date.now(),
+  image: (img && img.kind === 'image' && img.url.length < MAX_IMAGE_STORE) ? img.url : null,
+};
+// ВАЖНО: userMsg.file устанавливается ДО commit/renderMessages, иначе:
+//  - первая отрисовка показывает пузырь без чипа файла;
+//  - если пользователь закроет вкладку до окончания ответа, file-свойство
+//    не попадёт в IndexedDB и не синхронизируется на сервер.
+// Раньше присваивание стояло ПОСЛЕ commit и renderMessages — файл «пропадал»
+// и в UI, и в истории после перезагрузки.
+if (img && img.kind === 'file') {
+  userMsg.file = { id: img.id, name: img.name, size: img.size, mime: img.mime };
+}
+msgs.push(userMsg);
+msgs.push(newBotMessage());
+const idx = msgs.length - 1;
+commit(id);
+scheduleSync(true);
+renderMessages();
+refreshUI();
+
 
     const body = {
       message: text || 'Опиши, что изображено',
@@ -1835,7 +1857,7 @@ function skipToolsBtn() {
     // Тяжёлое фото грузим в медиатеку параллельно с генерацией: ответ модели
     // не ждёт загрузки, а ссылка для истории появляется, как только готова.
     let pendingMedia = null;
-    if (img && img.kind === 'file') userMsg.file = { id: img.id, name: img.name, size: img.size, mime: img.mime };
+
     if (img && img.url && img.url.length >= MAX_IMAGE_STORE) {
       pendingMedia = ensureMediaUrl(img).then((u) => {
         // медиатека недоступна — не теряем картинку, оставляем сжатую inline (если не слишком большая)
@@ -2510,6 +2532,166 @@ document.addEventListener('drop', (e) => {
   const lb = { root: null, img: null, cap: null, counter: null, prev: null, next: null, save: null,
                urls: [], idx: -1, scale: 1, tx: 0, ty: 0, drag: null,
                pointers: new Map(), pinch: null, lastTap: 0, lastPointer: 'mouse' };
+
+  // ------------------------------------------------------------------ модалка файла
+// Просмотр прикреплённого файла: markdown — через marked+DOMPurify (те же, что
+// в чате), код — через hljs, картинки — <img>, бинарные — только скачивание.
+// Клик по чипу НЕ скачивает файл, а открывает это окно; скачивание — отдельная
+// кнопка в шапке модалки.
+const fp = { root: null, title: null, body: null, download: null, close: null };
+
+function ensureFilePreviewBuilt() {
+  if (fp.root) return;
+  fp.root = document.createElement('div');
+  fp.root.className = 'file-preview';
+  fp.root.hidden = true;
+  fp.root.setAttribute('role', 'dialog');
+  fp.root.setAttribute('aria-modal', 'true');
+  fp.root.setAttribute('aria-label', 'Просмотр файла');
+
+  const box = document.createElement('div');
+  box.className = 'fp-box';
+
+  const head = document.createElement('div');
+  head.className = 'fp-head';
+
+  fp.title = document.createElement('h2');
+  fp.title.className = 'fp-title';
+  head.appendChild(fp.title);
+
+  fp.download = document.createElement('a');
+  fp.download.className = 'fp-btn';
+  fp.download.textContent = '⬇ Скачать';
+  head.appendChild(fp.download);
+
+  fp.close = document.createElement('button');
+  fp.close.type = 'button';
+  fp.close.className = 'fp-btn fp-close';
+  fp.close.textContent = '✕';
+  fp.close.setAttribute('aria-label', 'Закрыть');
+  fp.close.addEventListener('click', closeFilePreview);
+  head.appendChild(fp.close);
+
+  box.appendChild(head);
+
+  fp.body = document.createElement('div');
+  fp.body.className = 'fp-body';
+  box.appendChild(fp.body);
+
+  fp.root.appendChild(box);
+  document.body.appendChild(fp.root);
+
+  fp.root.addEventListener('click', (e) => {
+    if (e.target === fp.root) closeFilePreview();
+  });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !fp.root.hidden) { e.stopPropagation(); closeFilePreview(); }
+  });
+}
+
+function closeFilePreview() {
+  if (!fp.root || fp.root.hidden) return;
+  fp.root.hidden = true;
+  fp.body.innerHTML = '';
+  document.documentElement.classList.remove('fp-open');
+}
+
+async function openFilePreview(file) {
+  ensureFilePreviewBuilt();
+  fp.title.textContent = file.name;
+  fp.download.href = `${API.files}/${file.id}`;
+  fp.download.setAttribute('download', file.name);
+  fp.body.innerHTML = '<div class="fp-msg">Загрузка…</div>';
+  fp.root.hidden = false;
+  document.documentElement.classList.add('fp-open');
+
+  let data;
+  try {
+    const r = await fetch(`${API.files}/${file.id}/preview`, { credentials: 'same-origin' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    data = await r.json();
+  } catch (e) {
+    fp.body.innerHTML = '';
+    const err = document.createElement('div');
+    err.className = 'fp-msg fp-error';
+    err.textContent = 'Не удалось загрузить файл: ' + e.message;
+    fp.body.appendChild(err);
+    return;
+  }
+
+  fp.body.innerHTML = '';
+
+  if (data.kind === 'image') {
+    const img = new Image();
+    img.src = data.url;
+    img.className = 'fp-image';
+    img.alt = data.name;
+    fp.body.appendChild(img);
+    return;
+  }
+
+  if (data.kind === 'binary') {
+    const d = document.createElement('div');
+    d.className = 'fp-msg';
+    d.textContent = `Бинарный файл (${fmtBytes(data.size || 0)}). Просмотр недоступен — только скачивание.`;
+    fp.body.appendChild(d);
+    return;
+  }
+
+  // text
+  if (data.language === 'markdown') {
+    const md = document.createElement('div');
+    md.className = 'markdown-body fp-markdown';
+    md.innerHTML = renderMd(data.text);   // marked + DOMPurify (как в чате)
+    fp.body.appendChild(md);
+    // Ссылки в .md — в новой вкладке; иначе клик уносит из чата
+    md.querySelectorAll('a[href]').forEach((a) => {
+  const href = a.getAttribute('href') || '';
+  if (/^(https?:|mailto:)/i.test(href)) {
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+  }
+});
+    highlight(md);                        // подсветка и кнопки «Копировать» в код-блоках
+  } else if (data.language === 'json') {
+    // Pretty-print JSON для читаемости; при ошибке парсинга — сырой текст
+    let pretty = data.text;
+    try { pretty = JSON.stringify(JSON.parse(data.text), null, 2); } catch { /* оставляем как есть */ }
+    fp.body.appendChild(buildCodeBlock(pretty, 'json'));
+  } else {
+    fp.body.appendChild(buildCodeBlock(data.text, data.language || 'text'));
+  }
+
+  if (data.truncated) {
+    const t = document.createElement('div');
+    t.className = 'fp-truncated';
+    t.textContent = `Показано ${data.text.length} из ${data.total_chars} символов. Нажмите «Скачать», чтобы увидеть файл целиком.`;
+    fp.body.appendChild(t);
+  }
+}
+
+function buildCodeBlock(text, lang) {
+  const wrap = document.createElement('div');
+  wrap.className = 'code-wrap fp-code';
+  const pre = document.createElement('pre');
+  const code = document.createElement('code');
+  code.className = 'language-' + (lang || 'text');
+  code.textContent = text;
+  pre.appendChild(code);
+  wrap.appendChild(pre);
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'copy-code-btn';
+  btn.textContent = 'Копировать';
+  btn.addEventListener('click', (e) => { e.stopPropagation(); copyText(text); });
+  wrap.appendChild(btn);
+
+  if (typeof hljs !== 'undefined' && lang && lang !== 'text') {
+    try { hljs.highlightElement(code); } catch { /* нет языкового модуля — показываем как есть */ }
+  }
+  return wrap;
+}
 
   function buildLightbox() {
     if (lb.root) return;
