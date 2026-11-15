@@ -18,7 +18,12 @@ from .config_ai import (
     EASYDIFFUSION_DEFAULT_SAMPLER,
 )
 from .tool_router import ToolRegistry
-from .web_search import deep_search
+from .web_search import deep_search, fetch_url, best_excerpt
+from .research_board import (
+    BOARD_OPEN_PER_CALL, BOARD_PAGE_EXCERPT_CHARS, BOARD_TOOL_OUTPUT_CHARS,
+    EvidenceBoard, Source, split_context_by_url,
+)
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -166,14 +171,16 @@ def _register_vision(registry: ToolRegistry, controller) -> None:
 def _register_search(registry: ToolRegistry, controller,
                      query_expander: Optional[Callable] = None,
                      query_refiner: Optional[Callable] = None) -> None:
+    # Доска хода живёт на контроллере; без неё (например, в заглушках) — локальная.
+    board = getattr(controller, "evidence", None) or EvidenceBoard()
+
+    def _sync_board() -> None:
+        """Держит _web_search_results_this_turn в виде одной записи с доски.
+        Финальный ответ (process_input / stream) читает именно этот список."""
+        if board.sources or board.findings:
+            controller._web_search_results_this_turn = [board.as_search_entry()]
+
     async def _internal_web_search(args: Dict) -> str:
-        # Единый поиск за ход: если детерминированный поиск уже выполнен
-        # (см. _force_search_if_requested), не дёргаем DDG повторно.
-        if controller._web_search_results_this_turn:
-            acc = controller._web_search_results_this_turn[-1]
-            acc_ctx = acc.get("context", "")
-            return (f"Поиск уже выполнен в этом ходе. Найдено "
-                    f"{len(acc.get('sources', []))} источников.\n{acc_ctx[:2500]}")
         query = (args.get("query") or "").strip()
         queries_arg = args.get("queries")
         if isinstance(queries_arg, list) and queries_arg:
@@ -184,6 +191,16 @@ def _register_search(registry: ToolRegistry, controller,
             return "Не указан запрос для поиска (нужен query или queries)."
         query_list = query_list[:MAX_SUBTASKS]
 
+        # Уже выполненные формулировки не повторяем: возвращаем то, что на доске.
+        # Новые формулировки (уточнение по пробелу) выполняются всегда — это углубление поиска.
+        done = {q for s in board.sources.values() for q in s.queries}
+        fresh = [q for q in query_list if q not in done]
+        if not fresh:
+            return ("Эти формулировки уже выполнялись. Источники на доске "
+                    "(открыть целиком: open_page с id S#):\n"
+                    + board.render_candidates(excerpt_chars=280))
+        query_list = fresh
+
         max_results = args.get("max_results", 5)
         results = await asyncio.gather(
             *[deep_search(q, max_results=max_results,
@@ -192,9 +209,7 @@ def _register_search(registry: ToolRegistry, controller,
             return_exceptions=True
         )
 
-        seen_urls = set()
-        merged_sources: List[Dict] = []
-        context_parts: List[str] = []
+        before = set(board.sources)
         any_ok = False
         for q, data in zip(query_list, results):
             if isinstance(data, Exception):
@@ -204,29 +219,79 @@ def _register_search(registry: ToolRegistry, controller,
                 continue
             any_ok = True
             for s in data.get("sources", []):
-                url = s.get("url")
-                if url and url not in seen_urls:
-                    seen_urls.add(url)
-                    merged_sources.append(s)
-            if data.get("context"):
-                label = f"[Подзапрос: {q}]\n" if len(query_list) > 1 else ""
-                context_parts.append(f"{label}{data['context']}")
-
-        merged_context = "\n\n---\n\n".join(context_parts)
-
-        if any_ok:
-            controller._web_search_results_this_turn.append({
-                "queries": query_list,
-                "sources": merged_sources,
-                "context": merged_context,
-            })
+                if s.get("url"):
+                    board.add_source(s["url"], s.get("title", ""), s.get("snippet", "") or "",
+                                     s.get("published"), s.get("reliability"), query=q)
+            # Тексты страниц, которые поиск уже прочитал, — сразу на доску.
+            for url, text in split_context_by_url(data.get("context", "")).items():
+                sid = board.sid_for_url(url)
+                if sid:
+                    board.set_excerpt(sid, text, opened=True)
 
         if not any_ok:
             return "Поиск не дал результатов."
-        if merged_context:
-            return (f"Найдено {len(merged_sources)} источников по "
-                    f"{len(query_list)} запрос(ам).\n{merged_context[:2500]}")
-        return "Ничего не найдено."
+        _sync_board()
+        new_sids = [s for s in board.sources if s not in before]
+        if not new_sids:
+            return "Новых источников нет: всё уже есть на доске."
+        return (f"Найдено {len(new_sids)} новых источников по {len(query_list)} запрос(ам). "
+                f"Открой самые релевантные целиком через open_page (sources: [\"S#\", ...]), "
+                f"либо уточни поиск по конкретному пробелу.\n"
+                + board.render_candidates(sids=new_sids, excerpt_chars=280))
+
+    async def _internal_open_page(args: Dict) -> str:
+        refs = args.get("sources") or args.get("urls") or []
+        if isinstance(refs, str):
+            refs = [refs]
+        if args.get("source") or args.get("url"):
+            refs = list(refs) + [args.get("source") or args.get("url")]
+        refs = [str(r).strip() for r in refs if str(r).strip()][:BOARD_OPEN_PER_CALL]
+        if not refs:
+            return "Укажи источники: sources (например [\"S2\", \"S5\"]) или url."
+        focus = str(args.get("focus") or board.question or "").strip()[:300]
+
+        targets: List[Source] = []
+        errors: List[str] = []
+        for ref in refs:
+            src = board.resolve(ref)
+            if src is not None:
+                if src not in targets:
+                    targets.append(src)
+                continue
+            if re.match(r"^https?://", ref) and board.is_allowed_url(ref):
+                src = board.add_source(ref)
+                targets.append(src)
+                continue
+            errors.append(f"{ref}: нет на доске и не из сообщения пользователя — открыть нельзя")
+
+        if not targets:
+            return "\n".join(errors) or "Нечего открывать."
+
+        fetched = await asyncio.gather(*[fetch_url(s.url) for s in targets], return_exceptions=True)
+        per_page = max(600, BOARD_TOOL_OUTPUT_CHARS // len(targets))
+        out: List[str] = []
+        for src, res in zip(targets, fetched):
+            if isinstance(res, Exception) or not res.get("ok"):
+                reason = "ошибка загрузки" if isinstance(res, Exception) else str(res.get("error", ""))[:120]
+                out.append(f"[{src.sid}] {src.title or src.url}: страница не открылась ({reason})")
+                continue
+            excerpt = best_excerpt(focus or src.title, res["text"], max_chars=BOARD_PAGE_EXCERPT_CHARS)
+            board.set_excerpt(src.sid, excerpt, opened=True)
+            out.append(f"[{src.sid}] {src.title or src.url}\nURL: {src.url}\n{excerpt[:per_page]}")
+        _sync_board()
+        out += errors
+        return "\n\n".join(out)
+
+    async def _internal_pin_finding(args: Dict) -> str:
+        claim = str(args.get("claim") or args.get("fact") or "").strip()
+        if not claim:
+            return "Укажи claim — формулировку проверенного вывода."
+        srcs = args.get("sources") or []
+        if isinstance(srcs, str):
+            srcs = [srcs]
+        finding = board.add_finding(claim, board.valid_sids([str(s) for s in srcs]), origin="model")
+        _sync_board()
+        return f"Закреплено как {finding.fid}: {finding.claim}" if finding else "Пустой вывод, не закреплено."
 
     async def _internal_list_tools(args: Dict) -> str:
         lines = []
@@ -287,24 +352,16 @@ def _register_search(registry: ToolRegistry, controller,
     registry.register(
         name="web_search",
         description=(
-            "Выполняет поиск в интернете (DuckDuckGo + чтение страниц). "
-            "Если в запросе пользователя есть прямая ссылка (URL) — передай её как query, "
-            "содержимое страницы будет прочитано напрямую. "
-            "Для составного вопроса (сравнение, несколько разных фактов) передай "
-            "queries — список из нескольких коротких поисковых запросов вместо одного query, "
-            "они будут выполнены параллельно за один вызов. "
-            "Аргументы: query (str, один запрос) ИЛИ queries (list[str], несколько запросов), "
-            "max_results (int, опционально)"
+            "Поиск в интернете (DuckDuckGo + чтение страниц). Возвращает список источников с id S# "
+            "и фрагментом текста. Для составного вопроса передай queries (2–3 разных формулировки) — "
+            "они выполнятся параллельно. Аргументы: query (str) ИЛИ queries (list[str]), max_results (int)."
         ),
         parameters={
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Один поисковый запрос или URL"},
-                "queries": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Несколько поисковых запросов для составного вопроса"
-                },
+                "query": {"type": "string", "description": "Один поисковый запрос"},
+                "queries": {"type": "array", "items": {"type": "string"},
+                            "description": "Несколько разных формулировок за один вызов"},
                 "max_results": {"type": "integer", "default": 5}
             },
             "required": []
@@ -312,6 +369,45 @@ def _register_search(registry: ToolRegistry, controller,
         handler=_internal_web_search,
         server="internal",
         timeout_seconds=90
+    )
+    registry.register(
+        name="open_page",
+        description=(
+            "Открывает источники целиком и достаёт из них фрагменты, относящиеся к focus. "
+            "Используй после поиска для самых релевантных S# (или URL из сообщения пользователя). "
+            "Можно открыть до 3 страниц за вызов. Аргументы: sources (list[str], например [\"S2\"]), "
+            "focus (str, что именно искать на странице, по умолчанию — вопрос пользователя)."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "sources": {"type": "array", "items": {"type": "string"},
+                            "description": "Идентификаторы S# с доски или URL"},
+                "focus": {"type": "string", "description": "Что извлечь со страницы"}
+            },
+            "required": ["sources"]
+        },
+        handler=_internal_open_page,
+        server="internal",
+        timeout_seconds=60
+    )
+    registry.register(
+        name="pin_finding",
+        description=(
+            "Закрепляет на доске проверенный вывод, чтобы он не потерялся в следующих шагах. "
+            "Аргументы: claim (str, короткий факт), sources (list[str], например [\"S1\"]). "
+            "Закрепляй только то, что подтверждено текстом источников или памятью."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "claim": {"type": "string"},
+                "sources": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["claim"]
+        },
+        handler=_internal_pin_finding,
+        server="internal"
     )
     registry.register(
         name="list_tools",

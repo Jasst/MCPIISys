@@ -45,6 +45,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
+from .research_board import (
+    ANALYST_ENABLED, ANALYST_MAX_TOKENS, EvidenceBoard, build_analyst_prompt, parse_analysis,
+)
+
 logger = logging.getLogger(__name__)
 
 # Персистентный флаг поддержки native function calling (пишется только True).
@@ -422,6 +426,41 @@ def build_tool_trace_context(tool_trace: List[Dict[str, Any]]) -> str:
 # ===========================================================================
 # Агентный цикл
 # ===========================================================================
+_MEMORY_TOOL_SUFFIXES = ("__recall", "__memory_search", "__memory_explain")
+
+
+def _is_memory_tool(name: str) -> bool:
+    return any((name or "").endswith(sfx) for sfx in _MEMORY_TOOL_SUFFIXES)
+
+
+def _playbook_for(offered: List[str]) -> str:
+    """Порядок работы агента, зависящий от доступных инструментов."""
+    names = " ".join(offered)
+    lines = []
+    if "web_search" in names:
+        lines += [
+            "Для вопросов, требующих интернета, работай по этапам:",
+            "1) широкий поиск — 2–3 разные формулировки в одном вызове web_search (queries);",
+            "2) просмотри список источников и открой 1–3 самых релевантных целиком через open_page;",
+            "3) если на доске остались пробелы — уточняющий поиск именно по пробелу, а не повтор общего;",
+            "4) проверенное закрепляй через pin_finding;",
+            "5) как только вопрос можно полно ответить по доске — остановись и отвечай без инструментов.",
+        ]
+    if "recall" in names:
+        lines.append("Для вопросов о пользователе и его делах сначала проверь память (recall, несколько "
+                     "формулировок в queries), и только потом поиск, если памяти недостаточно.")
+    return "[Порядок работы]\n" + "\n".join(lines) if lines else ""
+
+
+def _next_step_hint(board: EvidenceBoard) -> str:
+    if board.suggested_open:
+        return ("\n\nСледующий шаг: открой рекомендованные источники через open_page "
+                f"({', '.join(board.suggested_open)}) или ответь, если данных достаточно.")
+    if board.gaps:
+        return "\n\nСледующий шаг: закрой пробелы уточняющим запросом или ответь, если это уже не нужно."
+    return "\n\nЕсли данных достаточно — ответь пользователю без инструментов."
+
+
 class ToolRouter:
     def __init__(self, registry: ToolRegistry, llm_raw_caller, llm_text_caller):
         self.registry = registry
@@ -434,6 +473,8 @@ class ToolRouter:
         self._runs_since_disabled = 0
         self._scratchpad: List[str] = []
         self._only: Optional[set] = None
+        # Доска исследования текущего хода; контроллер подставляет её в _prepare_messages.
+        self.board: Optional[EvidenceBoard] = None
         # Пропуск шага: пользователь просит ответить по уже собранному.
         self._skip: asyncio.Event = asyncio.Event()
         self.last_run: Dict[str, Any] = {}
@@ -631,6 +672,26 @@ class ToolRouter:
         raw = await self.llm_text_caller([{"role": "user", "content": prompt}], temp=0.0, max_tokens=300)
         return _strict_parse_json_object(raw)
 
+    async def _analyze_round(self, board: EvidenceBoard, round_results: List[Dict[str, Any]]) -> Optional[Dict]:
+        """Текстовый вызов-аналитик: по результатам раунда обновляет выводы, пробелы и
+        список источников для открытия. Ошибка или неразобранный JSON — цикл продолжается
+        без обновления доски."""
+        lines = [f"- {e['tool']}({_short_args(e.get('arguments'))}) -> {str(e.get('result', ''))[:700]}"
+                 for e in round_results]
+        prompt = build_analyst_prompt(board, "\n".join(lines))
+        try:
+            raw = await self.llm_text_caller([{"role": "user", "content": prompt}],
+                                             temp=0.0, max_tokens=ANALYST_MAX_TOKENS)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"analyst: вызов не удался: {e}")
+            return None
+        analysis = parse_analysis(raw)
+        if analysis is None:
+            logger.info(f"analyst: JSON не распознан: {str(raw)[:120]!r}")
+            return None
+        board.apply_analysis(analysis)
+        return analysis
+
     # ===== ОСНОВНОЙ МЕТОД =====
     async def run(self, message: str, base_messages: List[Dict], history_tail: str = "",
                   on_event=None, context_notes: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -681,6 +742,18 @@ class ToolRouter:
         # Передаётся только роутеру, в историю диалога не попадает.
         for note in (context_notes or [])[-4:]:
             running.append({"role": "user", "content": f"[Из прошлых ходов] {note}"})
+
+        # Доску сбрасывает контроллер в начале хода; роутер только читает и дополняет её.
+        board = self.board
+        board_msg: Optional[Dict] = None
+        if board is not None:
+            playbook = _playbook_for(offered)
+            if playbook:
+                running.append({"role": "user", "content": playbook})
+            # Доска уже может содержать результаты форсированного поиска: показываем её до первого решения.
+            if not board.is_empty and board.render_board():
+                board_msg = {"role": "user", "content": board.render_board() + _next_step_hint(board)}
+                running.append(board_msg)
 
         tool_trace: List[Dict[str, Any]] = []
         used_native = False
@@ -746,6 +819,10 @@ class ToolRouter:
                 results_text = "\n".join(
                     f"- {t['tool']}({t['arguments']}) -> {str(t['result'])[:300]}" for t in tool_trace[-6:]
                 )
+                # Текстовый режим видит только этот текст: доска (выводы, источники, пробелы)
+                # обязана попасть сюда, иначе модель решает следующий шаг вслепую.
+                if board is not None and not board.is_empty:
+                    results_text = board.render_board() + "\n\nПоследние вызовы:\n" + results_text
                 decision = await self._decide_fallback(message, history_tail, results_text, temp=0.0)
                 if decision is None or decision.get("action") != "call_tool" or not decision.get("tool"):
                     stop_reason = "model_done"
@@ -802,6 +879,8 @@ class ToolRouter:
                     }
                     if not skipped:
                         seen_results[sig] = (ok, text)
+                    if ok and board is not None and _is_memory_tool(d["tool"]):
+                        board.add_memory(text, tool=d["tool"].split("__")[-1])
                     tool_trace.append(entry)
                     round_results.append(entry)
                     await emit("tool", ("✓ " if ok else ("⏭ " if skipped else "✗ ")) + d["tool"] + ": "
@@ -847,12 +926,34 @@ class ToolRouter:
                 running.append({"role": "user", "content": hint})
             round_idx += 1
 
+            # 3b. Аналитик и доска: выводы, пробелы и кандидаты на открытие закрепляются
+            # и показываются модели на каждом следующем раунде (старый блок заменяется).
+            analysis = None
+            if board is not None and ANALYST_ENABLED and round_results:
+                analysis = await self._analyze_round(board, round_results)
+                if analysis is not None:
+                    await emit("analyze", f"аналитик: выводов {len(board.findings)}, "
+                                            f"пробелов {len(board.gaps)}"
+                                            + (f", открыть: {', '.join(board.suggested_open)}"
+                                               if board.suggested_open else ""))
+            if board is not None and not board.is_empty:
+                board_text = board.render_board()
+                if board_text:
+                    if board_msg is not None:
+                        running = [m for m in running if m is not board_msg]
+                    board_msg = {"role": "user", "content": board_text + _next_step_hint(board)}
+                    running.append(board_msg)
+
             # 4. Условия остановки, которые не зависят от модели.
             asked = [e for e in round_results if e["tool"] == ASK_USER_TOOL and e["ok"]]
             if asked:
                 # Уточняющий вопрос пользователю: цикл отдаёт управление, ответ строит модель.
                 pending_question = asked[-1]["result"]
                 stop_reason = "ask_user"
+                break
+            if analysis is not None and analysis.get("enough") and board is not None and board.findings:
+                stop_reason = "analyst_enough"
+                await emit("done", "аналитик: данных достаточно для ответа")
                 break
             if not to_execute:
                 # Все вызовы — повторы: новой информации нет.

@@ -222,6 +222,7 @@ from GCN.llm_client import (call_llm, call_llm_raw, call_llm_stream, model_suppo
 from GCN.web_search import deep_search, is_time_sensitive_query
 from GCN.image_utils import enhance_prompt, generate_image
 from GCN.tool_router import ToolRegistry, ToolRouter, build_tool_trace_context, might_need_tools
+from GCN.research_board import EvidenceBoard
 from GCN.fast_router import (ComplexityRouter, ActivityGate, StageTimer, Route,
                             make_background_llm, heuristic_only_llm)  # [fast-path-patch]
 # ИНТЕЛЛЕКТ-ПАКЕТ: заземлённые ответы, санитайзер фактов, подзапросный retrieval
@@ -323,10 +324,18 @@ _OTHER_TASK_RE = re.compile(
     re.IGNORECASE)
 
 
+# Углубление после поиска: если форсированный поиск что-то нашёл, агентный цикл всё равно
+# запускается — он может открыть страницы и уточнить пробелы. Выключается флагом =0
+# (тогда возвращается прежний быстрый путь «поиск → сразу ответ»).
+AGENT_DEEPEN_AFTER_SEARCH = os.getenv("AGENT_DEEPEN_AFTER_SEARCH", "1").strip().lower() in ("1", "true", "yes", "on")
+
+
 def search_answer_needs_no_tools(message: str, search_done: bool, has_files: bool) -> bool:
     """Пункт 4: поиск уже выполнен до ReAct, и в сообщении нет других задач.
     Тогда LLM-проход ReAct (нестриминговый вызов со схемами инструментов) не нужен:
     результаты поиска уже есть, и ответ идёт сразу в стрим."""
+    if AGENT_DEEPEN_AFTER_SEARCH:
+        return False
     if not search_done or has_files:
         return False
     return not _OTHER_TASK_RE.search(message or "")
@@ -643,6 +652,10 @@ class CognitiveController:
             llm_raw_caller=call_llm_raw,
             llm_text_caller=call_llm,
         )
+        # Доска исследования хода: источники, фрагменты, выводы и пробелы.
+        # Сбрасывается в _prepare_messages; роутер и инструменты работают с одним объектом.
+        self.evidence = EvidenceBoard()
+        self.tool_router.board = self.evidence
         # Изображение текущего хода (base64) — для инструмента inspect_image.
         self._turn_image: Optional[str] = None
         # Краткие записи о вызовах инструментов последних ходов (fact_id и т.п.) — для роутера.
@@ -745,7 +758,12 @@ class CognitiveController:
             logger.warning(f"[ForcedSearch] фоновый поиск завершился ошибкой: {e}")
             return
         if results:
-            self._web_search_results_this_turn.extend(results)
+            for entry in results:
+                self.evidence.ingest_search_entry(entry)
+            if self.evidence.sources:
+                self._web_search_results_this_turn = [self.evidence.as_search_entry()]
+            else:
+                self._web_search_results_this_turn.extend(results)
 
     async def _run_forced_search(self, message: str) -> List[Dict]:
         """Принудительный поиск до ReAct-цикла.
@@ -1901,6 +1919,7 @@ class CognitiveController:
         # которым пользуется внешний MCP-клиент. Сброс результатов за ход —
         # чтобы не унаследовать поиски от предыдущего сообщения.
         self._web_search_results_this_turn = []
+        self.evidence.reset(message)
         search_meta = {
             "web_search_used": False,
             "auto_triggered": auto_search,
@@ -3640,8 +3659,9 @@ class CognitiveController:
                     )
                     # Прямой ответ — только если роутер уверен и в запросе нет маркеров инструментов.
                     # Раньше fast-router мог молча увести запрос «исправь факт» в прямой ответ.
+                    _deepen = AGENT_DEEPEN_AFTER_SEARCH and bool(self._web_search_results_this_turn)
                     _route_tools = ((decision is None or decision.route is Route.TOOLS
-                                     or might_need_tools(message)) and not skip_react)
+                                     or might_need_tools(message) or _deepen) and not skip_react)
                     await _trace({"kind": "route", "text": (
                         "маршрут: инструменты, роутер решает, что вызвать" if _route_tools
                         else "маршрут: прямой ответ" + (" (поиск уже выполнен)" if skip_react else ""))})

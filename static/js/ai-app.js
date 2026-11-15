@@ -693,7 +693,7 @@ const PHASE_LABEL = {
   generating: 'Пишу ответ',
   done:       'Готово',
 };
-const TRACE_ICON = { start: '▶', route: '🧭', understand: '🔎', round: '↻', tool: '🛠', done: '✓', skip: '⏭', stuck: '⚠' };
+const TRACE_ICON = { start: '▶', route: '🧭', understand: '🔎', round: '↻', tool: '🛠', done: '✓', skip: '⏭', stuck: '⚠', analyze: '🧠' };
 
   function fmtSec(s) {
   s = Math.max(0, Number(s) || 0);
