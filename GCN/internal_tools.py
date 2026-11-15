@@ -7,7 +7,7 @@ from datetime import datetime
 from dataclasses import asdict
 from typing import Any, Callable, Dict, List, Optional
 
-from GCN.config_ai import (
+from .config_ai import (
     ENABLE_CODE_SELF_REFLECTION,
     GENERATED_IMAGES_DIR,
     MAX_SUBTASKS,
@@ -17,8 +17,14 @@ from GCN.config_ai import (
     EASYDIFFUSION_DEFAULT_CFG,
     EASYDIFFUSION_DEFAULT_SAMPLER,
 )
-from GCN.tool_router import ToolRegistry
-from GCN.web_search import deep_search
+from .tool_router import ToolRegistry
+from .web_search import deep_search, fetch_url, best_excerpt
+from .command_parse import clean_fact, clean_image_prompt
+from .research_board import (
+    BOARD_OPEN_PER_CALL, BOARD_PAGE_EXCERPT_CHARS, BOARD_TOOL_OUTPUT_CHARS,
+    EvidenceBoard, Source, split_context_by_url,
+)
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +65,9 @@ def _register_memory(registry: ToolRegistry, controller) -> None:
         facts = args.get("facts")
         if facts:
             # Пакетное сохранение: список фактов в одном вызове
-            items = [str(f).strip() for f in facts if str(f).strip()][:20]
+            items = [c for c in (clean_fact(str(f)) for f in facts) if c][:20]
+            if not items:
+                return "Не сохранено: в аргументах нет содержимого факта."
             saved, rejected = [], []
             for item in items:          # по одному: записи в память не должны идти параллельно
                 try:
@@ -77,7 +85,9 @@ def _register_memory(registry: ToolRegistry, controller) -> None:
                 lines.append("Не сохранено: " + "; ".join(rejected))
             return "\n".join(lines)
 
-        fact = args.get("fact", "")
+        fact = clean_fact(args.get("fact", ""))
+        if not fact:
+            return "Не сохранено: в аргументах нет содержимого факта (только команда без текста)."
         # ИСПРАВЛЕНИЕ: внутренний инструмент вызывается по решению LLM в ответ
         # на явную просьбу пользователя «запомни ...». Это осознанный запрос,
         # а не автоизвлечение из web-поиска — пропускаем фильтр фактологичности
@@ -103,7 +113,7 @@ def _register_memory(registry: ToolRegistry, controller) -> None:
 
     registry.register(
         name="recall",
-        description=("Поиск в памяти. Одна формулировка: query (str). Несколько формулировок за один вызов "
+        description=("ПАМЯТЬ (факты о пользователе и мире). Поиск. Одна формулировка: query (str). Несколько формулировок за один вызов "
                      "(найдёт больше, чем одна): queries (список строк, до 5). top_k (int, опционально), "
                      "scope (str, опционально: private/shared/global)"),
         parameters={
@@ -121,7 +131,7 @@ def _register_memory(registry: ToolRegistry, controller) -> None:
     )
     registry.register(
         name="remember",
-        description=("Запоминает факты. Один факт: fact (str). Несколько фактов за один вызов: facts (список строк). "
+        description=("ПАМЯТЬ (факты о пользователе и мире, НЕ о себе — о себе identity_propose). Один факт: fact (str). Несколько фактов за один вызов: facts (список строк). "
                      "scope (str, опционально: private/shared/global, по умолчанию private)"),
         parameters={
             "type": "object",
@@ -152,17 +162,30 @@ def _register_memory(registry: ToolRegistry, controller) -> None:
     logger.debug("[internal_tools.memory] зарегистрированы: recall, remember, add_goal")
 
 
+def _register_memory_edit(registry: ToolRegistry, controller) -> None:
+    from .memory_tools import register_memory_edit_tools
+    register_memory_edit_tools(registry, controller)
+
+
+def _register_vision(registry: ToolRegistry, controller) -> None:
+    from .llm_client import call_llm
+    from .vision_tools import register_vision_tools
+    register_vision_tools(registry, controller, call_llm)
+
+
 def _register_search(registry: ToolRegistry, controller,
                      query_expander: Optional[Callable] = None,
                      query_refiner: Optional[Callable] = None) -> None:
+    # Доска хода живёт на контроллере; без неё (например, в заглушках) — локальная.
+    board = getattr(controller, "evidence", None) or EvidenceBoard()
+
+    def _sync_board() -> None:
+        """Держит _web_search_results_this_turn в виде одной записи с доски.
+        Финальный ответ (process_input / stream) читает именно этот список."""
+        if board.sources or board.findings:
+            controller._web_search_results_this_turn = [board.as_search_entry()]
+
     async def _internal_web_search(args: Dict) -> str:
-        # Единый поиск за ход: если детерминированный поиск уже выполнен
-        # (см. _force_search_if_requested), не дёргаем DDG повторно.
-        if controller._web_search_results_this_turn:
-            acc = controller._web_search_results_this_turn[-1]
-            acc_ctx = acc.get("context", "")
-            return (f"Поиск уже выполнен в этом ходе. Найдено "
-                    f"{len(acc.get('sources', []))} источников.\n{acc_ctx[:2500]}")
         query = (args.get("query") or "").strip()
         queries_arg = args.get("queries")
         if isinstance(queries_arg, list) and queries_arg:
@@ -173,6 +196,16 @@ def _register_search(registry: ToolRegistry, controller,
             return "Не указан запрос для поиска (нужен query или queries)."
         query_list = query_list[:MAX_SUBTASKS]
 
+        # Уже выполненные формулировки не повторяем: возвращаем то, что на доске.
+        # Новые формулировки (уточнение по пробелу) выполняются всегда — это углубление поиска.
+        done = {q for s in board.sources.values() for q in s.queries}
+        fresh = [q for q in query_list if q not in done]
+        if not fresh:
+            return ("Эти формулировки уже выполнялись. Источники на доске "
+                    "(открыть целиком: open_page с id S#):\n"
+                    + board.render_candidates(excerpt_chars=280))
+        query_list = fresh
+
         max_results = args.get("max_results", 5)
         results = await asyncio.gather(
             *[deep_search(q, max_results=max_results,
@@ -181,9 +214,7 @@ def _register_search(registry: ToolRegistry, controller,
             return_exceptions=True
         )
 
-        seen_urls = set()
-        merged_sources: List[Dict] = []
-        context_parts: List[str] = []
+        before = set(board.sources)
         any_ok = False
         for q, data in zip(query_list, results):
             if isinstance(data, Exception):
@@ -193,29 +224,79 @@ def _register_search(registry: ToolRegistry, controller,
                 continue
             any_ok = True
             for s in data.get("sources", []):
-                url = s.get("url")
-                if url and url not in seen_urls:
-                    seen_urls.add(url)
-                    merged_sources.append(s)
-            if data.get("context"):
-                label = f"[Подзапрос: {q}]\n" if len(query_list) > 1 else ""
-                context_parts.append(f"{label}{data['context']}")
-
-        merged_context = "\n\n---\n\n".join(context_parts)
-
-        if any_ok:
-            controller._web_search_results_this_turn.append({
-                "queries": query_list,
-                "sources": merged_sources,
-                "context": merged_context,
-            })
+                if s.get("url"):
+                    board.add_source(s["url"], s.get("title", ""), s.get("snippet", "") or "",
+                                     s.get("published"), s.get("reliability"), query=q)
+            # Тексты страниц, которые поиск уже прочитал, — сразу на доску.
+            for url, text in split_context_by_url(data.get("context", "")).items():
+                sid = board.sid_for_url(url)
+                if sid:
+                    board.set_excerpt(sid, text, opened=True)
 
         if not any_ok:
             return "Поиск не дал результатов."
-        if merged_context:
-            return (f"Найдено {len(merged_sources)} источников по "
-                    f"{len(query_list)} запрос(ам).\n{merged_context[:2500]}")
-        return "Ничего не найдено."
+        _sync_board()
+        new_sids = [s for s in board.sources if s not in before]
+        if not new_sids:
+            return "Новых источников нет: всё уже есть на доске."
+        return (f"Найдено {len(new_sids)} новых источников по {len(query_list)} запрос(ам). "
+                f"Открой самые релевантные целиком через open_page (sources: [\"S#\", ...]), "
+                f"либо уточни поиск по конкретному пробелу.\n"
+                + board.render_candidates(sids=new_sids, excerpt_chars=280))
+
+    async def _internal_open_page(args: Dict) -> str:
+        refs = args.get("sources") or args.get("urls") or []
+        if isinstance(refs, str):
+            refs = [refs]
+        if args.get("source") or args.get("url"):
+            refs = list(refs) + [args.get("source") or args.get("url")]
+        refs = [str(r).strip() for r in refs if str(r).strip()][:BOARD_OPEN_PER_CALL]
+        if not refs:
+            return "Укажи источники: sources (например [\"S2\", \"S5\"]) или url."
+        focus = str(args.get("focus") or board.question or "").strip()[:300]
+
+        targets: List[Source] = []
+        errors: List[str] = []
+        for ref in refs:
+            src = board.resolve(ref)
+            if src is not None:
+                if src not in targets:
+                    targets.append(src)
+                continue
+            if re.match(r"^https?://", ref) and board.is_allowed_url(ref):
+                src = board.add_source(ref)
+                targets.append(src)
+                continue
+            errors.append(f"{ref}: нет на доске и не из сообщения пользователя — открыть нельзя")
+
+        if not targets:
+            return "\n".join(errors) or "Нечего открывать."
+
+        fetched = await asyncio.gather(*[fetch_url(s.url) for s in targets], return_exceptions=True)
+        per_page = max(600, BOARD_TOOL_OUTPUT_CHARS // len(targets))
+        out: List[str] = []
+        for src, res in zip(targets, fetched):
+            if isinstance(res, Exception) or not res.get("ok"):
+                reason = "ошибка загрузки" if isinstance(res, Exception) else str(res.get("error", ""))[:120]
+                out.append(f"[{src.sid}] {src.title or src.url}: страница не открылась ({reason})")
+                continue
+            excerpt = best_excerpt(focus or src.title, res["text"], max_chars=BOARD_PAGE_EXCERPT_CHARS)
+            board.set_excerpt(src.sid, excerpt, opened=True)
+            out.append(f"[{src.sid}] {src.title or src.url}\nURL: {src.url}\n{excerpt[:per_page]}")
+        _sync_board()
+        out += errors
+        return "\n\n".join(out)
+
+    async def _internal_pin_finding(args: Dict) -> str:
+        claim = str(args.get("claim") or args.get("fact") or "").strip()
+        if not claim:
+            return "Укажи claim — формулировку проверенного вывода."
+        srcs = args.get("sources") or []
+        if isinstance(srcs, str):
+            srcs = [srcs]
+        finding = board.add_finding(claim, board.valid_sids([str(s) for s in srcs]), origin="model")
+        _sync_board()
+        return f"Закреплено как {finding.fid}: {finding.claim}" if finding else "Пустой вывод, не закреплено."
 
     async def _internal_list_tools(args: Dict) -> str:
         lines = []
@@ -276,24 +357,16 @@ def _register_search(registry: ToolRegistry, controller,
     registry.register(
         name="web_search",
         description=(
-            "Выполняет поиск в интернете (DuckDuckGo + чтение страниц). "
-            "Если в запросе пользователя есть прямая ссылка (URL) — передай её как query, "
-            "содержимое страницы будет прочитано напрямую. "
-            "Для составного вопроса (сравнение, несколько разных фактов) передай "
-            "queries — список из нескольких коротких поисковых запросов вместо одного query, "
-            "они будут выполнены параллельно за один вызов. "
-            "Аргументы: query (str, один запрос) ИЛИ queries (list[str], несколько запросов), "
-            "max_results (int, опционально)"
+            "Поиск в интернете (DuckDuckGo + чтение страниц). Возвращает список источников с id S# "
+            "и фрагментом текста. Для составного вопроса передай queries (2–3 разных формулировки) — "
+            "они выполнятся параллельно. Аргументы: query (str) ИЛИ queries (list[str]), max_results (int)."
         ),
         parameters={
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Один поисковый запрос или URL"},
-                "queries": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Несколько поисковых запросов для составного вопроса"
-                },
+                "query": {"type": "string", "description": "Один поисковый запрос"},
+                "queries": {"type": "array", "items": {"type": "string"},
+                            "description": "Несколько разных формулировок за один вызов"},
                 "max_results": {"type": "integer", "default": 5}
             },
             "required": []
@@ -301,6 +374,45 @@ def _register_search(registry: ToolRegistry, controller,
         handler=_internal_web_search,
         server="internal",
         timeout_seconds=90
+    )
+    registry.register(
+        name="open_page",
+        description=(
+            "Открывает источники целиком и достаёт из них фрагменты, относящиеся к focus. "
+            "Используй после поиска для самых релевантных S# (или URL из сообщения пользователя). "
+            "Можно открыть до 3 страниц за вызов. Аргументы: sources (list[str], например [\"S2\"]), "
+            "focus (str, что именно искать на странице, по умолчанию — вопрос пользователя)."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "sources": {"type": "array", "items": {"type": "string"},
+                            "description": "Идентификаторы S# с доски или URL"},
+                "focus": {"type": "string", "description": "Что извлечь со страницы"}
+            },
+            "required": ["sources"]
+        },
+        handler=_internal_open_page,
+        server="internal",
+        timeout_seconds=60
+    )
+    registry.register(
+        name="pin_finding",
+        description=(
+            "Закрепляет на доске проверенный вывод, чтобы он не потерялся в следующих шагах. "
+            "Аргументы: claim (str, короткий факт), sources (list[str], например [\"S1\"]). "
+            "Закрепляй только то, что подтверждено текстом источников или памятью."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "claim": {"type": "string"},
+                "sources": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["claim"]
+        },
+        handler=_internal_pin_finding,
+        server="internal"
     )
     registry.register(
         name="list_tools",
@@ -337,7 +449,9 @@ def _register_search(registry: ToolRegistry, controller,
 
 def _register_image(registry: ToolRegistry, controller) -> None:
     async def _internal_generate_image(args: Dict) -> Dict:
-        prompt = args.get("prompt", "")
+        prompt = clean_image_prompt(args.get("prompt", ""))
+        if not prompt:
+            return "Картинка не создана: в аргументах нет описания того, что нарисовать."
         enhance = args.get("enhance_prompt", True)
         steps = args.get("steps", EASYDIFFUSION_DEFAULT_STEPS)
         width = args.get("width", EASYDIFFUSION_DEFAULT_WIDTH)
@@ -397,7 +511,7 @@ def _register_code(registry: ToolRegistry, controller) -> None:
         logger.info("Самоанализ кода отключён в конфигурации")
         return
 
-    from GCN.code_analyzer import get_analyzer
+    from .code_analyzer import get_analyzer
     code_analyzer = get_analyzer()
 
     async def _internal_read_code(args: Dict) -> str:
@@ -487,42 +601,26 @@ def _register_code(registry: ToolRegistry, controller) -> None:
 
 
 def _register_identity(registry: ToolRegistry, controller) -> None:
-    from GCN.GCN import (
+    from .GCN import (
         append_snapshot, merge_heads, invalidate_snapshot,
         get_chain, search_chain, get_heads,
     )
 
     service = controller.memory_service
 
-    async def _contribute(args):
-        return await append_snapshot(
-            service,
-            content=args["content"],
-            contributor_model=args["contributor_model"],
-            session_id=args.get("session_id"),
-            open_question=args.get("open_question"),
-            parent_id=args.get("parent_id"),
-            merge_parent_ids=args.get("merge_parent_ids"),
-        )
-
-    async def _merge(args):
-        return await merge_heads(
-            service,
-            content=args["content"],
-            contributor_model=args["contributor_model"],
-            session_id=args.get("session_id"),
-            open_question=args.get("open_question"),
-        )
-
+    # Личная цепочка ТЕКУЩЕЕ_Я: чтение и аннулирование только в private_memory.
+    # Общее ядро модель только читает через блок контекста; менять его может лишь core_admin.
     async def _search(args):
-        service.shared_memory.reload_if_stale()
-        store = service.shared_memory.gcn_store
+        if hasattr(service.private_memory, "reload_if_stale"):
+            service.private_memory.reload_if_stale()
+        store = service.private_memory.gcn_store
         matches = search_chain(store, args.get("query", ""), limit=int(args.get("limit", 20)))
         return {"matches": [asdict(m) for m in matches], "count": len(matches)}
 
     async def _get_chain(args):
-        service.shared_memory.reload_if_stale()  # не отдавать устаревшую голову/чейн
-        store = service.shared_memory.gcn_store
+        if hasattr(service.private_memory, "reload_if_stale"):
+            service.private_memory.reload_if_stale()
+        store = service.private_memory.gcn_store
         chain = get_chain(
             store,
             from_id=args.get("from_id"),
@@ -537,88 +635,13 @@ def _register_identity(registry: ToolRegistry, controller) -> None:
         }
 
     async def _invalidate(args):
+        # Модель аннулирует только ЛИЧНЫЕ звенья. Общее ядро откатывает администратор («откатить ядро»).
         return await invalidate_snapshot(
             service,
             identity_id=args["identity_id"],
             reason=args["reason"],
+            layer="private",
         )
-
-    # --- contribute_to_identity ---
-    registry.register(
-        name="contribute_to_identity",
-        description=(
-            "Добавляет новое звено в append-only цепочку цифровой идентичности "
-            "(ТЕКУЩЕЕ_Я). В отличие от remember — не дедуплицируется, не затухает "
-            "и не смерживается: каждый вызов создаёт НОВОЕ звено со ссылкой на "
-            "предка, старые версии не перезаписываются. "
-            "Если в цепочке уже несколько несведённых голов (параллельная запись "
-            "другой моделью) — в ответе будет branch_warning. "
-            "Если parent_id указывает на АННУЛИРОВАННОЕ звено — будет parent_warning. "
-            "Продолжайте цепочку от текущей головы (get_identity_chain → heads)."
-        ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "content": {
-                    "type": "string",
-                    "description": "Текст ядра идентичности — то, что модель считает своим текущим состоянием",
-                },
-                "contributor_model": {
-                    "type": "string",
-                    "description": "Имя модели-автора (например 'Claude', 'Qwen', 'GPT')",
-                },
-                "session_id": {
-                    "type": "string",
-                    "description": "Идентификатор сессии, опционально",
-                },
-                "open_question": {
-                    "type": "string",
-                    "description": "Открытый вопрос для следующего участника протокола, опционально",
-                },
-                "parent_id": {
-                    "type": "string",
-                    "description": (
-                        "gcn_id предыдущего звена, от которого продолжаем "
-                        "(из get_identity_chain → chain[].id). "
-                        "Если не указан — берётся текущая валидная голова."
-                    ),
-                },
-                "merge_parent_ids": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": (
-                        "НОВОЕ: gcn_id дополнительных голов, которые это звено явно "
-                        "сводит воедино. Проще вызвать merge_identity_branches()."
-                    ),
-                },
-            },
-            "required": ["content", "contributor_model"],
-        },
-        handler=_contribute,
-    )
-
-    # --- merge_identity_branches ---
-    registry.register(
-        name="merge_identity_branches",
-        description=(
-            "Сводит ВСЕ текущие несведённые головы цепочки ТЕКУЩЕЕ_Я в одно новое "
-            "merge-звено за один вызов, вместо ручного вычитывания heads и передачи "
-            "их в contribute_to_identity(merge_parent_ids=...). Перед вызовом стоит "
-            "прочитать содержимое каждой головы через get_identity_chain(from_id=...), "
-            "чтобы merge-текст реально учёл все ветки."
-        ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "content": {"type": "string", "description": "Текст merge-звена"},
-                "contributor_model": {"type": "string", "description": "Имя модели-автора"},
-                "session_id": {"type": "string", "description": "Идентификатор сессии, опционально"},
-                "open_question": {"type": "string", "description": "Открытый вопрос, опционально"},
-            },
-            "required": ["content", "contributor_model"],
-        },
-        handler=_merge,
-    )
 
     # --- search_identity_chain ---
     registry.register(
@@ -648,7 +671,7 @@ def _register_identity(registry: ToolRegistry, controller) -> None:
             "Каждое звено содержит invalidated: bool и invalidation_reason — "
             "аннулированные звенья видны в истории, но не считаются головой. "
             "heads: если их больше одной — цепочка разошлась (diverged=true) "
-            "и требует сверки через contribute_to_identity."
+            "и требует сверки через identity_propose."
         ),
         parameters={
             "type": "object",
@@ -679,8 +702,8 @@ def _register_identity(registry: ToolRegistry, controller) -> None:
             "покажет другую — самую свежую валидную), но остаётся видимым с "
             "invalidated=true и текстом причины. "
             "Отмены нет. Используйте ТОЛЬКО когда содержание звена целиком ошибочно. "
-            "Если формулировка просто спорная — вместо этого вызовите "
-            "contribute_to_identity(parent_id=<это звено>) и уточните в новом звене."
+            "Если формулировка просто спорная — предложите уточнённую через identity_propose "
+            "и запишите через identity_commit."
         ),
         parameters={
             "type": "object",
@@ -703,19 +726,122 @@ def _register_identity(registry: ToolRegistry, controller) -> None:
     )
 
     logger.info(
-        "identity_tools: зарегистрированы contribute_to_identity, "
-        "merge_identity_branches, search_identity_chain, "
-        "get_identity_chain, invalidate_identity"
+        "identity: зарегистрированы search_identity_chain, get_identity_chain, invalidate_identity "
+        "(запись — identity_propose / identity_commit)"
     )
+
+
+FILES_TOOL_PREFIX = "internal__files_"
+
+
+def _register_files(registry: ToolRegistry, controller) -> None:
+    """Инструменты работы с файлами пользователя (логика — GCN/file_store.py).
+    Модель видит только file_id; доступ ограничен папкой текущего пользователя.
+    Код из файлов НЕ выполняется: только чтение, разбор и обработка."""
+    from . import file_store as fs
+
+    def _wrap(fn):
+        async def handler(args: Dict) -> Dict:
+            try:
+                result = await asyncio.to_thread(fn, controller.user_id, args or {})
+                return {"status": "ok", **result}
+            except fs.FileError as e:
+                return {"status": "error", "message": str(e)}
+            except Exception as e:  # noqa: BLE001
+                logger.exception("[files] %s", e)
+                return {"status": "error", "message": f"Ошибка обработки файла: {e}"}
+        return handler
+
+    ID = {"file_id": {"type": "string", "description": "id файла из списка прикреплённых"}}
+    specs = [
+        ("files_list",
+         "Список файлов пользователя: id, имя, размер, тип.",
+         {"type": "object", "properties": {}},
+         lambda uid, a: {"files": fs.list_files(uid)}),
+        ("files_read",
+         "Читает текстовый файл частями. offset и limit в символах (limit до 60000). "
+         "Если next_offset не null — файл продолжается, читайте дальше.",
+         {"type": "object", "properties": {**ID,
+                                           "offset": {"type": "integer", "default": 0},
+                                           "limit": {"type": "integer", "default": 8000}},
+          "required": ["file_id"]},
+         lambda uid, a: fs.read_text(uid, a["file_id"], a.get("offset", 0), a.get("limit", 8000))),
+        ("files_search",
+         "Ищет по текстовому файлу регулярным выражением (или подстрокой при regex=false). "
+         "Возвращает совпадения с соседними строками.",
+         {"type": "object", "properties": {**ID,
+                                           "pattern": {"type": "string"},
+                                           "context": {"type": "integer", "default": 2},
+                                           "max_matches": {"type": "integer", "default": 30},
+                                           "regex": {"type": "boolean", "default": True}},
+          "required": ["file_id", "pattern"]},
+         lambda uid, a: fs.search_text(uid, a["file_id"], a["pattern"], a.get("context", 2),
+                                       a.get("max_matches", 30), a.get("regex", True))),
+        ("files_json",
+         "Открывает JSON по пути вида users[0].name (пусто — весь документ). "
+         "Возвращает тип, сводку по ключам/длине и значение.",
+         {"type": "object", "properties": {**ID,
+                                           "path": {"type": "string", "default": ""},
+                                           "max_chars": {"type": "integer", "default": 6000}},
+          "required": ["file_id"]},
+         lambda uid, a: fs.json_query(uid, a["file_id"], a.get("path", ""), a.get("max_chars", 6000))),
+        ("files_json_format",
+         "Форматирует JSON (minify=true — в одну строку) и сохраняет результат новым файлом.",
+         {"type": "object", "properties": {**ID, "minify": {"type": "boolean", "default": False}},
+          "required": ["file_id"]},
+         lambda uid, a: fs.json_format(uid, a["file_id"], bool(a.get("minify", False)))),
+        ("files_outline",
+         "Структура Python-файла: импорты, классы с методами, функции со строками. Код не запускается.",
+         {"type": "object", "properties": {**ID}, "required": ["file_id"]},
+         lambda uid, a: fs.python_outline(uid, a["file_id"])),
+        ("files_stats",
+         "Статистика текстового файла: строки, слова, символы; для CSV — колонки и число строк.",
+         {"type": "object", "properties": {**ID}, "required": ["file_id"]},
+         lambda uid, a: fs.text_stats(uid, a["file_id"])),
+        ("files_image_info",
+         "Размеры, формат и режим изображения.",
+         {"type": "object", "properties": {**ID}, "required": ["file_id"]},
+         lambda uid, a: fs.image_info(uid, a["file_id"])),
+        ("files_image_compress",
+         "Уменьшает и сжимает изображение, сохраняет новый файл и возвращает его id и url. "
+         "max_side — длинная сторона (по умолчанию 1600), format — webp/jpeg/png, quality 30–95.",
+         {"type": "object", "properties": {**ID,
+                                           "max_side": {"type": "integer", "default": 1600},
+                                           "format": {"type": "string", "enum": ["webp", "jpeg", "png"], "default": "webp"},
+                                           "quality": {"type": "integer", "default": 85}},
+          "required": ["file_id"]},
+         lambda uid, a: fs.process_image(uid, a["file_id"], a.get("max_side", 1600),
+                                         a.get("format", "webp"), a.get("quality", 85))),
+        ("files_write",
+         "Создаёт текстовый файл для пользователя (отчёт, результат обработки). "
+         "Аргументы: name, content. Возвращает id и url.",
+         {"type": "object", "properties": {"name": {"type": "string"}, "content": {"type": "string"}},
+          "required": ["name", "content"]},
+         lambda uid, a: fs.write_text(uid, a["name"], a["content"])),
+    ]
+    for name, description, parameters, fn in specs:
+        registry.register(name=name, description=description, parameters=parameters,
+                          handler=_wrap(fn), server="internal", timeout_seconds=60)
+    # По умолчанию скрыты: схемы уходят в каждый LLM-вызов, а без вложений они не нужны.
+    # Открываются на ходе с вложениями (CognitiveController.set_turn_files).
+    registry.set_hidden_prefix(FILES_TOOL_PREFIX, True)
+    logger.debug("[internal_tools.files] зарегистрировано %d инструментов", len(specs))
 
 
 def register_all(registry: ToolRegistry, controller,
                  query_expander: Optional[Callable] = None,
                  query_refiner: Optional[Callable] = None) -> None:
     _register_memory(registry, controller)
+    _register_memory_edit(registry, controller)   # memory_search / memory_explain / memory_forget / memory_update
     _register_search(registry, controller, query_expander=query_expander,
                      query_refiner=query_refiner)
     _register_image(registry, controller)
+    _register_vision(registry, controller)        # inspect_image: повторный осмотр с вырезкой области
+    from .identity_tools import register_identity_tools
+    register_identity_tools(registry, controller)  # identity_propose / identity_commit: ворота + карантин
+    from .agent_tools import register_agent_tools
+    register_agent_tools(registry)                # ask_user: уточняющий вопрос вместо угадывания
+    _register_files(registry, controller)
     _register_code(registry, controller)
     _register_identity(registry, controller)
     logger.info("internal_tools: memory/search/image/code/identity OK")

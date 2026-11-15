@@ -72,7 +72,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 
 try:
-    from GCN.config_ai import (
+    from .config_ai import (
         SEARCH_CACHE_TTL,
         SEARCH_CACHE_MAX_SIZE,
         DDG_MIN_INTERVAL,
@@ -89,14 +89,90 @@ except ImportError:
     SEARCH_CACHE_MAX_SIZE = 200
     DDG_MIN_INTERVAL = 1.2
     DDG_MAX_RETRIES = 3
-    MAX_PAGES_TO_FETCH = 7
-    PAGE_CONTENT_MAX_CHARS = 6000
+    MAX_PAGES_TO_FETCH = int(os.getenv("MAX_PAGES_TO_FETCH", "7"))
+    PAGE_CONTENT_MAX_CHARS = int(os.getenv("PAGE_CONTENT_MAX_CHARS", "6000"))
     CHUNK_SIZE = 1200
     CHUNK_OVERLAP = 150
     PARALLEL_FETCH_LIMIT = 8
     MIN_RELEVANCE_THRESHOLD = 0.28
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------
+# v4: контекст диалога, релевантность и регион
+# ---------------------------------------------------------------------
+from contextvars import ContextVar
+
+# последние реплики диалога, выставляет ai_assistant на время хода
+conversation_context: ContextVar = ContextVar("conversation_context", default="")
+
+DDG_REGION = os.getenv("DDG_REGION", "ru-ru")          # регион выдачи DuckDuckGo
+SEARXNG_LANGUAGE = os.getenv("SEARXNG_LANGUAGE", "ru")  # язык выдачи SearXNG
+# какая доля ключевых слов запроса должна встретиться в сниппете/заголовке
+SEARCH_COVERAGE_MIN = float(os.getenv("SEARCH_COVERAGE_MIN", "0.5"))
+REWRITE_MAX_WORDS = 6  # короче — почти наверняка пропуск темы, переписываем по контексту
+REWRITE_TIMEOUT = float(os.getenv("REWRITE_TIMEOUT", "6"))            # переписывание по контексту
+QUERY_EXPANDER_TIMEOUT = float(os.getenv("QUERY_EXPANDER_TIMEOUT", "20"))  # расширение запроса LLM
+
+_STOP_WORDS = frozenset({
+    "что", "как", "это", "для", "при", "или", "все", "так", "где", "кто", "какой", "какая",
+    "какие", "когда", "почему", "зачем", "про", "над", "под", "без", "ещё", "еще", "его",
+    "её", "ее", "они", "она", "оно", "был", "была", "было", "быть", "если", "там", "тут",
+    "мой", "моя", "мне", "меня", "тебе", "ты", "вы", "мы", "the", "and", "for", "with",
+    "what", "how", "is", "are", "of", "to", "in", "on",
+})
+# местоимения и указательные слова, по которым видно, что реплика ссылается на контекст
+_ANAPHORA_RE = re.compile(
+    r"\b(он|она|оно|они|его|её|ее|их|ней|нём|этот|эта|это|эти|этого|этом|там|тут|такой|тот|тоже)\b",
+    re.I,
+)
+
+
+def _stems(text: str) -> set:
+    return {w[:5] for w in _tokenize(text) if len(w) >= 3 and w not in _STOP_WORDS and not w.isdigit()}
+
+
+def query_coverage(query: str, text: str) -> float:
+    """Доля ключевых слов запроса, найденных в тексте (основа — первые 5 букв)."""
+    q = _stems(query)
+    if not q:
+        return 1.0
+    return len(q & {w[:5] for w in _tokenize(text)}) / len(q)
+
+
+def _needs_rewrite(query: str, ctx: str) -> bool:
+    if not ctx:
+        return False
+    return len(_tokenize(query)) <= REWRITE_MAX_WORDS or bool(_ANAPHORA_RE.search(query))
+
+
+async def rewrite_with_context(query: str) -> str:
+    """Делает самостоятельный запрос из реплики «а что он сказал?», опираясь на диалог.
+    Любой сбой или пустой ответ — возвращаем исходный запрос."""
+    ctx = conversation_context.get()
+    if not _needs_rewrite(query, ctx):
+        return query
+    try:
+        from .llm_client import call_llm   # ленивый импорт: без цикла с ai_assistant
+        prompt = (
+            "Диалог:\n" + ctx + "\n\nПоследняя реплика пользователя: " + query + "\n\n"
+            "Сформулируй ОДИН самостоятельный поисковый запрос по теме последней реплики: "
+            "раскрой местоимения и пропуски по диалогу, сохрани язык пользователя. "
+            "Ответь только запросом, без кавычек и пояснений."
+        )
+        raw = await asyncio.wait_for(
+            call_llm([{"role": "user", "content": prompt}], temp=0.0, max_tokens=60, retries=1),
+            timeout=REWRITE_TIMEOUT,
+        )
+    except Exception as e:
+        logger.debug(f"rewrite_with_context: {e}")
+        return query
+    lines = (raw or "").strip().splitlines()
+    cand = lines[0].strip().strip("\"'«»`").strip() if lines else ""
+    if not cand or len(cand) > 200 or URL_RE.search(cand):
+        return query
+    logger.info(f"[Search] контекст: '{query[:60]}' -> '{cand[:80]}'")
+    return cand
 
 try:
     from ddgs import DDGS
@@ -950,7 +1026,7 @@ async def search_ddg(query: str, max_results: int = 5) -> List[Dict]:
                 ddgs = DDGS()
                 results = await loop.run_in_executor(
                     None,
-                    lambda: list(ddgs.text(query, max_results=max_results))
+                    lambda: list(ddgs.text(query, region=DDG_REGION, safesearch="moderate", max_results=max_results))
                 )
                 _last_ddg_call = time.time()
                 return [{"title": r.get("title", ""), "url": r.get("href", ""), "snippet": r.get("body", "")}
@@ -970,7 +1046,7 @@ async def search_searxng(query: str, max_results: int = 5) -> List[Dict]:
         session = await _fetcher._get_session()
         async with session.get(
             f"{SEARXNG_URL}/search",
-            params={"q": query, "format": "json"},
+            params={"q": query, "format": "json", "language": SEARXNG_LANGUAGE, "safesearch": "1"},
             timeout=aiohttp.ClientTimeout(total=15),
         ) as resp:
             if resp.status != 200:
@@ -1241,6 +1317,7 @@ async def deep_search(
         if remainder:
             query = remainder
 
+    query = await rewrite_with_context(query)
     query = inject_query_date(query)
     cache_key = hash_query(query)
     skip_cache = content_has_currency_numbers(query)
@@ -1252,27 +1329,28 @@ async def deep_search(
 
     time_sensitive = is_time_sensitive_query(query)
 
-    # --- v3: расширение запроса (параллельные формулировки) ---
+    # --- v4: поиск по исходному запросу стартует сразу, расширение идёт параллельно ---
     queries = [query]
-    if query_expander is not None:
+    base_task = asyncio.ensure_future(search_backends(query, max_results + 2))
+    exp_task = asyncio.ensure_future(query_expander(query)) if query_expander is not None else None
+    if exp_task is not None:
         try:
-            extra = await asyncio.wait_for(query_expander(query), timeout=8.0)
-            if extra:
-                for q in extra:
-                    q = (q or "").strip()
-                    if q and q.lower() != query.lower() and q not in queries:
-                        queries.append(q)
-                    if len(queries) >= MAX_EXPANDED_QUERIES:
-                        break
+            extra = await asyncio.wait_for(asyncio.shield(exp_task), timeout=QUERY_EXPANDER_TIMEOUT)
+            for q in extra or []:
+                q = (q or "").strip()
+                if q and q.lower() != query.lower() and q not in queries:
+                    queries.append(q)
+                if len(queries) >= MAX_EXPANDED_QUERIES:
+                    break
+        except asyncio.TimeoutError:
+            exp_task.cancel()
+            logger.info(f"[Search] расширение не ответило за {QUERY_EXPANDER_TIMEOUT:.0f} с, ищем только исходный запрос")
         except Exception as e:
             logger.debug(f"query_expander failed: {e}")
 
-    # --- Поиск по всем формулировкам параллельно ---
-    per_query = max(3, max_results // len(queries) + 1)
-    search_results = await asyncio.gather(
-        *[search_backends(q, per_query + 2) for q in queries],
-        return_exceptions=True,
-    )
+    # результат базового поиска уже готов или догоняет; дополнительные формулировки — рядом с ним
+    extra_tasks = [asyncio.ensure_future(search_backends(q, max_results + 2)) for q in queries[1:]]
+    search_results = await asyncio.gather(base_task, *extra_tasks, return_exceptions=True)
 
     merged_results: List[Dict] = []
     seen: set = set()
@@ -1290,22 +1368,38 @@ async def deep_search(
                 continue
             seen.add(url)
             r["url"] = url
+            r["_q"] = q
             merged_results.append(r)
 
     if not merged_results:
         return {"sources": [], "context": "Поиск не дал результатов.", "search_performed": False}
 
+    # --- Гейт релевантности: сниппет должен покрывать ключевые слова ЕГО запроса ---
+    def _text_of(r: Dict) -> str:
+        return f"{r.get('title', '')} {r.get('snippet', '')}"
+
+    # двуязычный гейт: английская страница проходит по английской формулировке,
+    # русская — по русской; достаточно совпадения с любой из них
+    gated = [r for r in merged_results
+             if max(query_coverage(q2, _text_of(r)) for q2 in queries) >= SEARCH_COVERAGE_MIN]
+    if not gated:
+        logger.info(f"[Search] нет релевантных результатов для '{query[:60]}'")
+        return {"sources": [], "context": "По запросу не найдено релевантных страниц.", "search_performed": False}
+    merged_results = gated
+    rank_query = " ".join(queries)   # все формулировки сразу: английские фрагменты тоже получают очки
+
     # --- Ранжирование сниппетов: BM25 + доверие домена + свежесть ---
     snippet_texts = [f"{r.get('title', '')} {r.get('snippet', '')}" for r in merged_results]
-    bm = bm25_scores(query, snippet_texts)
+    bm = bm25_scores(rank_query, snippet_texts)
     scored = []
     for r, base in zip(merged_results, bm):
+        base += 2.0 * max(query_coverage(q2, _text_of(r)) for q2 in queries)
         base += domain_trust(r.get("url", ""))[1]
         base += _recency_boost(r.get("published"), time_sensitive)
         scored.append((base, r))
     scored.sort(key=lambda x: x[0], reverse=True)
-    above_threshold = [r for s, r in scored if s >= MIN_RELEVANCE_THRESHOLD]
-    ordered_results = above_threshold if above_threshold else [r for _, r in scored]
+    # v4: порог больше не пускает «все подряд» — гейт выше уже отсёк нерелевантное
+    ordered_results = [r for _, r in scored]
 
     urls = [r["url"] for r in ordered_results if r.get("url")][:max_results]
     url_to_title = {r["url"]: r["title"] for r in merged_results}
@@ -1318,7 +1412,7 @@ async def deep_search(
     if remaining <= 2.0:
         # Времени на чтение страниц нет — контекст из сниппетов
         sources, context_parts, best_score, _ = await _process_pages(
-            query, [(u, "", []) for u in urls], url_to_title, url_to_snippet,
+            rank_query, [(u, "", []) for u in urls], url_to_title, url_to_snippet,
             url_to_published, time_sensitive, 0, deadline=deadline,
         )
     else:
@@ -1327,7 +1421,7 @@ async def deep_search(
             urls, limit=PARALLEL_FETCH_LIMIT, deadline=fetch_deadline
         )
         sources, context_parts, best_score, _ = await _process_pages(
-            query, fetched, url_to_title, url_to_snippet, url_to_published,
+            rank_query, fetched, url_to_title, url_to_snippet, url_to_published,
             time_sensitive, MAX_EXTRA_HOPS, deadline=fetch_deadline,
         )
 
@@ -1363,6 +1457,8 @@ async def deep_search(
         logger.info(f"[Search] слабый результат (score={best_score:.2f}), уточнение {refinements_done}: '{refined[:80]}'")
 
         refined_results, _ = await search_backends(refined, max_results)
+        refined_results = [r for r in refined_results
+                           if query_coverage(refined, f"{r.get('title', '')} {r.get('snippet', '')}") >= SEARCH_COVERAGE_MIN]
         if not refined_results:
             break
         r_scored = sorted(
@@ -1388,7 +1484,7 @@ async def deep_search(
         )
         # score считаем по исходному запросу: только так он сравним с best_score
         new_sources, new_parts, new_best, _ = await _process_pages(
-            query, new_fetched, url_to_title, url_to_snippet, url_to_published,
+            rank_query, new_fetched, url_to_title, url_to_snippet, url_to_published,
             time_sensitive, 0, deadline=deadline - 1.0,
         )
         if new_best <= best_score:

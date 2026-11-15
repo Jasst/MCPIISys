@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Set
 from dataclasses import dataclass
 
-from GCN.config_ai import (
+from .config_ai import (
     ENABLE_CODE_SELF_REFLECTION,
     CODE_ANALYSIS_MAX_FILES,
     CODE_CONTEXT_MAX_LINES,

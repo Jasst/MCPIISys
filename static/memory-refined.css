@@ -1,0 +1,346 @@
+/* ==========================================================================
+   Refined layer для «Моя память»: тоньше, тише, плавнее.
+   Подключается ПОСЛЕ встроенного <style> страницы и после ui.css,
+   непосредственно перед <script src="/static/js/ui.js">.
+   Меняет только внешний вид: разметку и логику не трогает.
+   Каждый стеклянный элемент задан отдельно для тёмной и светлой темы.
+   ========================================================================== */
+
+:root {
+  --m-ease: cubic-bezier(.2, .8, .2, 1);
+  --m-ease-out: cubic-bezier(.16, 1, .3, 1);
+  --m-hair: rgba(255, 255, 255, .06);
+  --m-hair-strong: rgba(255, 255, 255, .11);
+  --m-card: rgba(255, 255, 255, .025);
+  --m-card-hover: rgba(255, 255, 255, .045);
+  --m-glass: rgba(20, 21, 26, .66);
+  --m-glass-strong: rgba(22, 23, 28, .94);
+  --m-glow-a: rgba(122, 140, 170, .10);
+  --m-glow-b: rgba(160, 130, 200, .05);
+  --m-grad: linear-gradient(135deg, #5b626f 0%, #8d96a7 100%);
+  --m-grad-text: linear-gradient(180deg, #f2f4f7 0%, #9aa3b2 100%);
+  --m-accent: #9aa3b2;
+}
+body.light-theme {
+  --m-hair: rgba(0, 0, 0, .07);
+  --m-hair-strong: rgba(0, 0, 0, .12);
+  --m-card: rgba(255, 255, 255, .6);
+  --m-card-hover: rgba(255, 255, 255, .9);
+  --m-glass: rgba(255, 255, 255, .72);
+  --m-glass-strong: rgba(255, 255, 255, .95);
+  --m-glow-a: rgba(90, 110, 150, .07);
+  --m-glow-b: rgba(140, 110, 180, .04);
+  --m-grad-text: linear-gradient(180deg, #1a1c21 0%, #5b626f 100%);
+  --m-accent: #5b626f;
+}
+
+/* ---------- фон и типографика ---------- */
+body {
+  background:
+    radial-gradient(900px 480px at 80% -10%, var(--m-glow-a), transparent 62%),
+    radial-gradient(760px 480px at -6% 112%, var(--m-glow-b), transparent 60%),
+    var(--bg-primary);
+  background-attachment: fixed;
+  font-size: 12.5px;
+  line-height: 1.55;
+  text-rendering: optimizeLegibility;
+}
+::selection { background: rgba(154, 163, 178, .28); }
+
+/* ---------- нативные списки (select, datalist): без белых окон в тёмной теме ---------- */
+:root { color-scheme: dark; }
+:root:has(body.light-theme) { color-scheme: light; }
+select, datalist, select option, datalist option {
+  background-color: var(--bg-secondary);
+  color: var(--text-primary);
+}
+select option:checked, select option:hover { background-color: rgba(154, 163, 178, .22); }
+
+*::-webkit-scrollbar { width: 6px; height: 6px; }
+*::-webkit-scrollbar-thumb { background: rgba(154, 163, 178, .22); border-radius: 999px; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------- верхняя панель: стекло + градиентная линия ---------- */
+#top {
+  padding: 8px 14px;
+  background:
+    linear-gradient(90deg, transparent 0%, var(--m-hair-strong) 30%, var(--m-hair-strong) 70%, transparent 100%) bottom / 100% 1px no-repeat,
+    var(--m-glass);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  border-bottom: none;
+  gap: 6px;
+}
+#top .title {
+  font-size: 14px; font-weight: 600; letter-spacing: -.01em; margin-right: 8px;
+  background: var(--m-grad-text); -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+
+/* ---------- панели ---------- */
+#left, #right { background: transparent; padding: 14px 14px 18px; }
+#left { border-right: 1px solid var(--m-hair); }
+#right { border-left: 1px solid var(--m-hair); }
+#feed {
+  background: var(--m-glass);
+  border-top: 1px solid var(--m-hair);
+  font-size: 11.5px; padding: 8px 14px;
+}
+#feed .info { opacity: .75; }
+
+h3 {
+  font-size: 10.5px; font-weight: 600; letter-spacing: .09em; opacity: .75;
+  margin: 16px 0 8px;
+}
+h3:first-child { margin-top: 0; }
+
+/* ---------- карточки ---------- */
+.card, .ins, .explain {
+  background: var(--m-card);
+  border: 1px solid var(--m-hair);
+  border-radius: 12px;
+  box-shadow: none;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  transition: background .25s var(--m-ease), border-color .25s var(--m-ease);
+}
+@media (hover: hover) {
+  .card:hover { background: var(--m-card-hover); border-color: var(--m-hair-strong); }
+}
+.ins { border-left-width: 2px; }
+.explain { border-left-width: 2px; border-left-color: var(--m-accent); }
+
+.grid { gap: 8px; }
+.kv { font-size: 12px; padding: 1px 0; }
+.bar-row { grid-template-columns: 100px 1fr 38px; font-size: 11.5px; margin: 5px 0; }
+.bar {
+  height: 6px; border-radius: 999px;
+  box-shadow: 0 0 10px -2px rgba(125, 133, 149, .45);
+  transition: width .6s var(--m-ease-out);
+}
+.hist { gap: 4px; height: 56px; }
+.hist div {
+  background: linear-gradient(180deg, #a7afbc 0%, #5b626f 100%);
+  opacity: .9; border-radius: 4px 4px 1px 1px;
+  transition: opacity .2s var(--m-ease), filter .2s var(--m-ease);
+}
+.hist div:hover { opacity: 1; filter: brightness(1.2); }
+.hist-l { font-size: 10px; opacity: .7; }
+
+/* ---------- кнопки ---------- */
+button {
+  border-radius: 10px;
+  padding: 5px 12px;
+  font-size: 12.5px;
+  font-weight: 500;
+  background: var(--m-card);
+  border: 1px solid var(--m-hair-strong);
+  box-shadow: none;
+  transition: background .2s var(--m-ease), border-color .2s var(--m-ease),
+              color .2s var(--m-ease), transform .15s var(--m-ease), filter .2s var(--m-ease);
+}
+button:hover:not(:disabled) {
+  background: var(--m-card-hover);
+  border-color: var(--m-hair-strong);
+  transform: none;
+  box-shadow: none;
+}
+button:active:not(:disabled) { transform: scale(.97); }
+button:focus-visible {
+  outline: none; border-color: var(--m-accent);
+  box-shadow: 0 0 0 3px rgba(154, 163, 178, .14);
+}
+button:disabled { opacity: .4; }
+button.danger { border-color: rgba(229, 84, 79, .35); color: #e8827e; background: transparent; }
+button.danger:hover:not(:disabled) { background: rgba(229, 84, 79, .1); color: #ffb3b0; border-color: rgba(229, 84, 79, .5); }
+button.primary {
+  background: var(--m-grad); color: #fff; border-color: transparent;
+  box-shadow: 0 6px 16px -8px rgba(125, 133, 149, .8);
+}
+button.primary:hover:not(:disabled) {
+  background: var(--m-grad); filter: brightness(1.08); border-color: transparent;
+  box-shadow: 0 8px 20px -8px rgba(125, 133, 149, .9);
+}
+button.small { padding: 3px 9px; font-size: 11.5px; border-radius: 8px; }
+.tab { background: transparent; padding: 3px 9px; font-size: 11.5px; border-color: var(--m-hair); }
+.tab.on {
+  background: linear-gradient(135deg, rgba(154, 163, 178, .22), rgba(154, 163, 178, .07));
+  border-color: var(--m-hair-strong); color: var(--text-primary);
+}
+#multi.on { background: var(--m-grad); color: #fff; border-color: transparent; }
+
+/* ---------- поля ввода и ползунки ---------- */
+input, select, textarea {
+  background: var(--m-card);
+  border: 1px solid var(--m-hair);
+  border-radius: 9px;
+  padding: 5px 9px;
+  font-size: 12.5px;
+  transition: border-color .25s var(--m-ease), box-shadow .25s var(--m-ease), background .25s var(--m-ease);
+}
+input:focus, select:focus, textarea:focus {
+  border-color: var(--m-accent);
+  box-shadow: 0 0 0 3px rgba(154, 163, 178, .12);
+}
+textarea { min-height: 52px; }
+label { font-size: 11.5px; opacity: .85; }
+
+/* ползунки: тонкий трек с градиентом и круглым бегунком */
+input[type=range] {
+  -webkit-appearance: none; appearance: none;
+  height: 4px; padding: 0; border: none; border-radius: 999px; background: none;
+  width: 110px; margin: 6px 4px; vertical-align: middle;
+  accent-color: var(--m-accent);
+}
+input[type=range]::-webkit-slider-runnable-track {
+  height: 4px; border-radius: 999px;
+  background: linear-gradient(90deg, #5b626f, #a7afbc);
+}
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 14px; height: 14px; margin-top: -5px; border-radius: 50%;
+  background: #f2f4f7; border: none;
+  box-shadow: 0 0 0 3px rgba(154, 163, 178, .18), 0 2px 6px rgba(0, 0, 0, .4);
+  transition: transform .15s var(--m-ease);
+}
+input[type=range]:active::-webkit-slider-thumb { transform: scale(1.15); }
+input[type=range]::-moz-range-track { height: 4px; border-radius: 999px; background: linear-gradient(90deg, #5b626f, #a7afbc); }
+input[type=range]::-moz-range-thumb {
+  width: 14px; height: 14px; border: none; border-radius: 50%; background: #f2f4f7;
+  box-shadow: 0 0 0 3px rgba(154, 163, 178, .18);
+}
+
+.row { gap: 6px; margin: 5px 0; }
+.badge {
+  font-size: 10.5px; padding: 0 7px; border-radius: 999px;
+  border: 1px solid var(--m-hair-strong); background: transparent; opacity: .9;
+}
+.mono { font-size: 10.5px; opacity: .8; }
+
+/* ---------- связи ---------- */
+.edge {
+  font-size: 11.5px; padding: 6px 4px; margin: 0 -4px;
+  border-bottom: 1px solid var(--m-hair); border-radius: 8px;
+  transition: background .2s var(--m-ease);
+}
+@media (hover: hover) { .edge:hover { background: var(--m-card-hover); } }
+.edge .rel { min-width: 96px; color: var(--m-accent); }
+.edge .nb:hover { text-decoration: none; color: var(--text-primary); }
+.edge-block { padding: 10px 0; border-bottom: 1px solid var(--m-hair); }
+.edge-sent { font-size: 12.5px; }
+.hub { font-size: 11.5px; padding: 3px 0; }
+.hub:hover { color: var(--text-primary); text-decoration: none; }
+
+.legend { gap: 4px 12px; font-size: 10.5px; opacity: .85; }
+.legend i { width: 7px; height: 7px; margin-right: 5px; }
+.leg-rel { font-size: 11.5px; gap: 7px; }
+.leg-rel i { width: 14px; height: 2px; border-radius: 999px; }
+
+.ro-note { font-size: 11.5px; opacity: .85; }
+a.back { font-size: 12px; opacity: .85; transition: opacity .2s; }
+a.back:hover { opacity: 1; text-decoration: none; }
+.hint { font-size: 10.5px; opacity: .7; margin: 2px 0 6px; }
+
+/* ---------- советы и «почему» ---------- */
+.guide { font-size: 11.5px; border-left-width: 2px; }
+.guide .mono { font-size: 11px; opacity: .9; }
+.ins.bad { border-left-color: #e5544f; }
+.ins.warn { border-left-color: #e0b04f; }
+.ins.info { border-left-color: var(--m-accent); }
+.ins { font-size: 11.5px; }
+.prop { border-left: 2px solid var(--m-accent); font-size: 11.5px; }
+.old { font-size: 11.5px; }
+.new { font-size: 12.5px; }
+.explain { font-size: 11.5px; }
+
+/* ---------- граф: тонкая виньетка ---------- */
+#stage { background: transparent; }
+#stage::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: radial-gradient(ellipse at center, transparent 58%, rgba(0, 0, 0, .32) 100%);
+}
+body.light-theme #stage::after {
+  background: radial-gradient(ellipse at center, transparent 62%, rgba(120, 130, 150, .10) 100%);
+}
+#cv { transition: opacity .3s var(--m-ease); }
+
+/* ---------- плавающие панели поверх графа ---------- */
+#multibar, #howto {
+  background: var(--m-glass);
+  border: 1px solid var(--m-hair-strong);
+  color: var(--text-primary);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  box-shadow: 0 12px 36px -14px rgba(0, 0, 0, .35);
+}
+#multibar { border-radius: 14px; padding: 6px 10px; font-size: 11.5px; }
+#howto { border-radius: 12px; font-size: 11px; line-height: 1.5; opacity: .95; }
+#howto button { padding: 0 6px; }
+#multibar[hidden], #howto[hidden] { display: none; }
+#multibar:not([hidden]), #howto:not([hidden]) { animation: m-rise .4s var(--m-ease-out) both; }
+
+#zoombar button {
+  width: 34px; height: 34px; font-size: 15px; border-radius: 10px;
+  background: var(--m-glass);
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  border-color: var(--m-hair-strong);
+}
+
+/* ---------- всплывающие меню (UI.menu, правый клик / долгое нажатие) ---------- */
+.ui-menu {
+  background: var(--m-glass-strong);
+  color: var(--text-primary);
+  border: 1px solid var(--m-hair-strong);
+  border-radius: 12px;
+  padding: 5px;
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  box-shadow: 0 16px 40px -14px rgba(0, 0, 0, .55);
+  animation: m-rise .25s var(--m-ease-out) both;
+}
+.ui-menu-item {
+  color: var(--text-primary);
+  font-size: 12.5px;
+  padding: 6px 9px;
+  border-radius: 7px;
+  transition: background .15s var(--m-ease);
+}
+.ui-menu-item:hover:not(:disabled) { background: var(--m-card-hover); }
+.ui-menu-item.danger { color: #e8827e; }
+.ui-menu-sep { background: var(--m-hair); }
+
+/* ---------- мобильная шторка ---------- */
+@media (max-width: 900px) {
+  #right {
+    background: var(--m-glass-strong);
+    backdrop-filter: blur(22px) saturate(140%);
+    -webkit-backdrop-filter: blur(22px) saturate(140%);
+    border-top: 1px solid var(--m-hair-strong);
+    border-radius: 18px 18px 0 0;
+    box-shadow: 0 -16px 50px -20px rgba(0, 0, 0, .4);
+    transition: transform .4s var(--m-ease-out);
+  }
+  #sheet-head {
+    background: var(--m-glass-strong);
+    backdrop-filter: blur(12px);
+    padding-top: 8px;
+  }
+  #sheet-head::before {
+    content: ""; display: block; width: 36px; height: 4px; margin: 0 auto 8px;
+    border-radius: 999px; background: var(--m-hair-strong);
+  }
+}
+
+/* ---------- появление ---------- */
+@keyframes m-rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+#left > *, #right > * { animation: m-rise .45s var(--m-ease-out) both; }
+#right .card:nth-child(2) { animation-delay: .04s; }
+#right .card:nth-child(3) { animation-delay: .08s; }
+#right .card:nth-child(4) { animation-delay: .12s; }
+
+@media (prefers-reduced-motion: reduce) {
+  #left > *, #right > *, #multibar:not([hidden]), #howto:not([hidden]), .ui-menu { animation: none !important; }
+  .bar { transition: none !important; }
+}

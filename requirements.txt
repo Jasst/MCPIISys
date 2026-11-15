@@ -29,3 +29,5 @@ mcp>=1.8,<2
 
 # ---------- Для тестов (tests/) ----------
 httpx                      # нужен fastapi.testclient в tests/auth и tests/sync
+pillow
+python-multipart

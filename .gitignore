@@ -21,3 +21,4 @@ build/
 *.tsbuildinfo
 /generated_images
 mcp_code.key
+/user_files

@@ -23,20 +23,23 @@
     attach: '/ai/chat/attach',
     last: '/ai/chat/last_response',
     stop: '/ai/chat/stop',
+    skipTools: '/ai/chat/skip_tools',
     notify: '/ai/notifications/poll',
     health: '/health',
     media: '/ai/ui-media',
+  files: '/ai/files',
     adoptGenerated: '/ai/ui-media/adopt-generated',
     genStatus: '/ai/gen-status',
     genLock: '/ai/gen-lock',
   };
   // Чаты хранятся отдельно для каждого аккаунта: иначе другой человек на этом же
   // браузере увидит чужие разговоры. Настройки общие для браузера.
-  const KEY = { sessions: 'ai_sessions', msgs: 'ai_messages_', settings: 'ai_settings_v2', gen: 'ai_gen', cid: 'ai_cid' };
+  const KEY = { sessions: 'ai_sessions', msgs: 'ai_messages_', settings: 'ai_settings_v2', gen: 'ai_gen', cid: 'ai_cid', sync: 'ai_sync' };
   function setScope(uid) {
     KEY.sessions = uid ? `ai:${uid}:sessions` : 'ai_sessions';
     KEY.msgs = uid ? `ai:${uid}:messages_` : 'ai_messages_';
     KEY.gen = uid ? `ai:${uid}:gen` : 'ai_gen';
+    KEY.sync = uid ? `ai:${uid}:sync` : 'ai_sync';
     LS_MSGS = uid ? `ai:${uid}:messages_` : 'ai_messages_';
   }
   // Устойчивый id устройства (не аккаунта!): серверный генерационный лок знает,
@@ -667,14 +670,170 @@
     save.className = 'img-save';
     save.textContent = '⬇ Сохранить';
     save.addEventListener('click', (e) => { e.stopPropagation(); downloadImage(url, baseName); });
-    img.addEventListener('error', () => { save.hidden = true; });
+    img.addEventListener('error', () => {
+      if (!img.dataset.retried) {               // один повтор: сеть или кэш могли моргнуть
+        img.dataset.retried = '1';
+        setTimeout(() => { img.src = url + (url.includes('?') ? '&' : '?') + 'r=' + Date.now(); }, 800);
+        return;
+      }
+      save.hidden = true;
+      wrap.classList.add('img-failed');
+    });
     wrap.append(img, save);
     return { wrap, img, save };
   }
 
+  // ---- единый рендер статуса/истории хода мыслей ----
+const PHASE_LABEL = {
+  connecting: 'Собираю контекст и память',   // «Подключение» слито с prep
+  prep:       'Собираю контекст и память',
+  tools:      'Проверяю, нужны ли инструменты',
+  prompt:     'Анализирую данные',
+  thinking:   'Думаю',
+  generating: 'Пишу ответ',
+  done:       'Готово',
+};
+const TRACE_ICON = { start: '▶', route: '🧭', understand: '🔎', round: '↻', tool: '🛠', done: '✓', skip: '⏭', stuck: '⚠', analyze: '🧠' };
+
+  function fmtSec(s) {
+  s = Math.max(0, Number(s) || 0);
+  return s < 60 ? `${Math.round(s)} с` : `${Math.floor(s / 60)} м ${Math.round(s % 60)} с`;
+}
+
+  function traceRows(trace) {
+  const wrap = document.createElement('div');
+  wrap.className = 'gt-list';
+  for (const ev of trace || []) {
+    const row = document.createElement('div');
+    row.className = 'gt-row gt-' + (ev.kind || 'info');
+    const ic = document.createElement('span'); ic.className = 'gt-ic';
+    ic.textContent = TRACE_ICON[ev.kind] || '•';
+    const tx = document.createElement('span'); tx.className = 'gt-tx';
+    tx.textContent = ev.text || '';
+    row.append(ic, tx);
+    wrap.appendChild(row);
+  }
+  return wrap;
+}
+
+// Кнопка «Пропустить шаг»: прерывает зависший инструмент и отвечает по собранному.
+function skipToolsBtn() {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'gl-skip';
+  b.title = 'Пропустить шаг инструментов и ответить по уже собранному';
+  b.textContent = 'Пропустить';
+  b.addEventListener('click', async (e) => {
+    e.preventDefault(); e.stopPropagation();
+    b.disabled = true; b.textContent = 'Пропускаю…';
+    try {
+      const r = await fetch(API.skipTools, { method: 'POST', credentials: 'same-origin' });
+      const j = r.ok ? await r.json() : null;
+      if (!j || !j.skipped) b.textContent = 'Нечего пропускать';
+    } catch { b.textContent = 'Нет связи'; }
+  });
+  return b;
+}
+
+// Живая строка статуса во время генерации (свёрнута — высота не скачет)
+  function genLiveNode(m) {
+  const g = m.gen || { phase: 'connecting' };
+  const phase = g.phase || 'connecting';
+  const d = document.createElement('details');
+  d.className = 'gen-live phase-' + phase;
+  d.open = !!m._liveOpen;
+  d.addEventListener('toggle', () => { m._liveOpen = d.open; });
+
+  const s = document.createElement('summary');
+  s.className = 'gl-summary';
+  const dot = document.createElement('span'); dot.className = 'gl-dot';
+  const label = document.createElement('span'); label.className = 'gl-label';
+  label.textContent = PHASE_LABEL[phase] || 'Работаю';
+  const meta = document.createElement('span'); meta.className = 'gl-meta';
+  const parts = [];
+  if (g.elapsed != null) parts.push(fmtSec(g.elapsed));
+  if (g.tokens) parts.push(`${g.tokens} ток`);
+  if (g.tps) parts.push(`${g.tps} ток/с`);
+  meta.textContent = parts.join(' · ');
+  const bar = document.createElement('span'); bar.className = 'gl-bar';
+  const chev = document.createElement('span'); chev.className = 'gl-chev'; chev.textContent = '▸';
+  s.append(dot, label, meta, bar);
+  if (phase === 'tools') s.appendChild(skipToolsBtn());
+  s.appendChild(chev);
+  d.appendChild(s);
+
+  const body = document.createElement('div');
+  body.className = 'gl-body';
+  if (m.reasoning) {
+    const r = document.createElement('div');
+    r.className = 'gl-reasoning';
+    r.textContent = m.reasoning;
+    body.appendChild(r);
+  }
+  if (m.trace && m.trace.length) body.appendChild(traceRows(m.trace));
+  if (body.childNodes.length) {
+    d.appendChild(body);
+  } else {
+    d.classList.add('no-body');
+    s.addEventListener('click', (e) => { if (d.classList.contains('no-body')) e.preventDefault(); });
+  }
+  return d;
+}
+
+// История хода мыслей у завершённого ответа — одна свёрнутая строка
+  function historyNode(m) {
+  const d = document.createElement('details');
+  d.className = 'gen-history';
+  d.open = !!m._histOpen;
+  d.addEventListener('toggle', () => { m._histOpen = d.open; });
+  const s = document.createElement('summary');
+  const n = (m.trace || []).length;
+  const sec = (m.rStart && m.rEnd) ? Math.max(1, Math.round((m.rEnd - m.rStart) / 1000)) : 0;
+  s.textContent = n
+    ? `Ход мыслей (${n})` + (sec ? ` · раздумывал ${sec} с` : '')
+    : (sec ? `Раздумывал ${sec} с` : 'Раздумья');
+  d.appendChild(s);
+  const body = document.createElement('div');
+  body.className = 'gh-body';
+  if (m.reasoning) {
+    const r = document.createElement('div');
+    r.className = 'gh-reasoning';
+    r.textContent = m.reasoning;
+    body.appendChild(r);
+  }
+  if (m.trace && m.trace.length) body.appendChild(traceRows(m.trace));
+  d.appendChild(body);
+  return d;
+}
+
   function paintBubble(bubble, m) {
+    // Сохраняем состояние до пересборки: иначе innerHTML='' убивает
+    // scrollTop у gl-body и раскрытый details — пользователь не может
+    // листать reasoning во время генерации.
+    const prevLive = bubble.querySelector('.gen-live');
+    const wasOpen = prevLive ? prevLive.open : !!m._liveOpen;
+    const prevBody = prevLive ? prevLive.querySelector('.gl-body') : null;
+    const prevScroll = prevBody ? prevBody.scrollTop : 0;
+    const wasBodyAtBottom = prevBody
+      ? (prevBody.scrollHeight - prevBody.scrollTop - prevBody.clientHeight < 20)
+      : true;
+
     bubble.innerHTML = '';
 
+    // После полной пересборки выставляем кэш «инвалидации структуры» в
+    // СОСТОЯНИЕ, КОТОРОЕ ТОЛЬКО ЧТО НАРИСОВАНО. Тогда следующий
+    // paintBubbleLive увидит «счётчики совпадают» и пойдёт по in-place
+    // пути.
+    bubble._liveState = {
+      notes: (m.notes || []).length,
+      images: (m.images || []).length,
+      sources: (m.sources || []).length,
+      err: m.error || '',
+    };
+
+    // ------------------------------------------------------------------
+    // USER-СООБЩЕНИЕ: картинка + файл + текст
+    // ------------------------------------------------------------------
     if (m.role === 'user') {
       if (m.image) {
         const fig = imageBlock(m.image, 'Прикреплённое изображение', 'photo');
@@ -689,6 +848,22 @@
         });
         bubble.appendChild(fig.wrap);
       }
+      // ВАЖНО: файлы пользователя — тоже ЧАСТЬ user-сообщения, а не bot.
+      // Раньше этот блок стоял ПОСЛЕ `return`, то есть НЕ выполнялся для
+      // user-пузырей: attach → отправка → в чате ничего не появляется.
+      // Теперь рендерим здесь, до return.
+      if (m.file) {
+  const a = document.createElement('a');
+  a.className = 'file-chip';
+  a.href = '#';
+  a.textContent = `📄 ${m.file.name} · ${fmtBytes(m.file.size || 0)}`;
+  a.title = 'Открыть для просмотра';
+  a.addEventListener('click', (e) => {
+    e.preventDefault();
+    openFilePreview(m.file);
+  });
+  bubble.appendChild(a);
+}
       if (m.text) {
         const p = document.createElement('div');
         p.textContent = m.text;
@@ -697,38 +872,40 @@
       return;
     }
 
-    if (m.reasoning) {
-      const thinking = !!m.pending && !m.text;          // модель ещё думает
-      const d = document.createElement('details');
-      d.className = 'reasoning';
-      const s = document.createElement('summary');
-      if (thinking) {
-        s.textContent = 'Думаю…';
-      } else {
-        const sec = m.rStart && m.rEnd ? Math.max(1, Math.round((m.rEnd - m.rStart) / 1000)) : 0;
-        s.textContent = sec ? `Размышлял ${sec} с` : 'Ход рассуждений';
+    // ------------------------------------------------------------------
+    // BOT-СООБЩЕНИЕ: live-статус, история мыслей, ответ, картинки, источники, ошибки
+    // ------------------------------------------------------------------
+
+    // Во время генерации — одна стабильная строка СВЕРХУ; текст стримится ниже.
+    // Всё «шумное» (reasoning + trace) внутри неё и свёрнуто: высота не скачет.
+    if (m.pending) bubble.appendChild(genLiveNode(m));
+
+    // Восстанавливаем open и scrollTop у только что созданной строки
+    const newLive = bubble.querySelector('.gen-live');
+    if (newLive && m.pending) {
+      newLive.open = wasOpen;
+      m._liveOpen = wasOpen;
+      const newBody = newLive.querySelector('.gl-body');
+      if (newBody) {
+        // если пользователь был у дна — прилипаем ко дну (видно новый reasoning)
+        // если он ушёл вверх читать — держим его позицию
+        newBody.scrollTop = wasBodyAtBottom ? newBody.scrollHeight : prevScroll;
       }
-      const body = document.createElement('div');
-      body.className = 'rbody';
-      body.textContent = m.reasoning;
-      d.append(s, body);
-      // Открываем во время размышления, сворачиваем, когда пошёл ответ.
-      // Если пользователь сам раскрыл блок, его выбор не сбиваем.
-      if (m._rWant !== thinking) { d.open = thinking; m._rWant = thinking; }
-      else d.open = d.open || thinking;
-      bubble.appendChild(d);
     }
 
-    if (m.pending && !m.text) {
-      const t = document.createElement('span');
-      t.className = 'typing';
-      t.innerHTML = '<span></span><span></span><span></span>';
-      bubble.appendChild(t);
-    } else if (m.text) {
+    // Завершённый ответ: история хода мыслей — одна свёрнутая строка.
+    if (!m.pending && ((m.trace && m.trace.length) || m.reasoning)) {
+      bubble.appendChild(historyNode(m));
+    }
+
+    // Текст ответа (markdown). _lastText — кэш для paintBubbleLive,
+    // чтобы не пересчитывать markdown на идентичном тексте.
+    if (m.text) {
       const md = document.createElement('div');
       md.className = 'markdown-body';
       if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') md.classList.add('plain');
       md.innerHTML = renderMd(m.text);
+      md._lastText = m.text;
       bubble.appendChild(md);
       highlight(md);
     }
@@ -914,7 +1091,10 @@
     else updateScrollButton();
   }
 
-  // Обновляет один пузырь во время генерации, не перерисовывая весь чат
+  // Обновляет один пузырь во время генерации, не перерисовывая весь чат.
+  // Используется «умное» in-place обновление (paintBubbleLive): строка статуса
+  // gen-live и её CSS-анимации (пульс точки, бегущая полоска) НЕ пересоздаются,
+  // markdown пересчитывается только при изменении текста — интерфейс не мигает.
   let paintQueued = false;
   function paintLive(idx) {
     if (paintQueued) return;
@@ -924,8 +1104,160 @@
       if (!currentId) return;
       const el = els.inner.querySelector(`.msg[data-idx="${idx}"] .bubble`);
       const m = loadMsgs(currentId)[idx];
-      if (el && m) { paintBubble(el, m); scrollEnd(); }
+      if (el && m) {
+        // wasAtBottom считаем ДО перерисовки: после paintBubbleLive() scrollHeight
+        // уже вырос, scrollTop — нет; isNearBottom() вернул бы false и прилипание
+        // к дну сломалось бы (пользователь видел бы «обрезанный» стрим).
+        const wasAtBottom = isNearBottom();
+        paintBubbleLive(el, m);
+        if (wasAtBottom) scrollEnd(true);
+      }
     });
+  }
+
+  // Точечное обновление pending-пузыря: не пересоздаём <details class="gen-live">
+  // (иначе CSS-анимации пульса/полоски стартуют с нуля 20+ раз в секунду), а
+  // меняем textContent у label/meta/reasoning и пересобираем markdown только
+  // если текст ответа реально изменился. При изменении counts (notes/images/
+  // sources/error) или при переходе pending→done — полная пересборка через
+  // paintBubble (это редко, дёргания не вызывает).
+    function paintBubbleLive(bubble, m) {
+    // Не-pending — завершённый ответ; пересобираем полностью (редко).
+    if (!m.pending) return paintBubble(bubble, m);
+
+    const live = bubble.querySelector('.gen-live');
+    if (!live) return paintBubble(bubble, m);   // первая отрисовка
+
+    // Инвалидация структуры: пришли новые notes/images/sources/error — их
+    // порядок и количество влияют на вёрстку пузыря, проще пересобрать целиком.
+    const st = bubble._liveState || {};
+    const notesN = (m.notes || []).length;
+    const imagesN = (m.images || []).length;
+    const sourcesN = (m.sources || []).length;
+    const err = m.error || '';
+    const stateChanged = st.notes !== notesN || st.images !== imagesN
+                      || st.sources !== sourcesN || st.err !== err;
+    bubble._liveState = { notes: notesN, images: imagesN, sources: sourcesN, err };
+    if (stateChanged) return paintBubble(bubble, m);
+
+    // 1. Фаза и классы строки статуса — in-place
+    const g = m.gen || { phase: 'connecting' };
+    const phase = g.phase || 'connecting';
+    const wantCls = 'gen-live phase-' + phase;
+    if (live.className !== wantCls && live.className !== wantCls + ' no-body') {
+      live.className = wantCls + (live.querySelector('.gl-body') ? '' : ' no-body');
+    }
+
+    // 1b. кнопка пропуска — только в фазе инструментов
+    const hasSkip = !!live.querySelector('.gl-skip');
+    if (phase === 'tools' && !hasSkip) {
+      const sum = live.querySelector('.gl-summary');
+      if (sum) sum.insertBefore(skipToolsBtn(), sum.querySelector('.gl-chev'));
+    } else if (phase !== 'tools' && hasSkip) {
+      live.querySelector('.gl-skip').remove();
+    }
+
+    // 2. label — только textContent, без пересоздания
+    const labelEl = live.querySelector('.gl-label');
+    if (labelEl) {
+      const wanted = PHASE_LABEL[phase] || 'Работаю';
+      if (labelEl.textContent !== wanted) labelEl.textContent = wanted;
+    }
+
+    // 3. meta (время/токены/ток-в-с) — только textContent
+    const metaEl = live.querySelector('.gl-meta');
+    if (metaEl) {
+      const parts = [];
+      if (g.elapsed != null) parts.push(fmtSec(g.elapsed));
+      if (g.tokens) parts.push(`${g.tokens} ток`);
+      if (g.tps) parts.push(`${g.tps} ток/с`);
+      const wanted = parts.join(' · ');
+      if (metaEl.textContent !== wanted) metaEl.textContent = wanted;
+    }
+
+    // 4. gl-body (reasoning + trace)
+    const hasReasoning = !!m.reasoning;
+    const hasTrace = m.trace && m.trace.length;
+    let body = live.querySelector('.gl-body');
+
+    if (!hasReasoning && !hasTrace) {
+      if (body) body.remove();
+      live.classList.add('no-body');
+    } else {
+      live.classList.remove('no-body');
+      if (!body) {
+        body = document.createElement('div');
+        body.className = 'gl-body';
+        live.appendChild(body);
+      }
+      // 4a. reasoning — append-only textContent, сохранение скролла
+      const oldR = body.querySelector('.gl-reasoning');
+      if (hasReasoning) {
+        if (!oldR) {
+          const r = document.createElement('div');
+          r.className = 'gl-reasoning';
+          r.textContent = m.reasoning;
+          body.insertBefore(r, body.firstChild);
+          body.scrollTop = body.scrollHeight;
+        } else if (oldR.textContent !== m.reasoning) {
+          const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 20;
+          oldR.textContent = m.reasoning;
+          if (atBottom) body.scrollTop = body.scrollHeight;
+        }
+      } else if (oldR) {
+        oldR.remove();
+      }
+
+      // 4b. trace — пересобрать, если изменилось число событий ИЛИ последнее
+      // событие. Второе условие нужно, когда m.trace уже на лимите (в
+      // applyEvent стоит .slice(-80)): число не растёт, но последний элемент
+      // меняется — без этой проверки новое событие не появилось бы в UI.
+      const oldTrace = body.querySelector('.gt-list');
+      const oldN = oldTrace ? oldTrace.children.length : 0;
+      const newN = hasTrace ? m.trace.length : 0;
+      let lastChanged = false;
+      if (hasTrace && oldN === newN && oldN > 0) {
+        const lastEv = m.trace[m.trace.length - 1];
+        const lastRow = oldTrace.children[oldN - 1];
+        const shownIc = lastRow.querySelector('.gt-ic');
+        const shownTx = lastRow.querySelector('.gt-tx');
+        const wantIc = TRACE_ICON[lastEv.kind] || '•';
+        const wantTx = lastEv.text || '';
+        if ((shownIc && shownIc.textContent !== wantIc)
+            || (shownTx && shownTx.textContent !== wantTx)) {
+          lastChanged = true;
+        }
+      }
+      if (oldN !== newN || lastChanged) {
+        if (oldTrace) oldTrace.remove();
+        if (hasTrace) body.appendChild(traceRows(m.trace));
+      }
+    }
+
+    // 5. Текст ответа (markdown) — пересобираем только внутренний HTML слота.
+    // Слот .markdown-body стабилен: создаём один раз, дальше меняем innerHTML
+    // только при изменении текста (сравнение по строке — дешёвое).
+    let md = bubble.querySelector('.markdown-body');
+    if (m.text) {
+      if (!md) {
+        md = document.createElement('div');
+        md.className = 'markdown-body';
+        if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') {
+          md.classList.add('plain');
+        }
+        // сразу после live, до notes/images/sources/error
+        live.insertAdjacentElement('afterend', md);
+        md._lastText = '';
+      }
+      if (md._lastText !== m.text) {
+        const freshHtml = renderMd(m.text);
+        if (md.innerHTML !== freshHtml) md.innerHTML = freshHtml;
+        md._lastText = m.text;
+        highlight(md);
+      }
+    } else if (md) {
+      md.remove();
+    }
   }
 
   // ------------------------------------------------------------------ состояние панели
@@ -1138,6 +1470,8 @@
       if (!m.rStart) m.rStart = Date.now();
       m.reasoning = (m.reasoning || '') + ev.reasoning_token;
     }
+    else if (ev.gen_phase) m.gen = Object.assign({}, ev.gen_phase, { at: Date.now() });
+    else if (ev.trace) m.trace = (m.trace || []).concat([ev.trace]).slice(-80);
     else if (ev.sources) m.sources = (m.sources || []).concat(ev.sources);
     else if (ev.image_url) {
       // ИСПРАВЛЕНИЕ (мобильная версия): URL нормализуем сразу — абсолютные
@@ -1260,6 +1594,7 @@
       let none = false;
       const finished = await readSSE(res, (ev) => {
         if (ev.no_active_generation) { none = true; return; }
+        if (ev.gen_phase || ev.trace) { applyEvent(ev, bot); if (id === currentId) paintLive(idx); return; }
         applyEvent(ev, bot);
         // наблюдатель НЕ пишет в своё хранилище/на сервер: финальный commit
         // делает только владелец генерации — иначе два клиента гоняли бы
@@ -1454,7 +1789,8 @@
   }
 
   function sendNow(override) {
-    const text = (override !== undefined ? override : els.input.value).trim();
+    let text = (override !== undefined ? override : els.input.value).trim();
+    if (!text && attachment && attachment.kind === 'file') text = `Проанализируй файл «${attachment.name}»`;
     if (!text && !attachment) return;
 
     if (gen) {
@@ -1471,6 +1807,7 @@
     const img = attachment;
     attachment = null;
     renderAttachment();
+    document.dispatchEvent(new Event('ai:send'));   // голос выключаем до очистки поля
     els.input.value = '';
     autoSize();
 
@@ -1481,19 +1818,29 @@
     // фото покажем ссылкой сразу после загрузки на сервер (см. ниже): тяжёлые
     // data URL в истории не храним — они забивали квоту и роняли показ после перезагрузки
     const userMsg = {
-      id: uid(),   // устойчивый id: по нему сервер схлопывает повторы при слиянии
-      role: 'user',
-      text,
-      time: Date.now(),
-      image: img && img.url.length < MAX_IMAGE_STORE ? img.url : null,
-    };
-    msgs.push(userMsg);
-    msgs.push(newBotMessage());
-    const idx = msgs.length - 1;
-    commit(id);
-    scheduleSync(true);   // форс-пул начального состояния ДО genFlag в startGeneration
-    renderMessages();
-    refreshUI();
+  id: uid(),
+  role: 'user',
+  text,
+  time: Date.now(),
+  image: (img && img.kind === 'image' && img.url.length < MAX_IMAGE_STORE) ? img.url : null,
+};
+// ВАЖНО: userMsg.file устанавливается ДО commit/renderMessages, иначе:
+//  - первая отрисовка показывает пузырь без чипа файла;
+//  - если пользователь закроет вкладку до окончания ответа, file-свойство
+//    не попадёт в IndexedDB и не синхронизируется на сервер.
+// Раньше присваивание стояло ПОСЛЕ commit и renderMessages — файл «пропадал»
+// и в UI, и в истории после перезагрузки.
+if (img && img.kind === 'file') {
+  userMsg.file = { id: img.id, name: img.name, size: img.size, mime: img.mime };
+}
+msgs.push(userMsg);
+msgs.push(newBotMessage());
+const idx = msgs.length - 1;
+commit(id);
+scheduleSync(true);
+renderMessages();
+refreshUI();
+
 
     const body = {
       message: text || 'Опиши, что изображено',
@@ -1504,15 +1851,18 @@
       gen_key: msgs[idx].id,
       chat_id: id, user_msg_id: userMsg.id || null,
     };
-    if (img) { body.image_base64 = img.base64; body.image_mime = img.mime; }
+    if (img && img.kind === 'file') body.file_ids = [img.id];
+    else if (img) { body.image_base64 = img.base64; body.image_mime = img.mime; }
 
     // Тяжёлое фото грузим в медиатеку параллельно с генерацией: ответ модели
     // не ждёт загрузки, а ссылка для истории появляется, как только готова.
     let pendingMedia = null;
-    if (img && img.url.length >= MAX_IMAGE_STORE) {
+
+    if (img && img.url && img.url.length >= MAX_IMAGE_STORE) {
       pendingMedia = ensureMediaUrl(img).then((u) => {
-        if (!u) return;
-        userMsg.image = u;
+        // медиатека недоступна — не теряем картинку, оставляем сжатую inline (если не слишком большая)
+        userMsg.image = u || (img.url.length < MAX_INLINE_FALLBACK ? img.url : null);
+        if (!userMsg.image) return;
         commit(id);                       // короткая ссылка вместо «фото пропало»
         if (currentId === id) renderMessages({ scroll: false });
       });
@@ -1657,11 +2007,103 @@
     }
   }
 
+  // ------------------------------------------------------------------ вложения: картинки и файлы
+  const MAX_FILE_BYTES = 5 * 1024 * 1024;        // как MAX_UPLOAD_BYTES на сервере
+  const IMAGE_MAX_SIDE = 1600;                    // длинная сторона перед отправкой
+  const IMAGE_COMPRESS_MIN_BYTES = 600 * 1024;    // меньше этого и уже в пределах — не пережимаем
+  const MAX_INLINE_FALLBACK = 1500000;            // если медиатека недоступна — оставить картинку inline
+  const FILE_ICON = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#8a8f98" ' +
+    'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>');
+
+  function fmtBytes(n) {
+    return n < 1024 ? `${n} Б` : n < 1048576 ? `${(n / 1024).toFixed(1)} КБ` : `${(n / 1048576).toFixed(1)} МБ`;
+  }
+
+  function blobToDataURL(blob) {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result));
+      r.onerror = () => reject(r.error);
+      r.readAsDataURL(blob);
+    });
+  }
+
+  // Картинка для чата: уменьшаем и пережимаем. Любая ошибка — исходный файл, как раньше.
+  async function imageAttachment(f) {
+    const asOriginal = async () => {
+      const url = await blobToDataURL(f);
+      return { kind: 'image', url, base64: url.split(',')[1] || '', mime: f.type, name: f.name, file: f };
+    };
+    if (f.type === 'image/gif') return asOriginal();          // анимацию не трогаем
+    try {
+      const bmp = await createImageBitmap(f);
+      const scale = Math.min(1, IMAGE_MAX_SIDE / Math.max(bmp.width, bmp.height));
+      if (scale === 1 && f.size <= IMAGE_COMPRESS_MIN_BYTES) { bmp.close?.(); return asOriginal(); }
+      const w = Math.max(1, Math.round(bmp.width * scale));
+      const h = Math.max(1, Math.round(bmp.height * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      const g = canvas.getContext('2d');
+      const mime = (f.type === 'image/png' || f.type === 'image/webp') ? 'image/webp' : 'image/jpeg';
+      if (mime === 'image/jpeg') { g.fillStyle = '#fff'; g.fillRect(0, 0, w, h); }
+      g.drawImage(bmp, 0, 0, w, h);
+      bmp.close?.();
+      const blob = await new Promise((res) => canvas.toBlob(res, mime, 0.85));
+      if (!blob || blob.size >= f.size) return asOriginal();
+      const url = await blobToDataURL(blob);
+      const base = f.name.replace(/\.[^.]+$/, '') || 'image';
+      return { kind: 'image', url, base64: url.split(',')[1] || '', mime,
+               name: base + (mime === 'image/webp' ? '.webp' : '.jpg'), file: blob, compressed: true };
+    } catch (e) {
+      console.warn('сжатие изображения не удалось, отправляю оригинал:', e);
+      return asOriginal();
+    }
+  }
+
+  async function uploadUserFile(f) {
+    try {
+      const fd = new FormData();
+      fd.append('file', f, f.name);
+      const r = await fetch(API.files, { method: 'POST', credentials: 'same-origin', body: fd });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        toast(typeof j.detail === 'string' ? j.detail : 'Не удалось загрузить файл');
+        return null;
+      }
+      return await r.json();
+    } catch {
+      toast('Нет связи с сервером: файл не загружен');
+      return null;
+    }
+  }
+
+  // Любой выбранный файл: картинка → сжатая картинка, остальное → файлы пользователя на сервере
+  async function handlePickedFile(f) {
+    if (!f) return;
+    if (f.type.startsWith('image/') && !f.type.includes('svg')) {
+      if (f.size > MAX_IMAGE_BYTES) { toast('Изображение больше 8 МБ'); return; }
+      attachment = await imageAttachment(f);
+    } else {
+      if (f.size > MAX_FILE_BYTES) { toast('Файл больше 5 МБ'); return; }
+      const meta = await uploadUserFile(f);
+      if (!meta) return;
+      attachment = { kind: 'file', id: meta.id, name: meta.name, size: meta.size, mime: meta.mime };
+    }
+    renderAttachment();
+  }
+
   function renderAttachment() {
     els.attachChip.hidden = !attachment;
     if (attachment) {
-      els.attachThumb.src = attachment.url;
-      els.attachName.textContent = attachment.name;
+      if (attachment.kind === 'file') {
+        els.attachThumb.src = FILE_ICON;
+        els.attachName.textContent = `${attachment.name} · ${fmtBytes(attachment.size)}`;
+      } else {
+        els.attachThumb.src = attachment.url;
+        els.attachName.textContent = attachment.name;
+      }
     }
     setSendState();
   }
@@ -1952,6 +2394,21 @@
       try { rec.start(); }
       catch (_) { rec = null; micBtn.classList.remove('on'); micBtn.setAttribute('aria-pressed', 'false'); els.input.placeholder = idlePlaceholder; }
     });
+
+    // Текст отправлен — голос выключаем сразу. Хвост распознавания отбрасываем,
+    // иначе он дописался бы в уже очищенное поле, а микрофон остался бы включённым.
+    document.addEventListener('ai:send', () => {
+      if (!rec) return;
+      const r = rec;
+      rec = null;
+      r.onresult = null;
+      r.onerror = null;
+      try { r.abort(); } catch (_) { /* уже остановлен */ }
+      micBtn.classList.remove('on');
+      micBtn.setAttribute('aria-pressed', 'false');
+      micBtn.title = 'Голосовой ввод: нажмите и говорите';
+      if (!msgTimer) els.input.placeholder = idlePlaceholder;
+    });
   }
 
   els.send.addEventListener('click', onSendButton);
@@ -1983,33 +2440,89 @@
   els.fileInput.addEventListener('change', () => {
     const f = els.fileInput.files[0];
     els.fileInput.value = '';
-    if (!f) return;
-    if (!f.type.startsWith('image/')) { toast('Можно прикреплять только изображения'); return; }
-    if (f.size > MAX_IMAGE_BYTES) { toast('Изображение больше 8 МБ'); return; }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const url = String(reader.result);
-      attachment = { url, base64: url.split(',')[1] || '', mime: f.type, name: f.name, file: f };
-      renderAttachment();
-    };
-    reader.readAsDataURL(f);
+    if (f) handlePickedFile(f);
   });
 
-  // drag&drop изображения на область чата — тот же путь, что и через кнопку
-  els.inner.addEventListener('dragover', (e) => { e.preventDefault(); });
-  els.inner.addEventListener('drop', (e) => {
-    const f = [...(e.dataTransfer?.files || [])].find((x) => x.type.startsWith('image/'));
-    if (!f) return;
+  // ------------------------------------------------------------------ drag&drop
+// Приём файлов на ЛЮБУЮ область окна. Раньше обработчики висели только на
+// els.inner (область сообщений). Если пользователь отпускал файл над полем
+// ввода / композером / шапкой — срабатывало стандартное поведение браузера:
+// путь к файлу вставлялся в textarea как текст ("file:/C:/..."), а сам файл
+// не загружался. Ещё одна проблема: e.preventDefault() вызывался ПОСЛЕ
+// `if (!f) return`, поэтому при пустом dataTransfer.files (некоторые IDE/
+// терминалы/оболочки отдают только text/uri-list с file://) URI успевал
+// вставиться в textarea.
+//
+// Теперь:
+//   • dragover/dragenter/dragleave/drop висят на document — ловят файл над
+//     любой точкой окна;
+//   • preventDefault в drop вызывается ПЕРВЫМ, до любых проверок, — это
+//     отменяет вставку URI в textarea;
+//   • если dataTransfer.files есть — грузим файл как раньше (handlePickedFile);
+//   • если файлов нет, но есть file:// URI — это НЕ сам файл, а ссылка на
+//     него; браузер не даёт прочитать байты по file://, поэтому показываем
+//     понятную подсказку вместо молчаливой вставки текста.
+
+let dragDepth = 0;
+
+function _dtHasFiles(dt) {
+  if (!dt) return false;
+  const types = dt.types ? Array.from(dt.types) : [];
+  if (types.includes('Files')) return true;
+  return !!(dt.files && dt.files.length);
+}
+
+function _dtHasFileUrlOnly(dt) {
+  if (!dt) return false;
+  const types = dt.types ? Array.from(dt.types) : [];
+  if (types.includes('Files')) return false;
+  return types.includes('text/uri-list') || types.includes('text/plain');
+}
+
+document.addEventListener('dragenter', (e) => {
+  if (!_dtHasFiles(e.dataTransfer)) return;
+  e.preventDefault();
+  dragDepth++;
+  els.app?.classList.add('drag-over');
+});
+
+document.addEventListener('dragover', (e) => {
+  // preventDefault на dragover ОБЯЗАТЕЛЕН: без него браузер блокирует drop.
+  if (_dtHasFiles(e.dataTransfer) || _dtHasFileUrlOnly(e.dataTransfer)) {
     e.preventDefault();
-    if (f.size > MAX_IMAGE_BYTES) { toast('Изображение больше 8 МБ'); return; }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const url = String(reader.result);
-      attachment = { url, base64: url.split(',')[1] || '', mime: f.type, name: f.name, file: f };
-      renderAttachment();
-    };
-    reader.readAsDataURL(f);
-  });
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = _dtHasFiles(e.dataTransfer) ? 'copy' : 'none';
+    }
+  }
+});
+
+document.addEventListener('dragleave', (e) => {
+  if (!_dtHasFiles(e.dataTransfer) && !_dtHasFileUrlOnly(e.dataTransfer)) return;
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) els.app?.classList.remove('drag-over');
+});
+
+document.addEventListener('drop', (e) => {
+  // ВАЖНО: preventDefault ДО проверок. Если files пустой, а есть только
+  // text/uri-list — браузер по умолчанию вставит "file:/C:/..." в textarea;
+  // preventDefault отменяет именно это.
+  const dt = e.dataTransfer;
+  if (!_dtHasFiles(dt) && !_dtHasFileUrlOnly(dt)) return;   // обычный текст — не наш случай
+  e.preventDefault();
+  e.stopPropagation();
+  dragDepth = 0;
+  els.app?.classList.remove('drag-over');
+
+  const f = dt && dt.files && dt.files.length ? dt.files[0] : null;
+  if (f) {
+    handlePickedFile(f);
+    return;
+  }
+  // Файлов нет, но URI есть: перетащили «ярлык»/ссылку на файл, а не сам
+  // файл. Браузер по security-политике не даёт прочитать его байты — просим
+  // перетащить файл из Проводника/Finder или выбрать через 📎.
+  toast('Перетащите сам файл из Проводника/Finder — или нажмите 📎 и выберите его', 4000);
+});
 
   // ------------------------------------------------------------------ лайтбокс фото
   // Клик по любому изображению в чате открывает полноэкранный просмотр:
@@ -2019,6 +2532,166 @@
   const lb = { root: null, img: null, cap: null, counter: null, prev: null, next: null, save: null,
                urls: [], idx: -1, scale: 1, tx: 0, ty: 0, drag: null,
                pointers: new Map(), pinch: null, lastTap: 0, lastPointer: 'mouse' };
+
+  // ------------------------------------------------------------------ модалка файла
+// Просмотр прикреплённого файла: markdown — через marked+DOMPurify (те же, что
+// в чате), код — через hljs, картинки — <img>, бинарные — только скачивание.
+// Клик по чипу НЕ скачивает файл, а открывает это окно; скачивание — отдельная
+// кнопка в шапке модалки.
+const fp = { root: null, title: null, body: null, download: null, close: null };
+
+function ensureFilePreviewBuilt() {
+  if (fp.root) return;
+  fp.root = document.createElement('div');
+  fp.root.className = 'file-preview';
+  fp.root.hidden = true;
+  fp.root.setAttribute('role', 'dialog');
+  fp.root.setAttribute('aria-modal', 'true');
+  fp.root.setAttribute('aria-label', 'Просмотр файла');
+
+  const box = document.createElement('div');
+  box.className = 'fp-box';
+
+  const head = document.createElement('div');
+  head.className = 'fp-head';
+
+  fp.title = document.createElement('h2');
+  fp.title.className = 'fp-title';
+  head.appendChild(fp.title);
+
+  fp.download = document.createElement('a');
+  fp.download.className = 'fp-btn';
+  fp.download.textContent = '⬇ Скачать';
+  head.appendChild(fp.download);
+
+  fp.close = document.createElement('button');
+  fp.close.type = 'button';
+  fp.close.className = 'fp-btn fp-close';
+  fp.close.textContent = '✕';
+  fp.close.setAttribute('aria-label', 'Закрыть');
+  fp.close.addEventListener('click', closeFilePreview);
+  head.appendChild(fp.close);
+
+  box.appendChild(head);
+
+  fp.body = document.createElement('div');
+  fp.body.className = 'fp-body';
+  box.appendChild(fp.body);
+
+  fp.root.appendChild(box);
+  document.body.appendChild(fp.root);
+
+  fp.root.addEventListener('click', (e) => {
+    if (e.target === fp.root) closeFilePreview();
+  });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !fp.root.hidden) { e.stopPropagation(); closeFilePreview(); }
+  });
+}
+
+function closeFilePreview() {
+  if (!fp.root || fp.root.hidden) return;
+  fp.root.hidden = true;
+  fp.body.innerHTML = '';
+  document.documentElement.classList.remove('fp-open');
+}
+
+async function openFilePreview(file) {
+  ensureFilePreviewBuilt();
+  fp.title.textContent = file.name;
+  fp.download.href = `${API.files}/${file.id}`;
+  fp.download.setAttribute('download', file.name);
+  fp.body.innerHTML = '<div class="fp-msg">Загрузка…</div>';
+  fp.root.hidden = false;
+  document.documentElement.classList.add('fp-open');
+
+  let data;
+  try {
+    const r = await fetch(`${API.files}/${file.id}/preview`, { credentials: 'same-origin' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    data = await r.json();
+  } catch (e) {
+    fp.body.innerHTML = '';
+    const err = document.createElement('div');
+    err.className = 'fp-msg fp-error';
+    err.textContent = 'Не удалось загрузить файл: ' + e.message;
+    fp.body.appendChild(err);
+    return;
+  }
+
+  fp.body.innerHTML = '';
+
+  if (data.kind === 'image') {
+    const img = new Image();
+    img.src = data.url;
+    img.className = 'fp-image';
+    img.alt = data.name;
+    fp.body.appendChild(img);
+    return;
+  }
+
+  if (data.kind === 'binary') {
+    const d = document.createElement('div');
+    d.className = 'fp-msg';
+    d.textContent = `Бинарный файл (${fmtBytes(data.size || 0)}). Просмотр недоступен — только скачивание.`;
+    fp.body.appendChild(d);
+    return;
+  }
+
+  // text
+  if (data.language === 'markdown') {
+    const md = document.createElement('div');
+    md.className = 'markdown-body fp-markdown';
+    md.innerHTML = renderMd(data.text);   // marked + DOMPurify (как в чате)
+    fp.body.appendChild(md);
+    // Ссылки в .md — в новой вкладке; иначе клик уносит из чата
+    md.querySelectorAll('a[href]').forEach((a) => {
+  const href = a.getAttribute('href') || '';
+  if (/^(https?:|mailto:)/i.test(href)) {
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+  }
+});
+    highlight(md);                        // подсветка и кнопки «Копировать» в код-блоках
+  } else if (data.language === 'json') {
+    // Pretty-print JSON для читаемости; при ошибке парсинга — сырой текст
+    let pretty = data.text;
+    try { pretty = JSON.stringify(JSON.parse(data.text), null, 2); } catch { /* оставляем как есть */ }
+    fp.body.appendChild(buildCodeBlock(pretty, 'json'));
+  } else {
+    fp.body.appendChild(buildCodeBlock(data.text, data.language || 'text'));
+  }
+
+  if (data.truncated) {
+    const t = document.createElement('div');
+    t.className = 'fp-truncated';
+    t.textContent = `Показано ${data.text.length} из ${data.total_chars} символов. Нажмите «Скачать», чтобы увидеть файл целиком.`;
+    fp.body.appendChild(t);
+  }
+}
+
+function buildCodeBlock(text, lang) {
+  const wrap = document.createElement('div');
+  wrap.className = 'code-wrap fp-code';
+  const pre = document.createElement('pre');
+  const code = document.createElement('code');
+  code.className = 'language-' + (lang || 'text');
+  code.textContent = text;
+  pre.appendChild(code);
+  wrap.appendChild(pre);
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'copy-code-btn';
+  btn.textContent = 'Копировать';
+  btn.addEventListener('click', (e) => { e.stopPropagation(); copyText(text); });
+  wrap.appendChild(btn);
+
+  if (typeof hljs !== 'undefined' && lang && lang !== 'text') {
+    try { hljs.highlightElement(code); } catch { /* нет языкового модуля — показываем как есть */ }
+  }
+  return wrap;
+}
 
   function buildLightbox() {
     if (lb.root) return;
@@ -2456,6 +3129,7 @@
     const out = Object.assign({}, item);
     if (dst.text && !item.text) out.text = dst.text;
     if (dst.reasoning && !item.reasoning) out.reasoning = dst.reasoning;
+    if (dst.trace && !item.trace) out.trace = dst.trace;
     if (dst.pending === false && item.pending) out.pending = false;
     return out;
   }
@@ -2609,9 +3283,17 @@
       // (гонка чтения/записи), откат базы назад ломает delta-канал —
       // следующий since=<старый> не покрывается журналом -> need_full.
       SYNC.base = Math.max(st.updated || 0, SYNC.base || 0);
+      saveSyncMeta();
       return true;
     } catch { return false; }
     finally { if (killTimer) clearTimeout(killTimer); }
+  }
+
+  // База и ETag переживают перезагрузку: следующий старт тянет только дельту.
+  // Сохраняем ПОСЛЕ применения изменений к IndexedDB, иначе база опередит данные.
+  function saveSyncMeta() {
+    try { localStorage.setItem(KEY.sync, JSON.stringify({ base: SYNC.base, etag: SYNC.etag })); }
+    catch { /* квота localStorage — не критично, будет полный снимок */ }
   }
 
   // Дельта-канал: GET /ui-state/delta?since=base отдаёт только изменённые чаты.
@@ -2627,6 +3309,7 @@
       if (d.need_full) return 'full';         // базы нет — нужен полный снимок
       if (d.changed) await applyServerDelta(d);
       if (d.updated) SYNC.base = d.updated;
+      saveSyncMeta();
       return true;
     } catch { return null; }
   }
@@ -2878,8 +3561,22 @@
     // открытый чат читаем из IndexedDB до первой отрисовки (а не из localStorage-зеркала)
     const firstChat = sessions.slice().sort((a, b) => (b.updated || b.created) - (a.updated || a.created))[0];
     if (firstChat) await hydrateChat(firstChat.id);
-    SYNC.ready = await pullState();
-    init();
+
+    // Восстанавливаем базу с прошлого визита. Только если в IndexedDB реально есть
+    // чаты: иначе дельта от старой базы вернула бы лишь новое и чаты потерялись бы.
+    try {
+      const m = JSON.parse(localStorage.getItem(KEY.sync) || 'null');
+      if (m && m.base > 0 && sessions.length) { SYNC.base = m.base; SYNC.etag = m.etag || ''; }
+    } catch { /* повреждённая запись — начнём с полного снимка */ }
+
+    init();                                       // локальные чаты видны сразу, без ожидания сети
+    if (SYNC.base > 0) {
+      SYNC.ready = true;                          // pullDelta работает только при ready
+      const d = await pullDelta();                // только изменения с прошлого визита
+      if (d === 'full' || d === null) SYNC.ready = await pullState();
+    } else {
+      SYNC.ready = await pullState();
+    }
     startRemotePoll();
     startStateEvents();   // мгновенное получение чужих сохранений (откат к poll, если канал недоступен)
     if (SYNC.ready && (SYNC.base === 0 || sessions.length)) scheduleSync();
@@ -3261,7 +3958,7 @@
   // Окно живёт во временном layer-контейнере на body: position:fixed внутри
   // шапки с backdrop-filter давал бы «двойную» подложку и чужие тени.
   let ddEl = null, ddLayer = null, ddKeyLis = null, ddScrollLis = null,
-      ddWheelLis = null, ddTouchLis = null, ddReposLis = null;
+      ddWheelLis = null, ddTouchLis = null, ddReposLis = null, ddSearch = null;   // ddSearch — поле поиска списка моделей
   function closeModelDd() {
     if (!ddEl) return;
     const gone = ddEl;
@@ -3505,6 +4202,25 @@
       });
       list.appendChild(ul);
     }
+    // Поле поиска — только когда моделей много (от 7): короткий список не нагружаем.
+    if (modelList.models.length > 6) {
+      const search = document.createElement('input');
+      search.type = 'search';
+      search.className = 'model-dd-search';
+      search.placeholder = 'Найти модель…';
+      search.setAttribute('aria-label', 'Поиск модели');
+      search.autocomplete = 'off';
+      search.addEventListener('input', () => {
+        const q = search.value.trim().toLowerCase();
+        list.querySelectorAll('.model-dd-item[data-model]').forEach((it) => {
+          it.hidden = !!q && !(it.dataset.model || '').toLowerCase().includes(q);
+        });
+      });
+      d.appendChild(search);
+      ddSearch = search;
+    } else {
+      ddSearch = null;
+    }
     d.appendChild(list);
     ddLayer.appendChild(d);
     document.body.appendChild(ddLayer);
@@ -3529,7 +4245,8 @@
     ddLayer.addEventListener('wheel', nonListScroll, { passive: false });
     ddLayer.addEventListener('touchmove', nonListScroll, { passive: false });
     const first = list.querySelector('.model-dd-item.current') || list.querySelector('.model-dd-item');
-    if (first) first.focus({ preventScroll: true });
+    if (ddSearch) ddSearch.focus({ preventScroll: true });
+    else if (first) first.focus({ preventScroll: true });
     // Клавиатура: Esc — закрыть, стрелки — переход по пунктам (как в .ui-menu).
     // Слушатель вешаем на document (а не на окно) и снимаем в closeModelDd():
     // вложенные span'ы имени/бейджа не видны closest('button'), если слушать
@@ -3538,12 +4255,21 @@
       if (!ddEl) return;
       // Enter/Пробел на самой кнопке-триггере: не перехватываем — иначе клик по
       // кнопке открывал список и тут же «выбирал» первый пункт
+      // Поле поиска: печатаем свободно (Space и буквы не перехватываем);
+      // стрелка вниз / Enter — к первой видимой модели, Esc — закрыть
+      if (e.target && e.target.classList && e.target.classList.contains('model-dd-search')) {
+        const vis = Array.from(ddEl.querySelectorAll('.model-dd-item[data-model]:not([hidden])'));
+        if (e.key === 'Escape') { e.preventDefault(); closeModelDd(); btn.focus(); return; }
+        if (e.key === 'ArrowDown' && vis[0]) { e.preventDefault(); vis[0].focus({ preventScroll: true }); keepItemVisible(vis[0]); }
+        else if (e.key === 'Enter' && vis[0]) { e.preventDefault(); vis[0].click(); }
+        return;
+      }
       if ((e.key === 'Enter' || e.key === ' ') && e.target.closest('#modelSelectBtn')) return;
       if (e.key === 'Escape') { e.preventDefault(); closeModelDd(); btn.focus(); return; }
       if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         // только пункты-кнопки с реальным id модели: разделитель/статус-строка
         // не должны участвовать в навигации и «выборе»
-        const items = Array.from(ddEl.querySelectorAll('.model-dd-item[data-model]'));
+        const items = Array.from(ddEl.querySelectorAll('.model-dd-item[data-model]:not([hidden])'));
         if (!items.length) return;
         const active = e.target.closest ? e.target.closest('.model-dd-item') : null;
         let i = items.indexOf(active);

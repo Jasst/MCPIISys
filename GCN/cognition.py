@@ -9,13 +9,13 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from GCN.llm_client import call_llm
-from GCN.tool_router import _looks_compound
-from GCN.web_search import domain_trust
-from GCN.config_ai import MOTIVATION_MAX_ACTIVE, MOTIVATION_MAX_PER_DAY
+from .llm_client import call_llm
+from .tool_router import _looks_compound
+from .web_search import domain_trust
+from .config_ai import MOTIVATION_MAX_ACTIVE, MOTIVATION_MAX_PER_DAY
 
 try:
-    from GCN.config_ai import (
+    from .config_ai import (
         GROUNDED_ANSWER_ENABLED, SUBQUERY_RETRIEVAL_ENABLED,
         MAX_RETRIEVE_SUBQUERIES, GROUNDED_MAX_SOURCES,
         GROUNDED_APPEND_SOURCES_FALLBACK,
@@ -196,8 +196,8 @@ class SelfModel:
 
         # === НОВОЕ: Калибровка уверенности (Brier score buckets) ===
         self._record_calibration(confidence, success, action_type)
-
-        self.save()
+        # Персистентность — в CognitiveController._finalize_answer (через to_thread).
+        # Здесь синхронная запись на каждое сообщение блокировала event loop.
 
     def _record_calibration(self, predicted_confidence: float, actual_success: bool, action_type: str = None) -> None:
         """Записывает результат в бакет калибровки для последующей коррекции уверенности.
@@ -756,7 +756,7 @@ class MotivationEngine:
         if not self.memory:
             return None
         try:
-            from GCN.GCN import needs_consolidation
+            from .GCN import needs_consolidation
             info = needs_consolidation(self.memory, layer="private")
         except Exception as e:
             logger.warning(f"[Motivation] identity-проверка не удалась: {e}")

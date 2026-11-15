@@ -8,6 +8,7 @@ spreading activation, predictive transitions, противоречия, конс
 
 import json
 import logging
+import os
 import time
 import re
 import asyncio
@@ -24,18 +25,41 @@ import faiss
 import uuid
 
 # Импорт GCN-компонентов (папка GCN, файл GCN.py)
-from GCN.GCN import (
+from .GCN import (
     KnowledgeObject, KnowledgeType, KnowledgeEvent, EventType,
     MemoryStore, Provenance, MemoryHierarchy,
     MemoryScope, KnowledgeIngestion   # добавить эти два
 )
 
-from GCN.llm_client import call_llm
-from GCN import memory_trust as mt
+from .llm_client import call_llm
+from . import memory_trust as mt
+from . import inhibition as inh
+from . import stabilizer as stab
+import statistics
+from collections import OrderedDict
+from .plasticity import PlasticityParams, stdp_delta, stabilized_plasticity, normalize_strength
+from .learned_rerank import RerankLearner
+from .transition_model import TransitionModel, fit_with_gate
 
 logger = logging.getLogger(__name__)
 
-from GCN.config_ai import *  # единственный источник конфигурации (fallback-дубль констант удалён)
+from .config_ai import *  # единственный источник конфигурации (fallback-дубль констант удалён)
+
+
+def _plasticity_params() -> PlasticityParams:
+    return PlasticityParams(
+        ltp=STDP_LONG_TERM_POTENTIATION, ltd=STDP_LONG_TERM_DEPRESSION,
+        window=STDP_TIME_WINDOW, base_rate=HEBBIAN_LEARNING_RATE,
+        floor=PLASTICITY_FLOOR, stabilize_k=PLASTICITY_STABILIZE_K,
+        initial_plasticity=0.5,
+    )
+
+
+def _clip01(x) -> float:
+    try:
+        return max(0.0, min(1.0, float(x)))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 # =====================================================================
@@ -76,6 +100,8 @@ class Synapse:
     last_coactivation: float = 0.0
     pre_time: float = 0.0
     post_time: float = 0.0
+    # +1 возбуждающая, -1 тормозная. Хранится в GCN как отдельный тип связи "inhibit".
+    sign: int = 1
 
 
 @dataclass
@@ -105,6 +131,9 @@ class Episode:
     # полей; тогда используется прежний textual fallback (см. deep_consolidation).
     user_fact_id: Optional[int] = None
     assistant_fact_id: Optional[int] = None
+    # Реальные времена реплик (секунды). None — для старых данных; тогда используется fallback.
+    user_ts: Optional[float] = None
+    assistant_ts: Optional[float] = None
 
 
 @dataclass
@@ -409,7 +438,7 @@ class CognitiveMemory:
                     continue
                 tgt_int = tgt_fact.id
                 weight = self.gcn_store._graph.get_relation_weight(src_id, rel, tgt_id) or 0.5
-                if rel == "synapse":
+                if rel in ("synapse", "inhibit"):
                     key = (src_int, tgt_int)
                     if key not in self.synapses:
                         self.synapses[key] = Synapse(
@@ -418,7 +447,8 @@ class CognitiveMemory:
                             weight=weight,
                             last_activation=time.time(),
                             plasticity=0.5,
-                            confidence=0.5
+                            confidence=0.5,
+                            sign=-1 if rel == "inhibit" else 1,
                         )
                     self.graph[src_int].add(tgt_int)
 
@@ -666,7 +696,7 @@ class CognitiveMemory:
         candidates.sort(key=lambda x: -x[1])
         return candidates[:top_k]
 
-    def _create_synapse(self, src: int, tgt: int, weight: float = SYNAPSE_INITIAL_WEIGHT):
+    def _create_synapse(self, src: int, tgt: int, weight: float = SYNAPSE_INITIAL_WEIGHT, sign: int = 1):
         key = (src, tgt)
         if key in self.synapses:
             syn = self.synapses[key]
@@ -679,7 +709,8 @@ class CognitiveMemory:
                 weight=max(SYNAPSE_MIN_WEIGHT, min(SYNAPSE_MAX_WEIGHT, weight)),
                 last_activation=time.time(),
                 plasticity=0.5,
-                confidence=0.5
+                confidence=0.5,
+                sign=-1 if sign < 0 else 1,
             )
         self.graph[src].add(tgt)
         # Синхронизация через GCN link
@@ -687,7 +718,8 @@ class CognitiveMemory:
         fact_tgt = self.facts_by_id.get(tgt)
         if fact_src and fact_tgt and fact_src.gcn_id and fact_tgt.gcn_id:
             try:
-                self.gcn_store.link(fact_src.gcn_id, fact_tgt.gcn_id, "synapse", self.user_id,
+                self.gcn_store.link(fact_src.gcn_id, fact_tgt.gcn_id,
+                                    self._relation_for(self.synapses[key]), self.user_id,
                                     weight=self.synapses[key].weight)
             except Exception as e:
                 logger.debug(f"GCN link failed: {e}")
@@ -715,6 +747,11 @@ class CognitiveMemory:
                     other.confidence = self.gcn_store.compute_confidence(other.gcn_id)
                 except Exception as e:
                     logger.debug(f"Contradiction registration failed: {e}")
+                    continue
+                if INHIBITORY_SYNAPSES_ENABLED:
+                    # Противоречащие факты тормозят друг друга в активации, а не только помечены в выдаче.
+                    self._create_synapse(fact.id, other.id, weight=INHIBITORY_INITIAL_WEIGHT, sign=-1)
+                    self._create_synapse(other.id, fact.id, weight=INHIBITORY_INITIAL_WEIGHT, sign=-1)
 
     # ==================== ВЕРИФИКАЦИЯ ПРОТИВОРЕЧИЙ ====================
     def get_unverified_contradictions(self, limit: int = 5) -> List[Tuple['Fact', 'Fact']]:
@@ -793,12 +830,19 @@ class CognitiveMemory:
                     if fact.id in (s, t):
                         syn.weight = max(SYNAPSE_MIN_WEIGHT, syn.weight * 0.5)
                         self._sync_synapse_to_gcn(s, t)
+        # Обучение весов ранжирования по обратной связи: признаки того поиска, который показал этот факт
+        feats = (getattr(self, "_retrieval_features", None) or {}).get(gcn_id)
+        if feats is not None:
+            rr = self._get_reranker()
+            rr.feedback(feats, verdict)
+            self._dynamic_weights.update(rr.weights())
         self._dirty = True
         return {"confidence": round(new_conf, 4), "status": status}
 
     # ==================== ЭПИЗОДЫ ====================
-    async def add_episode(self, user_msg: str, assistant_msg: str, salience: float = 0.0):
-        """Добавляет эпизод в GCN и локальный кэш."""
+    async def add_episode(self, user_msg: str, assistant_msg: str, salience: float = 0.0,
+                          user_ts: Optional[float] = None, assistant_ts: Optional[float] = None):
+        """Добавляет эпизод в GCN и локальный кэш. user_ts/assistant_ts — времена реплик, если известны."""
         user_id_gcn, ass_id_gcn = self.gcn_store.add_episode(user_msg, assistant_msg, self.user_id, salience)
 
         # Создаём локальные факты (как раньше) для совместимости
@@ -823,6 +867,8 @@ class CognitiveMemory:
             salience=salience,
             user_fact_id=user_fid,
             assistant_fact_id=assistant_fid,
+            user_ts=user_ts,
+            assistant_ts=assistant_ts,
         )
         self._next_episode_id += 1
         self.episodic_memory.append(episode)
@@ -830,7 +876,22 @@ class CognitiveMemory:
             self.episodic_memory.sort(key=lambda e: (e.importance, e.timestamp), reverse=True)
             self.episodic_memory = self.episodic_memory[:EPISODIC_MAX_SIZE]
 
+        # Консолидация по порогу эпизодов (а не только по таймеру): граф учится сразу после накопления.
+        self._episodes_since_deep = getattr(self, "_episodes_since_deep", 0) + 1
+        if (self._episodes_since_deep >= DEEP_CONSOLIDATION_EPISODE_TRIGGER
+                and not getattr(self, "_deep_task_running", False)):
+            self._deep_task_running = True
+            asyncio.create_task(self._run_triggered_consolidation())
+
         await self._schedule_save()
+
+    async def _run_triggered_consolidation(self):
+        try:
+            await self.deep_consolidation()
+        except Exception as e:
+            logger.debug(f"triggered consolidation failed: {e}")
+        finally:
+            self._deep_task_running = False
 
     # ==================== ПРЕДСКАЗАТЕЛЬНАЯ МОДЕЛЬ ====================
     def _concept_key(self, text: str, top_n: int = 5) -> Optional[str]:
@@ -906,6 +967,18 @@ class CognitiveMemory:
                 for nxt_key, prob in self.predictive_matrix[key].items():
                     candidates[nxt_key] += prob
 
+        transition = self._get_transition() if not exact_hit else None
+        if transition is not None and self.concept_embeddings and current_texts:
+            q = self._get_embedding(current_texts[-1], is_query=True)
+            if q is not None and np.any(q):
+                keys = list(self.concept_embeddings.keys())
+                cand = np.stack([np.asarray(self.concept_embeddings[k], dtype=float) for k in keys])
+                cand = cand / np.where(np.linalg.norm(cand, axis=1, keepdims=True) == 0, 1.0,
+                                       np.linalg.norm(cand, axis=1, keepdims=True))
+                pred = transition.predict(np.asarray(q, dtype=float))[0]
+                sims = cand @ pred
+                for idx in np.argsort(-sims)[:TRANSITION_TOP_K]:
+                    candidates[keys[idx]] += float(sims[idx])
         if not exact_hit and self.use_embeddings and self.concept_embeddings:
             for text in current_texts:
                 query_vec = self._get_embedding(text, is_query=True)
@@ -929,48 +1002,29 @@ class CognitiveMemory:
         return [self.concept_examples.get(k, k) for k, _ in sorted_candidates]
 
     # ==================== HEBBIAN / STDP ====================
-    def _hebbian_update(self, source_id: int, target_id: int, coactivation_time: float):
-        """Обновляет вес синапса source->target по правилу STDP/Hebbian.
+    def _hebbian_update(self, source_id: int, target_id: int, pre_time: float, post_time: float):
+        """Обновляет вес source->target по STDP по реальным временам событий обоих узлов.
 
-        ИСПРАВЛЕНИЕ (мёртвые параметры конфигурации): STDP_LONG_TERM_POTENTIATION /
-        STDP_LONG_TERM_DEPRESSION, SYNAPSE_PLASTICITY_RATE и
-        SYNAPSE_COACTIVATION_THRESHOLD были объявлены в config_ai.py, но нигде не
-        читались — обе ветки STDP использовали один и тот же STDP_LEARNING_RATE
-        (депрессия отличалась только произвольным множителем 0.5), а
-        Synapse.plasticity выставлялось при создании и больше никогда не менялось:
-        метапластичности не было — часто подтверждаемые и совсем новые связи
-        учились с одинаковой скоростью.
-        Теперь: LTP и LTD используют раздельные константы; величина изменения
-        масштабируется текущей пластичностью синапса; синапсы, накопившие много
-        значимых совместных активаций, постепенно теряют пластичность
-        (стабилизируются) — так базовые, многократно подтверждённые ассоциации не
-        размываются каждым новым шумным сигналом, а действительно новые связи
-        остаются пластичными и быстро обучаются.
+        ИСПРАВЛЕНИЕ: раньше dt считался от last_activation самого синапса, а не от момента
+        пре- и постсинаптического события, поэтому окно STDP почти никогда не срабатывало
+        и правило работало как счётчик. Теперь dt = post_time - pre_time, направления
+        учитываются отдельно. Пластичность стабилизируется по числу подтверждённых
+        совпадений (GCN/plasticity.py).
         """
         key = (source_id, target_id)
         if key not in self.synapses:
             return
         syn = self.synapses[key]
-        dt = coactivation_time - syn.last_activation
-        plastic = max(0.05, syn.plasticity)
-        if dt > 0 and dt < STDP_TIME_WINDOW:
-            # Пост-событие следует за пре-событием в разумном окне — потенциация.
-            delta = STDP_LONG_TERM_POTENTIATION * (1.0 - dt / STDP_TIME_WINDOW) * plastic
-        elif dt < 0 and abs(dt) < STDP_TIME_WINDOW:
-            # Обратный порядок — депрессия (в норме слабее и медленнее LTP).
-            delta = -STDP_LONG_TERM_DEPRESSION * (1.0 - abs(dt) / STDP_TIME_WINDOW) * plastic
-        else:
-            delta = HEBBIAN_LEARNING_RATE * 0.1 * plastic
+        params = _plasticity_params()
+        delta = stdp_delta(post_time - pre_time, syn.plasticity, params)
         syn.weight = min(SYNAPSE_MAX_WEIGHT, max(SYNAPSE_MIN_WEIGHT, syn.weight + delta))
-        syn.last_activation = coactivation_time
+        syn.pre_time = pre_time
+        syn.post_time = post_time
+        syn.last_activation = max(syn.last_activation, post_time)
+        syn.last_coactivation = post_time
         syn.coactivation_count += 1
-        syn.last_coactivation = coactivation_time
         syn.confidence = min(1.0, syn.confidence + 0.01)
-        # Метапластичность: значимое по модулю изменение постепенно "остужает" синапс.
-        if abs(delta) >= SYNAPSE_COACTIVATION_THRESHOLD * STDP_LONG_TERM_POTENTIATION:
-            syn.plasticity = max(0.05, syn.plasticity - SYNAPSE_PLASTICITY_RATE)
-        self._sync_synapse_to_gcn(source_id, target_id)
-        self._dirty = True
+        syn.plasticity = stabilized_plasticity(syn.coactivation_count, params)
 
     def _get_effective_weight(self, syn: Synapse, now: Optional[float] = None) -> float:
         if now is None:
@@ -1037,6 +1091,106 @@ class CognitiveMemory:
             self._dirty = True
         return touched
 
+    def _get_transition(self) -> Optional["TransitionModel"]:
+        """Предиктор переходов: загружается с диска один раз; None, если не принят гейтом."""
+        if getattr(self, "_transition", None) is None and not getattr(self, "_transition_checked", False):
+            self._transition_checked = True
+            path = self.base_dir / "transition.npz"
+            if path.exists():
+                try:
+                    self._transition = TransitionModel.load(str(path))
+                except Exception as e:
+                    logger.debug(f"transition: не удалось загрузить модель: {e}")
+        return getattr(self, "_transition", None)
+
+    def _train_transition_model(self, max_pairs: int = 1000) -> Dict:
+        """Обучает предиктор на парах соседних реплик (user->assistant, assistant->следующий user).
+
+        Модель сохраняется только если на отложенной выборке она лучше базового уровня
+        (популярность концептов). Иначе предыдущая модель удаляется, и predict_next её не использует.
+        """
+        if not self.use_embeddings or not self.concept_embeddings or len(self.episodic_memory) < 25:
+            return {"accepted": False, "reason": "мало данных или нет эмбеддингов"}
+        eps = self.episodic_memory[-max_pairs:]
+        src_texts, tgt_texts = [], []
+        for i, ep in enumerate(eps):
+            src_texts.append(ep.user_msg); tgt_texts.append(ep.assistant_msg)
+            if i + 1 < len(eps):
+                src_texts.append(ep.assistant_msg); tgt_texts.append(eps[i + 1].user_msg)
+        X = np.array([self._get_embedding(t) for t in src_texts], dtype=float)
+        Y = np.array([self._get_embedding(t) for t in tgt_texts], dtype=float)
+        cand = np.stack([np.asarray(v, dtype=float) for v in self.concept_embeddings.values()])
+        model, report = fit_with_gate(X, Y, cand, k=TRANSITION_TOP_K)
+        path = self.base_dir / "transition.npz"
+        if model is not None:
+            self.base_dir.mkdir(parents=True, exist_ok=True)
+            model.save(str(path))
+            self._transition = model
+        else:
+            self._transition = None
+            if path.exists():
+                path.unlink()
+        self._transition_checked = True
+        logger.info(f"[transition] {report}")
+        return report
+
+    def _scale_synapses(self) -> int:
+        """Синаптическое масштабирование: суммарная входящая/исходящая сила узла ≤ SYNAPSE_NODE_STRENGTH_CAP."""
+        weights = {k: s.weight for k, s in self.synapses.items() if s.sign > 0}
+        cap = self._get_tune()["node_strength_cap"]
+        changed = normalize_strength(weights, cap, min_weight=SYNAPSE_MIN_WEIGHT)
+        for key in changed:
+            self.synapses[key].weight = weights[key]
+            self._sync_synapse_to_gcn(*key)
+        if changed:
+            self._dirty = True
+        return len(changed)
+
+    def _get_reranker(self) -> RerankLearner:
+        """Онлайн-обучение весов гибридного поиска. Создаётся при первом обращении и грузит сохранённые веса."""
+        rr = getattr(self, "_rerank", None)
+        if rr is None:
+            prior = {"semantic": HYBRID_WEIGHT_SEMANTIC, "graph": HYBRID_WEIGHT_GRAPH,
+                     "freshness": HYBRID_WEIGHT_FRESHNESS, "confidence": HYBRID_WEIGHT_CONFIDENCE,
+                     "evidence": HYBRID_WEIGHT_EVIDENCE}
+            path = None
+            try:
+                self.base_dir.mkdir(parents=True, exist_ok=True)
+                path = str(self.base_dir / "rerank.json")
+            except OSError as e:
+                logger.warning(f"rerank: каталог недоступен, веса не сохранятся: {e}")
+            rr = RerankLearner(prior, lr=RERANK_LEARNING_RATE, l2=RERANK_L2, path=path)
+            self._rerank = rr
+            self._dynamic_weights.update(rr.weights())
+        return rr
+
+    def _record_retrieval_features(self, result: List[Dict]) -> None:
+        """Запоминает признаки каждого результата поиска, чтобы обратная связь могла обучить веса."""
+        store = getattr(self, "_retrieval_features", None)
+        if store is None:
+            store = self._retrieval_features = OrderedDict()
+        now = time.time()
+        for item in result:
+            gid = item.get("gcn_id")
+            obj = self.gcn_store.get(gid) if gid else None
+            if obj is None:
+                continue
+            age_days = max(0.0, (now - obj.created.timestamp()) / 86400.0)
+            store[gid] = {
+                "semantic": _clip01(item.get("semantic_sim", 0.0)),
+                "graph": _clip01(item.get("activation", 0.0)),
+                "freshness": 1.0 / (1.0 + age_days),
+                "confidence": _clip01(obj.confidence),
+                "evidence": _clip01(len(obj.evidence or []) / 3.0),
+            }
+            store.move_to_end(gid)
+        while len(store) > RETRIEVAL_FEATURE_CACHE_SIZE:
+            store.popitem(last=False)
+
+    @staticmethod
+    def _relation_for(syn: "Synapse") -> str:
+        return "inhibit" if syn.sign < 0 else "synapse"
+
     def _sync_synapse_to_gcn(self, src: int, tgt: int):
         syn = self.synapses.get((src, tgt))
         if not syn:
@@ -1046,7 +1200,7 @@ class CognitiveMemory:
         if fact_src and fact_tgt and fact_src.gcn_id and fact_tgt.gcn_id:
             try:
                 self.gcn_store.set_relation_weight(
-                    fact_src.gcn_id, fact_tgt.gcn_id, "synapse", syn.weight, self.user_id
+                    fact_src.gcn_id, fact_tgt.gcn_id, self._relation_for(syn), syn.weight, self.user_id
                 )
             except Exception as e:
                 logger.debug(f"GCN synapse sync failed: {e}")
@@ -1096,6 +1250,8 @@ class CognitiveMemory:
                     if neighbor in visited or neighbor not in self.facts_by_id:
                         continue
                     syn = self.synapses.get((fid, neighbor))
+                    if syn is not None and syn.sign < 0:
+                        continue  # тормозные связи в BFS не возбуждают, их учитываем ниже
                     weight = self._get_effective_weight(syn, now) if syn else 0.5
                     level_contrib[neighbor] += act * weight * decay
 
@@ -1110,6 +1266,21 @@ class CognitiveMemory:
                     break
             frontier = new_frontier
             depth += 1
+
+        # Тормозные связи: активный узел гасит другие активные узлы, с которыми связан тормозом.
+        # Затем падающие ниже порога узлы выбрасываются, кроме стартовых.
+        if INHIBITORY_SYNAPSES_ENABLED and activation_map:
+            inhibition: Dict[int, float] = defaultdict(float)
+            for fid, act in activation_map.items():
+                for neighbor in self.graph.get(fid, set()):
+                    syn = self.synapses.get((fid, neighbor))
+                    if syn is None or syn.sign >= 0 or neighbor not in activation_map:
+                        continue
+                    inhibition[neighbor] += act * self._get_effective_weight(syn, now) * decay
+            for nid, sub in inhibition.items():
+                activation_map[nid] = max(0.0, activation_map[nid] - sub)
+            activation_map = {k: v for k, v in activation_map.items()
+                              if v >= SPREADING_THRESHOLD or k in valid_seeds}
 
         for fid, act in activation_map.items():
             if fid in self.facts_by_id:
@@ -1159,7 +1330,7 @@ class CognitiveMemory:
         (in-degree + out-degree), то есть "несущие стены" графа.
         """
         if top_k is None:
-            from GCN.config_ai import IDENTITY_CORE_SIZE
+            from .config_ai import IDENTITY_CORE_SIZE
             top_k = IDENTITY_CORE_SIZE
 
         if not self.synapses:
@@ -1225,6 +1396,7 @@ class CognitiveMemory:
                 "gcn_id": obj.id,
                 "scope": obj.scope.value,
                 "via": "graph",
+                "event_time": meta.get("event_time"),
             })
         return out
 
@@ -1252,6 +1424,7 @@ class CognitiveMemory:
             query_vector = self._get_embedding(query, is_query=True).tolist()
 
         # Адаптивные веса по типу запроса (логика прежняя).
+        self._get_reranker()  # подхватывает выученные веса после перезапуска
         weights = self._dynamic_weights.copy()
         if self._is_time_sensitive(query):
             weights['freshness'] = min(0.8, weights.get('freshness', 0.15) + 0.3)
@@ -1326,6 +1499,7 @@ class CognitiveMemory:
                 "id": fid,
                 "text": text,
                 "type": item_type,
+                "event_time": meta.get("event_time") if isinstance(meta, dict) else None,
                 "timestamp": obj.created.timestamp(),
                 "score": final_score,
                 "relevance": det["relevance"],
@@ -1338,17 +1512,51 @@ class CognitiveMemory:
             })
 
         result.sort(key=lambda x: x["score"], reverse=True)
+        if LATERAL_INHIBITION_ENABLED and self.use_embeddings and len(result) > 1:
+            result = self._lateral_inhibit(result)
         result = result[:top_k]
         if activation_map:
             result.extend(self._graph_expansions(
                 {r["gcn_id"] for r in result}, activation_map,
                 exclude=set(seed_local_ids)))
 
+        self._record_retrieval_features(result)
         self._cache[cache_key] = (result, time.time())
         if len(self._cache) > self._cache_maxsize:
             oldest = sorted(self._cache.items(), key=lambda x: x[1][1])[0][0]
             del self._cache[oldest]
         return result
+
+    def _lateral_inhibit(self, result: List[Dict]) -> List[Dict]:
+        """Латеральное торможение выдачи: почти одинаковые результаты гасят друг друга.
+
+        Меняется только порядок. Набор кандидатов и их скоры в памяти не трогаются.
+        Эмбеддинги текстов кандидатов кэшируются на время вызова.
+        """
+        texts = [(r.get("text") or "") for r in result]
+        vecs: List[Optional[np.ndarray]] = [None] * len(texts)
+        try:
+            prefix = EMBEDDING_PASSAGE_PREFIX
+            encoded = self.embedder.encode([f"{prefix}{t}" if prefix else t for t in texts],
+                                           convert_to_numpy=True, batch_size=len(texts))
+            for i, v in enumerate(encoded):
+                n = float(np.linalg.norm(v))
+                vecs[i] = v / n if n > 0 else None
+        except Exception as e:
+            logger.debug(f"lateral inhibition embeddings failed: {e}")
+
+        def similarity(i: int, j: int) -> float:
+            a, b = vecs[i], vecs[j]
+            if a is None or b is None:
+                return 0.0
+            return float(np.dot(a, b))
+
+        lam = self._get_tune()["lateral_lambda"]
+        reranked = inh.lateral_rerank(result, similarity,
+                                      threshold=LATERAL_INHIBITION_THRESHOLD, lam=lam)
+        for r in reranked:
+            r.pop("score_adj", None)
+        return reranked
 
     def _is_time_sensitive(self, query: str) -> bool:
         """
@@ -1356,7 +1564,7 @@ class CognitiveMemory:
         раньше здесь лежала вторая копия списка маркеров, расходившаяся
         с оригиналом (и уже один раз ломавшаяся на захардкоженных годах).
         """
-        from GCN.web_search import is_time_sensitive_query
+        from .web_search import is_time_sensitive_query
         return is_time_sensitive_query(query)
 
     def _is_factual(self, query: str) -> bool:
@@ -1476,6 +1684,7 @@ class CognitiveMemory:
 
     async def deep_consolidation(self):
         async with self._lock:
+            self._episodes_since_deep = 0
             # Обновляем веса синапсов на основе эпизодов (локально)
             if self.episodic_memory:
                 self.episodic_memory.sort(key=lambda e: (e.importance * (1 + e.salience), e.timestamp), reverse=True)
@@ -1510,8 +1719,24 @@ class CognitiveMemory:
                         # Разносим "пре" (user) и "пост" (assistant) на 1 секунду —
                         # реальный порядок реплик внутри эпизода нам известен, даже без
                         # точных временных меток на каждую реплику в отдельности.
-                        self._hebbian_update(user_fact.id, ass_fact.id, ep.timestamp + 1.0)
-                        self._hebbian_update(ass_fact.id, user_fact.id, ep.timestamp)
+                        pre_user = ep.user_ts if ep.user_ts is not None else ep.timestamp - 1.0
+                        post_ass = ep.assistant_ts if ep.assistant_ts is not None else ep.timestamp
+                        # user -> assistant: пре=реплика пользователя, пост=ответ (dt>0 -> LTP)
+                        self._hebbian_update(user_fact.id, ass_fact.id, pre_user, post_ass)
+                        # assistant -> user: пре=ответ, пост=реплика пользователя (dt<0 -> LTD)
+                        self._hebbian_update(ass_fact.id, user_fact.id, post_ass, pre_user)
+
+            # Синаптическое масштабирование: не даём хабам бесконечно копить силу
+            try:
+                self._train_transition_model()
+            except Exception as e:
+                logger.debug(f"transition training failed: {e}")
+            self._scale_synapses()
+            if INHIBITORY_SYNAPSES_ENABLED:
+                try:
+                    self._inhibitory_homeostasis()
+                except Exception as e:
+                    logger.debug(f"inhibitory homeostasis failed: {e}")
 
             # Обновляем confidence и importance
             now = time.time()
@@ -1540,8 +1765,97 @@ class CognitiveMemory:
                 self.semantic_facts = keep
                 self._remove_facts(removed_ids)
 
+            if STABILIZER_ENABLED:
+                try:
+                    self._stabilize_deterministic()
+                    # AI-ревью стабилизатора — фоновый LLM-вызов: при AUTONOMY_ENABLED=0 не запускаем.
+                    if (STABILIZER_AI_REVIEW and AUTONOMY_ENABLED
+                            and not getattr(self, "_stab_review_running", False)):
+                        asyncio.create_task(self._ai_review_stabilizer())
+                except Exception as e:
+                    logger.debug(f"stabilizer failed: {e}")
+
             await self._schedule_save()
             logger.info(f"Deep consolidation done for {self.user_id[:16]}")
+
+    # ==================== ТОРМОЗНЫЕ СИНАПСЫ И СТАБИЛИЗАТОР ====================
+    def _state_path(self, name: str) -> str:
+        return str(self.base_dir / name)
+
+    def _get_tune(self) -> Dict[str, float]:
+        """Текущие подстраиваемые параметры. Без файла — значения из config_ai."""
+        tune = getattr(self, "_tune", None)
+        if tune is None:
+            base = getattr(self, "base_dir", None)
+            path = str(base / "stabilizer_state.json") if base is not None else None
+            if path and os.path.exists(path):
+                tune = stab.load_state(path)
+            else:
+                tune = {"lateral_lambda": LATERAL_INHIBITION_LAMBDA,
+                        "node_strength_cap": SYNAPSE_NODE_STRENGTH_CAP}
+            self._tune = tune
+        return tune
+
+    def _inhibitory_homeostasis(self) -> int:
+        """iSTDP-гомеостаз: тормоз растёт у узлов, активнее медианы, и слабеет у тихих."""
+        inh_items = [(k, s) for k, s in self.synapses.items() if s.sign < 0]
+        if not inh_items or not self.semantic_facts:
+            return 0
+        rates = {f.id: float(f.access_count) for f in self.semantic_facts}
+        top = max(rates.values()) or 1.0
+        norm = {fid: r / top for fid, r in rates.items()}
+        target = statistics.median(norm.values())
+        changed = 0
+        for (src, tgt), syn in inh_items:
+            post = norm.get(tgt, 0.0)
+            new_w = inh.clamp_inhibitory(
+                syn.weight + inh.inhibitory_delta(post, target, INHIBITORY_ETA), INHIBITORY_MAX_WEIGHT)
+            if abs(new_w - syn.weight) > 1e-9:
+                syn.weight = new_w
+                self._sync_synapse_to_gcn(src, tgt)
+                changed += 1
+        if changed:
+            self._dirty = True
+        return changed
+
+    def _stabilize_deterministic(self) -> None:
+        """Измеряет граф и готовит предложения правок. Ничего не применяет сам."""
+        edges = [(s.source_id, s.target_id, s.weight, s.sign) for s in self.synapses.values()]
+        total = len(self.semantic_facts) or 1
+        active = sum(1 for f in self.semantic_facts if f.activation > SPREADING_THRESHOLD) / total
+        self._stab_metrics = stab.compute_metrics(edges, active)
+        self._stab_proposals = stab.propose(self._stab_metrics, self._get_tune())
+
+    async def _ai_review_stabilizer(self) -> None:
+        """ИИ-рецензент: одобряет или отклоняет предложения. Не может добавлять свои правки."""
+        if getattr(self, "_stab_review_running", False):
+            return
+        self._stab_review_running = True
+        try:
+            async with self._lock:
+                metrics = getattr(self, "_stab_metrics", None)
+                proposals = list(getattr(self, "_stab_proposals", []) or [])
+            if metrics is None or not proposals:
+                return
+            prompt = stab.build_review_prompt(metrics, proposals)
+            raw = await call_llm([{"role": "user", "content": prompt}], temp=0.0, max_tokens=300)
+            approved = stab.parse_review(raw or "", proposals)
+            async with self._lock:
+                new_tune = stab.apply_approved(self._get_tune(), proposals, approved)
+                self._tune = new_tune
+                stab.save_state(self._state_path("stabilizer_state.json"), new_tune)
+                stab.append_log(self._state_path("stabilizer_log.jsonl"), {
+                    "ts": time.time(),
+                    "metrics": metrics.to_dict(),
+                    "proposals": proposals,
+                    "approved": approved,
+                    "tune": new_tune,
+                })
+            logger.info(f"Stabilizer: approved {approved} of {len(proposals)} for {self.user_id[:16]}")
+        except Exception as e:
+            logger.debug(f"AI stabilizer review failed: {e}")
+        finally:
+            self._stab_review_running = False
 
     # ==================== РАБОТА С ЦЕЛЯМИ ====================
     # Порог схожести для дедупликации целей — совпадает с
@@ -2207,7 +2521,7 @@ class GCNMemoryRouter:
     def add_knowledge(self, subject: str, predicate: str, obj: Any,
                       scope: MemoryScope = MemoryScope.PRIVATE,
                       confidence: float = 0.5, author: Optional[str] = None,
-                      source_type: str = "user_input") -> str:
+                      source_type: str = "user_input", event_time: Optional[str] = None) -> str:
         """
         Добавляет знание в соответствующий слой с учётом scope.
         Для GLOBAL использует инжекшн (дедупликация, агрегация).
@@ -2221,7 +2535,8 @@ class GCNMemoryRouter:
             type=KnowledgeType.CLAIM,
             subject=subject,
             predicate=predicate,
-            object={"value": obj},
+            # event_time — когда произошло описанное (отдельно от created и last_accessed)
+            object=({"value": obj, "event_time": event_time} if event_time else {"value": obj}),
             author=author,
             created=datetime.now(timezone.utc),
             confidence=confidence,
@@ -2587,6 +2902,7 @@ class MemoryService:
             confidence: float = 0.9,
             force_new: bool = False,
             user_explicit: bool = False,
+            event_time: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Сохраняет факт в указанный скоуп (автоопределение, если scope не задан).
@@ -2687,7 +3003,8 @@ class MemoryService:
             scope=scope_enum,
             confidence=confidence,
             author=self.user_id,
-            source_type="memory_service"
+            source_type="memory_service",
+            event_time=event_time,
         )
         # Добавляем в рабочую память соответствующего слоя
         if obj_id:
@@ -3091,12 +3408,15 @@ class MemoryService:
         ]
 
     # ===== ДОБАВЛЕННЫЙ МЕТОД =====
-    async def add_episode(self, user_msg: str, assistant_msg: str, salience: float = 0.0):
+    async def add_episode(self, user_msg: str, assistant_msg: str, salience: float = 0.0,
+                          user_ts: Optional[float] = None, assistant_ts: Optional[float] = None):
         """
         Сохраняет эпизод (диалог) в личную память пользователя.
+        user_ts / assistant_ts — реальные времена реплик; без них STDP использует fallback.
         """
         self.refresh()
-        await self.private_memory.add_episode(user_msg, assistant_msg, salience)
+        await self.private_memory.add_episode(user_msg, assistant_msg, salience,
+                                              user_ts=user_ts, assistant_ts=assistant_ts)
 
     async def shutdown(self):
         """
@@ -3134,7 +3454,7 @@ class MemoryService:
         и "Embeddings init failed ... Disabling". Закрываем только то, что
         реально жило в этом процессе; несуществующие слои не трогаем.
         """
-        from GCN.memory_graph import GCNMemoryRouter
+        from .memory_graph import GCNMemoryRouter
         if GCNMemoryRouter._shared_instance is not None:
             await GCNMemoryRouter._shared_instance.shutdown()
         if GCNMemoryRouter._global_instance is not None:

@@ -65,11 +65,11 @@ from typing import Any, Dict, List, Optional, Tuple
 # === НОВОЕ: Thompson Sampling для тем (пункт 6 — bandit-подход) ===
 import random as random_mod
 
-from GCN.llm_client import call_llm
-from GCN.web_search import is_time_sensitive_query
+from .llm_client import call_llm
+from .web_search import is_time_sensitive_query
 
 try:
-    from GCN.config_ai import (
+    from .config_ai import (
         AUTONOMY_ENABLED,
         AUTONOMY_LOOP_INTERVAL,
         AUTONOMY_LOOP_JITTER,
@@ -128,7 +128,7 @@ except ImportError:
     FEEDBACK_NEGATIVE_DECAY = 0.05
 
 try:
-    import GCN.config_ai as _cfg_ai
+    from . import config_ai as _cfg_ai
     AUTO_RESEARCH_ENABLED = getattr(_cfg_ai, "AUTO_RESEARCH_ENABLED", True)
 except ImportError:
     AUTO_RESEARCH_ENABLED = True
@@ -355,7 +355,7 @@ class AutonomyEngine:
 
         # Инициализация SelfModel и MotivationEngine
         try:
-            from GCN.cognition import SelfModel, MotivationEngine
+            from .cognition import SelfModel, MotivationEngine
 
             # Используем SelfModel контроллера если он уже есть
             self.self_model = getattr(controller, 'self_model', None)
@@ -806,7 +806,7 @@ class AutonomyEngine:
             self.queue.defer(topic, AUTONOMY_LOOP_INTERVAL * 6)
             return
 
-        from GCN.GCN import (
+        from .GCN import (
             get_latest_head, get_heads, append_snapshot, merge_heads,
         )
 

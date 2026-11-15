@@ -66,7 +66,7 @@ LLAMACPP_DEFAULTS = {
 if LLM_BACKEND == "llamacpp" and LLAMACPP_DEFAULT_MODEL:
     # для всего приложения «модель по умолчанию» — выбранная в .env GGUF
     LM_STUDIO_MODEL = LLAMACPP_DEFAULT_MODEL
-DEFAULT_MAX_TOKENS = 8096         # увеличенная длина ответа по умолчанию (было 2048)
+DEFAULT_MAX_TOKENS = 4096         # увеличенная длина ответа по умолчанию (было 2048)
 
 # -------------------------------
 # Reasoning / теги <thought>
@@ -88,7 +88,9 @@ REASONING_STOP_TOKENS: tuple = ()
 # Поэтому для ходов с включённым reasoning используем буст к обычному
 # DEFAULT_MAX_TOKENS. 4096 + 4096 = 8192 — комфортный запас и для thinking,
 # и для ответа. Если у модели context window меньше 16k — уменьшай.
-REASONING_MAX_TOKENS_BOOST = 4096
+REASONING_MAX_TOKENS_BOOST = max(
+    256, min(16000, int(os.getenv("REASONING_MAX_TOKENS_BOOST", "2048") or "2048"))
+)
 
 # -------------------------------
 # Параметры памяти (GCN)
@@ -119,7 +121,7 @@ DYNAMIC_WEIGHTS_ENABLED = True
 # и all-MiniLM-L6-v2. Для multilingual-e5-large используется 1024.
 # Реальная размерность берётся из model.get_sentence_embedding_dimension()
 # в memory_graph.py:CognitiveMemory.__init__().
-EMBEDDING_DIM = 384                # размерность векторов (по умолчанию для MiniLM)
+EMBEDDING_DIM = 1024               # multilingual-e5-large даёт 1024-мерные векторы (было 384 от MiniLM)
 USE_EMBEDDINGS = True
 GLOBAL_FACT_CONFIDENCE_THRESHOLD = 0.75
 
@@ -148,15 +150,15 @@ RESOURCE_BUDGET_LLM_CALLS = 100
 # BUGFIX: флаг был False, из-за чего AutonomyEngine (enqueue_topic/_pump_queue)
 # молча отклонял/вычищал все темы — фоновое исследование не работало вообще.
 # Legacy _auto_research по-прежнему гасится этим флагом в ai_assistant._periodic_research.
-AUTO_RESEARCH_ENABLED = True
+AUTO_RESEARCH_ENABLED = os.getenv("AUTO_RESEARCH_ENABLED", "1").strip() == "1"
 
 # -------------------------------
 # Веб-поиск
 # -------------------------------
 MAX_SEARCH_ITERATIONS = 3
 SEARCH_CACHE_TTL = 300
-PAGE_CONTENT_MAX_CHARS = 6000
-MAX_PAGES_TO_FETCH = 7
+PAGE_CONTENT_MAX_CHARS = int(os.getenv("PAGE_CONTENT_MAX_CHARS", "6000"))
+MAX_PAGES_TO_FETCH = int(os.getenv("MAX_PAGES_TO_FETCH", "7"))
 MIN_RELEVANCE_THRESHOLD = 0.28
 CHUNK_SIZE = 1200
 CHUNK_OVERLAP = 150
@@ -199,6 +201,7 @@ EASYDIFFUSION_URL = os.getenv("EASYDIFFUSION_URL", "http://localhost:7860")
 EASYDIFFUSION_ENDPOINT = "/v1/sdapi/v1/txt2img"
 EASYDIFFUSION_TIMEOUT = 140
 EASYDIFFUSION_MODEL = os.getenv("EASYDIFFUSION_MODEL", "realismByStableYogi_ponyV65.safetensors").strip()
+EASYDIFFUSION_VAE = os.getenv("EASYDIFFUSION_VAE", "").strip()
 
 EASYDIFFUSION_DEFAULT_STEPS = int(os.getenv("EASYDIFFUSION_STEPS", "25"))
 EASYDIFFUSION_DEFAULT_WIDTH = int(os.getenv("EASYDIFFUSION_WIDTH", "512"))
@@ -243,10 +246,16 @@ def _int_env(name: str, default: int, lo: int = 1, hi: int = 10) -> int:
 MAX_TOOL_ITERATIONS = _int_env("MAX_TOOL_ITERATIONS", 3)
 # Максимум раундов, если модель попросила перепланирование после ошибки
 MAX_TOOL_ITERATIONS_DYNAMIC = _int_env("MAX_TOOL_ITERATIONS_DYNAMIC", 7)
+# Агентный цикл (GCN/tool_router.py): модель сама решает, вызывать ли следующий инструмент.
+AGENT_MAX_ROUNDS = _int_env("AGENT_MAX_ROUNDS", 6)          # раундов решения на один ход
+AGENT_MAX_CALLS = _int_env("AGENT_MAX_CALLS", 12)           # всего вызовов инструментов на ход
+AGENT_STUCK_LIMIT = _int_env("AGENT_STUCK_LIMIT", 2)        # повторов одного вызова до остановки
+AGENT_MAX_CONSECUTIVE_FAILURES = _int_env("AGENT_MAX_CONSECUTIVE_FAILURES", 4)
+TOOL_NATIVE_MAX = _int_env("TOOL_NATIVE_MAX", 14)           # сколько инструментов видит модель за раз
 
 # Лимит рассуждений модели (в символах), прежде чем ответ начат. Если модель думает
 # дольше, запрос повторяется без рассуждений. 0 — лимит выключен.
-REASONING_MAX_CHARS = _int_env("REASONING_MAX_CHARS", 6000, lo=0, hi=200000)
+REASONING_MAX_CHARS = _int_env("REASONING_MAX_CHARS", 3000, lo=0, hi=200000)
 
 # ИСПРАВЛЕНИЕ (рассинхронизация клиентского и серверного таймаута MCP):
 # mcp_client_manager.MCPToolManager.call_tool раньше всегда ждал ровно
@@ -341,8 +350,8 @@ CHAT_TOOL_EXCLUDE = {
     # внешний ИИ: сеанс и повторная идентичность, в чате не нужны
     "session_start", "remember_with_handshake",
     # идентичность: в чате есть internal__*, MCP-версии нужны только внешнему ИИ
-    "contribute_to_identity", "merge_identity_branches", "search_identity_chain",
-    "get_identity_chain", "invalidate_identity",
+    # (запись личности — только в чате: identity_propose / identity_commit; MCP её не пишет)
+    "search_identity_chain", "get_identity_chain",
 }
 
 # -------------------------------
@@ -528,6 +537,10 @@ GROUNDED_ANSWER_TEMP = 0.4
 RESPONSE_VERIFICATION_ENABLED = True
 VERIFICATION_MIN_WORDS = 12
 VERIFICATION_MAX_TOKENS = 150
+# Лимит на «материалы» (память/поиск/инструменты), которые уходят верификатору
+VERIFY_EVIDENCE_MAX_CHARS = 4000
+# Лимит на один результат инструмента в контексте модели (символов)
+TOOL_RESULT_MAX_CHARS = 5000
 
 # -------------------------------
 # Планирование подзадач перед ReAct-циклом инструментов — пункт №4
@@ -608,7 +621,8 @@ PLAN_CRITIC_MAX_MISSED = 3
 # Автономность и проактивность (GCN/autonomy.py)
 # =====================================================================
 # Мастер-выключатель движка. False — прежние фоновые циклы работают как раньше.
-AUTONOMY_ENABLED = True
+# Включено по умолчанию (прежнее поведение). Выключить: AUTONOMY_ENABLED=0 в .env.
+AUTONOMY_ENABLED = os.getenv("AUTONOMY_ENABLED", "1").strip() == "1"
 # Базовый интервал главного цикла движка (сек) + дробный джиттер, чтобы
 # несколько пользователей не будили локальную LLM синхронно.
 AUTONOMY_LOOP_INTERVAL = 45
@@ -681,6 +695,8 @@ IDENTITY_CONSISTENCY_THRESHOLD = 0.35
 
 # Сколько фактов составлять "Ядро" (несущие стены графа)
 IDENTITY_CORE_SIZE = 7
+# Сколько РАЗНЫХ дней должна подтвердиться формулировка, прежде чем она станет идентичностью.
+IDENTITY_MIN_DAYS = int(os.getenv("IDENTITY_MIN_DAYS", "2"))
 
 
 # [fast-path-patch]
@@ -699,3 +715,58 @@ GRAPH_EXPANSION_MIN_ACTIVATION = float(os.getenv("GRAPH_EXPANSION_MIN_ACTIVATION
 GRAPH_EXPANSION_RELEVANCE = float(os.getenv("GRAPH_EXPANSION_RELEVANCE", "0.30"))
 MOTIVATION_MAX_ACTIVE = int(os.getenv("MOTIVATION_MAX_ACTIVE", "3"))
 MOTIVATION_MAX_PER_DAY = int(os.getenv("MOTIVATION_MAX_PER_DAY", "4"))
+
+# ====================================================================
+# Улучшения памяти и нейросетевой части (см. CHANGES.md)
+# ====================================================================
+# Синаптическое масштабирование: суммарная входящая/исходящая сила узла не выше этого значения
+SYNAPSE_NODE_STRENGTH_CAP = float(os.getenv("SYNAPSE_NODE_STRENGTH_CAP", "3.0"))
+# Метапластичность: пластичность = max(FLOOR, initial / (1 + K * подтверждения))
+PLASTICITY_FLOOR = float(os.getenv("PLASTICITY_FLOOR", "0.05"))
+PLASTICITY_STABILIZE_K = float(os.getenv("PLASTICITY_STABILIZE_K", "0.1"))
+# Консолидация по числу новых эпизодов (в дополнение к таймеру)
+DEEP_CONSOLIDATION_EPISODE_TRIGGER = int(os.getenv("DEEP_CONSOLIDATION_EPISODE_TRIGGER", "20"))
+# Онлайн-обучение весов ранжирования по обратной связи
+RERANK_LEARNING_RATE = float(os.getenv("RERANK_LEARNING_RATE", "0.01"))
+RERANK_L2 = float(os.getenv("RERANK_L2", "0.05"))
+RETRIEVAL_FEATURE_CACHE_SIZE = int(os.getenv("RETRIEVAL_FEATURE_CACHE_SIZE", "500"))
+# Бюджет символов блока долговременной памяти в промпте
+MEMORY_CONTEXT_MAX_CHARS = int(os.getenv("MEMORY_CONTEXT_MAX_CHARS", "3500"))
+
+# Калиброванные пороги (tools/calibrate_thresholds.py пишет GCN/calibration.json).
+# Если файла нет — остаются значения выше.
+def _apply_calibration_overrides():
+    import json as _json
+    _path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "calibration.json")
+    try:
+        with open(_path, "r", encoding="utf-8") as _fh:
+            _data = _json.load(_fh)
+    except (OSError, ValueError):
+        return
+    g = globals()
+    for _key in ("IDENTITY_HANDSHAKE_THRESHOLD", "IDENTITY_CONSISTENCY_THRESHOLD"):
+        if isinstance(_data.get(_key), (int, float)):
+            g[_key] = float(_data[_key])
+
+# NLI для противоречий: без NLI_MODEL используется только LLM-верификатор
+NLI_MODEL = os.getenv("NLI_MODEL", "")
+NLI_LABELS = tuple(x.strip() for x in os.getenv("NLI_LABELS", "contradiction,entailment,neutral").split(","))
+NLI_DECISION_THRESHOLD = float(os.getenv("NLI_DECISION_THRESHOLD", "0.85"))
+# Предиктор переходов: сколько кандидатов учитывать при предсказании
+TRANSITION_TOP_K = int(os.getenv("TRANSITION_TOP_K", "5"))
+
+# ---- Тормозные синапсы, латеральное торможение, стабилизатор ----
+# Латеральное торможение только переупорядочивает выдачу (набор кандидатов не меняется),
+# поэтому включено по умолчанию. Тормозные синапсы меняют активацию графа, поэтому выключены,
+# пока не проверены на копии данных. Стабилизатор меняет параметры, поэтому тоже выключен.
+LATERAL_INHIBITION_ENABLED = os.getenv("LATERAL_INHIBITION_ENABLED", "1") == "1"
+LATERAL_INHIBITION_THRESHOLD = float(os.getenv("LATERAL_INHIBITION_THRESHOLD", "0.9"))
+LATERAL_INHIBITION_LAMBDA = float(os.getenv("LATERAL_INHIBITION_LAMBDA", "0.3"))
+INHIBITORY_SYNAPSES_ENABLED = os.getenv("INHIBITORY_SYNAPSES_ENABLED", "0") == "1"
+INHIBITORY_INITIAL_WEIGHT = 0.2
+INHIBITORY_MAX_WEIGHT = 1.0
+INHIBITORY_ETA = 0.01
+STABILIZER_ENABLED = os.getenv("STABILIZER_ENABLED", "0") == "1"
+STABILIZER_AI_REVIEW = os.getenv("STABILIZER_AI_REVIEW", "1") == "1"
+
+_apply_calibration_overrides()

@@ -1328,6 +1328,7 @@ body.light-theme .search-icon {
   border-radius: 20px;
   border-top-left-radius: 4px;
   min-width: 0;
+  max-width: 100%;
   color: var(--text-main);
 }
 .message.sent .content {
@@ -1342,6 +1343,7 @@ body.light-theme .search-icon {
   font-size: 15px;
   line-height: 1.5;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   word-break: break-word;
 }
 .message .content strong { font-weight: 700; }

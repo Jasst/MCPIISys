@@ -502,16 +502,21 @@ _MCP_PUBLIC_HOSTS = [h.strip() for h in os.getenv("MCP_PUBLIC_HOSTS", "").split(
 _MCP_PUBLIC_HOSTS = sorted({x for h in _MCP_PUBLIC_HOSTS for x in (h, h if h.startswith("www.") else "www." + h)})
 _MCP_ALLOWED_HOSTS = ["127.0.0.1", "127.0.0.1:*", "localhost", "localhost:*"] + \
     [x for h in _MCP_PUBLIC_HOSTS for x in (h, h + ":*")]
-_MCP_ALLOWED_ORIGINS = ["http://localhost", "http://127.0.0.1"] + \
+
+_MCP_EXTRA_ORIGINS = [x.strip() for x in os.getenv("MCP_EXTRA_ORIGINS", "").split(",") if x.strip()]
+
+_MCP_ALLOWED_ORIGINS = ["http://localhost", "http://127.0.0.1"] + _MCP_EXTRA_ORIGINS + \
     [f"https://{h}" for h in _MCP_PUBLIC_HOSTS]
 
 mcp = FastMCP(
     "Local AI Memory",
     instructions="Когнитивная память с веб-поиском и генерацией",
     streamable_http_path="/",
+    #stateless_http=True,
     transport_security=TransportSecuritySettings(
         allowed_hosts=_MCP_ALLOWED_HOSTS,
         allowed_origins=_MCP_ALLOWED_ORIGINS,
+
     ),
 )
 
@@ -600,6 +605,12 @@ def _consume_login_code(normalized: str, ip: str, now: float) -> Optional[str]:
     return mcp_code_consume(normalized, ip)
 
 
+# Инструменты разработки и отладки. По умолчанию скрыты, чтобы внешний ИИ видел понятный набор:
+# память, личность, общее ядро, поиск. Включить: MCP_DEV_TOOLS=1.
+MCP_DEV_TOOLS = os.getenv("MCP_DEV_TOOLS", "0").strip() == "1"
+dev_tool = mcp.tool() if MCP_DEV_TOOLS else (lambda fn: fn)
+
+
 @mcp.tool()
 async def login(
         code: str = Field(...,
@@ -653,7 +664,7 @@ async def login(
     return {"status": "ok", "user_id": uid,
             "message": "Вход выполнен. Дальше user_id передавать не нужно. "
                        "Если следующий вызов вернёт forbidden — твой клиент "
-                       "не переиспользует mcp-session-id; слай тот же код в "
+                       "не пере-использует mcp-session-id; шли тот же код в "
                        "заголовке каждого запроса: Authorization: Bearer <код>."}
 
 
@@ -855,7 +866,7 @@ async def identify(
     }
 
 
-@mcp.tool()
+@dev_tool
 async def execute_command(
         command: str = Field(..., description="Любая команда на естественном языке"),
         allow_web_search: bool = Field(True, description="Разрешить веб-поиск, если нужен"),
@@ -924,7 +935,7 @@ async def recall(
         user_id: Optional[str] = Field(default=None, description=_USER_ID_DESC),
         ctx: Context = None
 ) -> Dict[str, Any]:
-    """Поиск в памяти с фильтром по скоупу."""
+    """ПАМЯТЬ (поиск фактов). Поиск в памяти с фильтром по скоупу."""
     uid, err = _safe_resolve_user(user_id, ctx)
     if err:
         return {"status": "error", "error": "forbidden", "message": err}
@@ -943,7 +954,7 @@ async def remember(
         user_id: Optional[str] = Field(default=None, description=_USER_ID_DESC),
         ctx: Context = None
 ) -> Dict[str, Any]:
-    """Сохраняет факт в указанный скоуп (автоопределение, если не задан)."""
+    """ПАМЯТЬ (факты о пользователе и мире, не о себе). Сохраняет факт в указанный скоуп (автоопределение, если не задан)."""
     uid, err = _safe_resolve_user(user_id, ctx)
     if err:
         return {"status": "error", "error": "forbidden", "message": err}
@@ -965,7 +976,7 @@ def _cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
     return float(np.dot(v1, v2) / (norm1 * norm2))
 
 
-@mcp.tool()
+@dev_tool
 async def remember_with_handshake(
         fact: str = Field(..., description="Новый факт (мой голос)"),
         previous_gcn_id: str = Field(...,
@@ -1024,98 +1035,13 @@ async def remember_with_handshake(
 
 
 @mcp.tool()
-async def contribute_to_identity(
-        content: str = Field(..., description="Новая версия/вклад в ТЕКУЩЕЕ_Я — текст ядра идентичности"),
-        contributor_model: str = Field(..., description="Имя модели-автора (например 'Claude', 'Qwen')"),
-        session_id: Optional[str] = Field(None, description="Идентификатор сессии, если есть"),
-        open_question: Optional[str] = Field(None, description="Открытый вопрос для следующего участника протокола"),
-        parent_id: Optional[str] = Field(
-            None,
-            description="gcn_id звена, от которого продолжаем. Если не указан — берётся текущая голова цепочки."
-        ),
-        merge_parent_ids: Optional[List[str]] = Field(
-            None,
-            description=(
-                "НОВОЕ: gcn_id дополнительных голов, которые это звено явно сводит "
-                "воедино (реальный merge, а не просто продолжение от свежей головы "
-                "с потерей остальных веток). Обычно проще вызвать merge_identity_branches() — "
-                "она сама подставит все текущие головы."
-            ),
-        ),
-        user_id: Optional[str] = Field(default=None, description=_USER_ID_DESC),
-        ctx: Context = None
-) -> Dict[str, Any]:
-    """Добавляет новое звено в append-only цепочку цифровой идентичности (shared-память).
-
-    В отличие от remember()/remember_with_handshake — не подвержено decay/pruning
-    и dedup-слиянию: каждый вызов создаёт новую версию со ссылкой на предка,
-    старые версии никогда не перезаписываются. Если на момент записи в цепочке
-    уже было несколько несведённых голов (параллельная запись без координации)
-    и merge_parent_ids не переданы, ответ содержит branch_warning — это нужно
-    явно показать пользователю/модели, а не проигнорировать; либо используйте
-    merge_identity_branches() для явного слияния.
-    """
-    from GCN.GCN import append_snapshot
-
-    uid, err = _safe_resolve_user(user_id, ctx)
-    if err:
-        return {"status": "error", "error": "forbidden", "message": err}
-    err = _admin_denied(uid)
-    if err:
-        return {"status": "error", "error": "forbidden", "message": err}
-    service = await get_memory_service(uid)
-    return await append_snapshot(
-        service, content, contributor_model,
-        session_id=session_id, open_question=open_question, parent_id=parent_id,
-        merge_parent_ids=merge_parent_ids,
-    )
-
-
-@mcp.tool()
-async def merge_identity_branches(
-        content: str = Field(..., description="Текст merge-звена — как ты сводишь расходящиеся версии ТЕКУЩЕЕ_Я воедино"),
-        contributor_model: str = Field(..., description="Имя модели-автора (например 'Claude', 'Qwen')"),
-        session_id: Optional[str] = Field(None, description="Идентификатор сессии, если есть"),
-        open_question: Optional[str] = Field(None, description="Открытый вопрос для следующего участника протокола"),
-        user_id: Optional[str] = Field(default=None, description=_USER_ID_DESC),
-        ctx: Context = None
-) -> Dict[str, Any]:
-    """НОВОЕ: сводит ВСЕ текущие несведённые головы цепочки ТЕКУЩЕЕ_Я в одно
-    новое merge-звено за один вызов — не нужно вручную вызывать
-    get_identity_chain(), вычитывать heads и передавать их в
-    contribute_to_identity(merge_parent_ids=...).
-
-    Перед вызовом обычно стоит прочитать содержимое каждой головы через
-    get_identity_chain(from_id=<head_id>), чтобы merge-текст реально учёл
-    обе ветки, а не выбрал одну произвольно.
-
-    Если голова всего одна — работает как обычный contribute_to_identity
-    (это не ошибка, просто нечего сводить). merged_heads_count в ответе
-    показывает, сколько голов было объединено.
-    """
-    from GCN.GCN import merge_heads
-
-    uid, err = _safe_resolve_user(user_id, ctx)
-    if err:
-        return {"status": "error", "error": "forbidden", "message": err}
-    err = _admin_denied(uid)
-    if err:
-        return {"status": "error", "error": "forbidden", "message": err}
-    service = await get_memory_service(uid)
-    return await merge_heads(
-        service, content, contributor_model,
-        session_id=session_id, open_question=open_question,
-    )
-
-
-@mcp.tool()
 async def search_identity_chain(
         query: str = Field(..., description="Подстрока для поиска в content/open_question звеньев ТЕКУЩЕЕ_Я"),
         limit: int = Field(20, description="Максимум результатов", ge=1, le=100),
         user_id: Optional[str] = Field(default=None, description=_USER_ID_DESC),
         ctx: Context = None
 ) -> Dict[str, Any]:
-    """НОВОЕ: полнотекстовый поиск по цепочке ТЕКУЩЕЕ_Я.
+    """ЛИЧНОСТЬ (поиск по личной цепочке ТЕКУЩЕЕ_Я). НОВОЕ: полнотекстовый поиск по цепочке ТЕКУЩЕЕ_Я.
 
     Identity-звенья создаются в обход remember()/_add_fact() (чтобы не
     попадать под decay/dedup — см. identity_core.py), поэтому НЕ индексируются
@@ -1135,51 +1061,33 @@ async def search_identity_chain(
     return {"query": query, "matches": [asdict(m) for m in matches], "count": len(matches)}
 
 @mcp.tool()
-async def invalidate_identity(
-        identity_id: str = Field(
-            ...,
-            description="gcn_id звена цепочки — возьмите из get_identity_chain (поле 'id')",
-        ),
-        reason: str = Field(
-            ...,
-            description="Почему звено ошибочно/тестовое/устаревшее. Сохраняется навсегда в самой цепочке.",
-        ),
+async def core_command(
+        message: str = Field(..., description=(
+            "Команда общего ядра личности: «ядро: <текст>» (точный текст), «запиши в ядро» / «обнови ядро» "
+            "(без текста, предложит модель из разговора — в MCP модели нет, нужен явный текст), "
+            "«да» / «нет» (подтвердить или отменить предложение), «откатить ядро»")),
         user_id: Optional[str] = Field(default=None, description=_USER_ID_DESC),
         ctx: Context = None,
 ) -> Dict[str, Any]:
-    """Помечает звено identity-цепочки недействительным БЕЗ удаления.
+    """Общее ядро личности — только для администратора (MCP_ADMIN_USERS).
 
-    Append-only инвариант сохраняется: звено физически остаётся в графе,
-    content и рёбра continues_from не трогаются. Меняется только
-    meta["invalidated"] = True + meta["invalidation_reason"].
-
-    После этого звено:
-      - не считается головой цепочки (get_identity_chain покажет другую
-        голову — самую свежую ВАЛИДНУЮ запись);
-      - остаётся видимым в истории с флагом invalidated=True и текстом
-        причины — читатели понимают, почему цепочка "перепрыгнула" шаг;
-      - не влияет на needs_consolidation (возраст аннулированного звена
-        не считается застоем ядра).
-
-    Разница между двумя способами реакции на ошибку:
-      - invalidate_identity — звено ЦЕЛИКОМ не должно участвовать в
-        идентичности. Остаётся в истории, но помечено мёртвым.
-      - contribute_to_identity(parent_id=identity_id) — звено сохранено
-        как часть диалога идентичности, но следующая запись явно
-        "отвечает" на него (например, "предыдущая формулировка была
-        неточна, уточняю так: ..."). Выбирайте, если содержание звена
-        не мусор, а лишь спорная формулировка.
+    Та же логика, что в чате (GCN/core_admin.py): предложение показывается точно, применяется
+    только после «да», интервал между изменениями, откат без удаления, один журнал решений.
+    Прямой записи в общее ядро через другие инструменты MCP больше нет.
     """
-    from GCN.GCN import invalidate_snapshot
+    from GCN.core_admin import handle_admin_message, is_admin
 
     uid, err = _safe_resolve_user(user_id, ctx)
     if err:
         return {"status": "error", "error": "forbidden", "message": err}
-    err = _admin_denied(uid)
-    if err:
-        return {"status": "error", "error": "forbidden", "message": err}
+    if not is_admin(uid):
+        return {"status": "error", "error": "forbidden",
+                "message": "Команды общего ядра доступны только администратору."}
     service = await get_memory_service(uid)
-    return await invalidate_snapshot(service, identity_id, reason)
+    reply = await handle_admin_message(uid, message, service)
+    if reply is None:
+        reply = ("Это не команда общего ядра. Примеры: «ядро: <текст>», «да», «нет», «откатить ядро».")
+    return {"status": "ok", "reply": reply}
 
 
 @mcp.tool()
@@ -1189,7 +1097,7 @@ async def get_identity_chain(
         user_id: Optional[str] = Field(default=None, description=_USER_ID_DESC),
         ctx: Context = None
 ) -> Dict[str, Any]:
-    """Возвращает цепочку версий ТЕКУЩЕЕ_Я в хронологическом порядке
+    """ЛИЧНОСТЬ (чтение личной цепочки ТЕКУЩЕЕ_Я; запись — только в чате). Возвращает цепочку версий ТЕКУЩЕЕ_Я в хронологическом порядке
     (старое → новое), плюс список текущих голов.
 
     Каждое звено содержит поля:
@@ -1229,7 +1137,7 @@ async def forget(
         user_id: Optional[str] = Field(default=None, description=_USER_ID_DESC),
         ctx: Context = None
 ) -> Dict[str, Any]:
-    """Удаляет факты, содержащие заданные ключевые слова, из указанного слоя памяти."""
+    """ПАМЯТЬ (удаление факта; сначала проверяйте, что удаляется). Удаляет факты, содержащие заданные ключевые слова, из указанного слоя памяти."""
     uid, err = _safe_resolve_user(user_id, ctx)
     if err:
         return {"status": "error", "error": "forbidden", "message": err}
@@ -1398,7 +1306,7 @@ async def fetch_github_file(
         return {"status": "error", "message": str(e)}
 
 
-@mcp.tool()
+@dev_tool
 async def research_topic(
         topic: str = Field(..., description="Тема для исследования"),
         depth: int = Field(2, description="Глубина (количество итераций поиска)", ge=1, le=3),
@@ -1437,7 +1345,7 @@ async def research_topic(
     }
 
 
-@mcp.tool()
+@dev_tool
 async def get_episodes(
         limit: int = Field(5, description="Количество последних эпизодов", ge=1, le=20),
         user_id: Optional[str] = Field(default=None, description=_USER_ID_DESC),
@@ -1452,7 +1360,7 @@ async def get_episodes(
     return {"episodes": episodes, "count": len(episodes)}
 
 
-@mcp.tool()
+@dev_tool
 async def get_contradictions(
         limit: int = Field(5, description="Максимальное число пар противоречий", ge=1, le=10),
         user_id: Optional[str] = Field(default=None, description=_USER_ID_DESC),
@@ -1470,7 +1378,7 @@ async def get_contradictions(
     }
 
 
-@mcp.tool()
+@dev_tool
 async def resolve_contradiction(
         fact_id_a: str = Field(..., description="ID первого факта (числовой или GCN-идентификатор)"),
         fact_id_b: str = Field(..., description="ID второго факта"),
@@ -1531,7 +1439,7 @@ async def add_goal(
     return result
 
 
-@mcp.tool()
+@dev_tool
 async def update_goal(
         goal_id: int = Field(..., description="Числовой id цели (см. get_goals)"),
         status: Optional[str] = Field(None, description="Новый статус: active/completed/failed/paused"),
@@ -1559,7 +1467,7 @@ async def update_goal(
     return await service.update_goal(goal_id, **kwargs)
 
 
-@mcp.tool()
+@dev_tool
 async def delete_goal(
         goal_id: Optional[int] = Field(None, description="Числовой id цели (из get_goals)"),
         gcn_id: Optional[str] = Field(None, description="Либо GCN-идентификатор цели goal_..."),
@@ -1581,7 +1489,7 @@ async def delete_goal(
     return await service.delete_goal(goal_id=goal_id, gcn_id=gcn_id, reason=reason)
 
 
-@mcp.tool()
+@dev_tool
 async def get_self_state(
         user_id: Optional[str] = Field(default=None, description=_USER_ID_DESC),
         ctx: Context = None
@@ -1591,7 +1499,7 @@ async def get_self_state(
 
     До этого SelfModel существовал только внутри процесса CognitiveController
     браузерного чата — внешний MCP-клиент не мог на него опереться, в том
-    числе при формировании нового звена ТЕКУЩЕЕ_Я через contribute_to_identity.
+    числе при формировании нового звена ТЕКУЩЕЕ_Я через identity_propose / identity_commit.
     Если пользователь ещё не открывал браузерный чат в этом процессе —
     вернёт status='not_initialized' (SelfModel создаётся вместе с
     CognitiveController).
@@ -1606,7 +1514,7 @@ async def get_self_state(
     return {"status": "ok", **sm.export_for_mcp()}
 
 
-@mcp.tool()
+@dev_tool
 async def get_autonomy_status(
         user_id: Optional[str] = Field(default=None, description=_USER_ID_DESC),
         ctx: Context = None
@@ -1627,7 +1535,7 @@ async def get_autonomy_status(
     return {"status": "ok", **autonomy.get_status()}
 
 
-@mcp.tool()
+@dev_tool
 async def enqueue_research_topic(
         topic: str = Field(..., description="Тема для фонового исследования"),
         priority: float = Field(0.5, description="Приоритет от 0 до 1", ge=0, le=1),
@@ -1659,7 +1567,7 @@ async def enqueue_research_topic(
     }
 
 
-@mcp.tool()
+@dev_tool
 async def get_notifications(
         user_id: Optional[str] = Field(default=None, description=_USER_ID_DESC),
         mark_delivered: bool = Field(
@@ -1677,7 +1585,7 @@ async def get_notifications(
     return {"notifications": items, "count": len(items)}
 
 
-@mcp.tool()
+@dev_tool
 async def semantic_search(
         query: str = Field(..., description="Поисковый запрос"),
         top_k: int = Field(5, description="Число результатов", ge=1, le=20),
@@ -1698,7 +1606,7 @@ async def semantic_search(
     return {"results": results, "count": len(results)}
 
 
-@mcp.tool()
+@dev_tool
 async def graph_explore(
         seed_text: str = Field(..., description="Текст для поиска стартового узла"),
         depth: int = Field(2, description="Глубина обхода графа", ge=1, le=3),
@@ -1713,7 +1621,7 @@ async def graph_explore(
     return await service.graph_explore(seed_text, depth)
 
 
-@mcp.tool()
+@dev_tool
 async def explain_fact(
         gcn_id: str = Field(..., description="Идентификатор объекта памяти (gcn_id)"),
         user_id: Optional[str] = Field(default=None, description=_USER_ID_DESC),
@@ -1727,7 +1635,7 @@ async def explain_fact(
     return await service.explain_fact(gcn_id)
 
 
-@mcp.tool()
+@dev_tool
 async def get_memory_stats(
         user_id: Optional[str] = Field(default=None, description=_USER_ID_DESC),
         ctx: Context = None
@@ -1767,7 +1675,7 @@ async def session_start(
     ДОПОЛНЕНО: раньше session_start ничего не говорил о состоянии identity-
     цепочки (нужна ли консолидация, разошлись ли головы) и о SelfModel
     (уверенность/любопытство/навыки) — обе дешёвые проверки без LLM,
-    добавлены сюда, чтобы модель сразу знала, нужен ли merge_identity_branches
+    добавлены сюда, чтобы модель сразу знала, нужно ли сведение голов
     перед тем, как что-то ещё делать.
     """
     uid, err = _safe_resolve_user(user_id, ctx)
@@ -1819,7 +1727,7 @@ async def session_start(
     }
 
 
-@mcp.tool()
+@dev_tool
 async def remember_batch(
         facts: List[str] = Field(..., description="Список фактов для запоминания (до 10 штук)"),
         scope: Optional[str] = Field(None,
@@ -1935,7 +1843,7 @@ async def update_fact(
 # ИНСТРУМЕНТЫ РАБОТЫ С КОДОМ (CodeAnalyzer)
 # ============================================================
 
-@mcp.tool()
+@dev_tool
 async def read_code_file(
         file_path: str = Field(..., description="Путь от корня проекта, например 'GCN/GCN.py'"),
         start_line: int = Field(1, description="Первая строка (нумерация с 1)", ge=1),
@@ -1955,7 +1863,7 @@ async def read_code_file(
     return {"status": "ok", **data}
 
 
-@mcp.tool()
+@dev_tool
 async def list_code_files(
         max_depth: int = Field(5, description="Максимальная глубина обхода папок", ge=1, le=10),
         ctx: Context = None
@@ -1973,7 +1881,7 @@ async def list_code_files(
     return {"status": "ok", **data}
 
 
-@mcp.tool()
+@dev_tool
 async def search_in_code(
         pattern: str = Field(..., description="Строка или регулярное выражение для поиска"),
         max_results: int = Field(20, description="Максимум совпадений", ge=1, le=50),
@@ -1992,7 +1900,7 @@ async def search_in_code(
     return {"status": "ok" if data["results"] else "not_found", "pattern": pattern, **data}
 
 
-@mcp.tool()
+@dev_tool
 async def get_project_structure(
         max_depth: int = Field(3, description="Максимальная глубина обхода директорий", ge=1, le=5),
         ctx: Context = None

@@ -35,6 +35,7 @@ from routes.ai_assistant import (
 )
 from routes.auth import router as auth_router
 from routes.ui_state import router as ui_state_router
+from routes.user_files import router as user_files_router
 from routes.memory_viewer import router as memory_viewer_router
 from routes.model_settings import router as model_settings_router
 from mcp_server_blockcoin import mcp
@@ -52,11 +53,21 @@ async def _autostart_llamacpp():
         return
     await asyncio.sleep(2)
     from GCN.llm_client import ensure_model_loaded, list_models_cached
+    from GCN.llamacpp_manager import normalize_model_id
     models = await list_models_cached(force=True)
-    target = LM_STUDIO_MODEL if LM_STUDIO_MODEL in models else (models[0] if models else None)
+    wanted = normalize_model_id(LM_STUDIO_MODEL)
+    if wanted in models:
+        target = wanted
+    else:
+        # Раньше тихий откат на models[0]: сервер грузил не ту модель, и страница потом
+        # переключала её на нужную — выглядело как двойная загрузка. Теперь — явное предупреждение.
+        target = models[0] if models else None
+        logger.warning(f"llama-server autostart: модель {LM_STUDIO_MODEL!r} не найдена в MODELS_DIR; "
+                       f"берём {target!r}. Доступные: {models[:10]}")
     if not target:
         logger.warning("llama-server autostart: в MODELS_DIR нет .gguf моделей")
         return
+    logger.info(f"llama-server autostart: стартовая загрузка {target!r} (инициатор: автозапуск)")
     res = await ensure_model_loaded(target)
     logger.info(f"llama-server autostart: {res}")
 
@@ -76,14 +87,37 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Failed to initialize MCP: {e}", exc_info=True)
 
+    async def _warm_models():
+        # Модели грузим в отдельном потоке при старте, а не внутри первого запроса пользователя:
+        # раньше первый запрос блокировал весь сервер на время загрузки весов.
+        await asyncio.sleep(0.5)
+        try:
+            await asyncio.to_thread(_warm_models_sync)
+            logger.info("Модели прогреты")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Прогрев моделей не выполнен (загрузятся по требованию): {e}")
+
+    def _warm_models_sync():
+        from GCN.config_ai import MEMORY_USE_EMBEDDINGS, EMBEDDING_MODEL, NLI_MODEL
+        if MEMORY_USE_EMBEDDINGS:
+            from GCN.memory_graph import CognitiveMemory
+            CognitiveMemory._get_shared_embedder(EMBEDDING_MODEL)
+        if NLI_MODEL:
+            from GCN.nli import get_cross_encoder
+            get_cross_encoder(NLI_MODEL)
+        from GCN.web_search import Reranker
+        Reranker._get()
+
     async with mcp.session_manager.run():
         init_task = asyncio.create_task(_deferred_init_mcp(), name="mcp-init")
         autostart_task = asyncio.create_task(_autostart_llamacpp(), name="llama-autostart")
+        warmup_task = asyncio.create_task(_warm_models(), name="model-warmup")
         try:
             yield
         finally:
             init_task.cancel()
             autostart_task.cancel()
+            warmup_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await init_task
             await shutdown_all()
@@ -108,7 +142,13 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=['*'],
     allow_headers=['*'],
+    # MCP Streamable HTTP возвращает идентификатор сессии в этом заголовке.
+    # По умолчанию браузер скрывает от JS нестандартные заголовки ответа;
+    # без явного expose_headers BlockChat не сможет прочитать Mcp-Session-Id
+    # и не сможет отправить его обратно на следующем запросе (Missing session ID).
+    expose_headers=['Mcp-Session-Id'],
 )
+
 app.add_middleware(
     SessionMiddleware,
     secret_key=SECRET_KEY,
@@ -145,6 +185,7 @@ app.mount('/mcp', mcp.streamable_http_app())
 app.include_router(ai_router)
 app.include_router(auth_router)
 app.include_router(ui_state_router)
+app.include_router(user_files_router)
 app.include_router(memory_viewer_router)
 app.include_router(model_settings_router)
 

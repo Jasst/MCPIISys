@@ -23,7 +23,7 @@ from typing import Dict, List, Optional
 
 import aiohttp
 
-from GCN.config_ai import (
+from .config_ai import (
     LLAMACPP_CUDA_DEVICE_ORDER,
     LLAMACPP_DEFAULTS,
     LLAMACPP_EXTRA_ARGS,
@@ -134,9 +134,20 @@ def find_mmproj(model_path: str) -> Optional[str]:
     return str(best)
 
 
+def normalize_model_id(value: str) -> str:
+    """Приводит id модели к виду, в котором его отдаёт scan_models(): прямые слэши,
+    без ведущего './' и пробелов. Так LLAMACPP_DEFAULT_MODEL, записанный на Windows
+    как 'sub\\model.gguf', совпадает с реальным id 'sub/model.gguf'."""
+    v = (value or "").strip().replace("\\", "/")
+    while v.startswith("./"):
+        v = v[2:]
+    return v
+
+
 def _find_model(model_id: str) -> Optional[Dict]:
+    want = normalize_model_id(model_id)
     for m in scan_models():
-        if m["id"] == model_id:
+        if m["id"] == want:
             return m
     return None
 

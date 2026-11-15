@@ -1,0 +1,18 @@
+{"message": "удали из памяти мой старый адрес", "needs_tool": true, "expect": "internal__memory_forget"}
+{"message": "исправь факт про мою работу, я теперь в Казани", "needs_tool": true, "expect": "internal__memory_update"}
+{"message": "замени в памяти город на Берлин", "needs_tool": true, "expect": "internal__memory_update"}
+{"message": "что я говорил про проект на прошлой неделе", "needs_tool": true, "expect": "internal__recall"}
+{"message": "запомни, что мой любимый цвет синий", "needs_tool": true, "expect": "internal__remember"}
+{"message": "нарисуй красивую девушку на закате", "needs_tool": true, "expect": "internal__generate_image"}
+{"message": "что написано на табличке на этом фото", "needs_tool": true, "expect": "internal__inspect_image"}
+{"message": "какой сейчас курс доллара", "needs_tool": true, "expect": "internal__web_search"}
+{"message": "найди свежие новости про погоду в Амстердаме", "needs_tool": true, "expect": "internal__web_search"}
+{"message": "покажи структуру проекта", "needs_tool": true, "expect": "internal__project_structure"}
+{"message": "почему падает этот traceback KeyError", "needs_tool": true, "expect": "internal__analyze_error"}
+{"message": "как ты себя видишь сейчас, покажи цепочку идентичности", "needs_tool": true, "expect": "internal__get_identity_chain"}
+{"message": "что ты умеешь?", "needs_tool": true, "expect": "internal__list_tools"}
+{"message": "спасибо, понятно", "needs_tool": false, "expect": null}
+{"message": "как дела?", "needs_tool": false, "expect": null}
+{"message": "объясни разницу между TCP и UDP", "needs_tool": false, "expect": null}
+{"message": "напиши короткое стихотворение про осень", "needs_tool": false, "expect": null}
+{"message": "переведи слово привет на английский", "needs_tool": false, "expect": null}
