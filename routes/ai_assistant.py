@@ -769,11 +769,12 @@ class CognitiveController:
     async def _flush_deferred_memory(self, response: str) -> None:
         """Отложенное «запиши в память»: сохраняем ответ ассистента (без блока размышлений)."""
         self._deferred_memory_pending = False
-        text = re.sub(r"<thought>.*?</thought>", "", response or "", flags=re.S).strip()
+        text = cmd.memory_text_from_answer(response, max_chars=480)
         if len(text) < 20:
             return
         try:
-            await self.memory_service.remember(text[:500], scope="private", user_explicit=True)
+            await self.memory_service.remember("Визуализация (описание ассистента): " + text,
+                                               scope="private", user_explicit=True)
             logger.info("[deferred-memory] ответ ассистента сохранён в память")
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[deferred-memory] не сохранено: {e}")
@@ -1012,7 +1013,14 @@ class CognitiveController:
                 "[force-image] internal__generate_image уже была в tool_trace — пропуск"
             )
             return
-        prompt = cmd.image_prompt(message)
+        prompt, origin = cmd.image_prompt_origin(message)
+        # Тема из поиска конкретизируется заголовком первого источника: «новость об ИИ» →
+        # «новость об ИИ: <заголовок статьи>». Так картинка относится к конкретной новости.
+        if prompt and origin == "topic":
+            titled = [s for s in self.evidence.sources.values() if s.title]
+            if titled:
+                title = sorted(titled, key=lambda s: int(s.sid[1:]))[0].title[:120]
+                prompt = f"{prompt}: {title}"[:200]
         if not prompt or len(prompt) < 3:
             logger.info(f"[ForceImageTool] нет описания картинки в команде: {message[:80]!r}, пропуск")
             return
@@ -2584,6 +2592,8 @@ class CognitiveController:
             include_reasoning=reasoning,
         )
         response = await self._finalize_answer(message, response, search_meta, tool_trace)
+        if getattr(self, "_deferred_memory_pending", False):
+            await self._flush_deferred_memory(response)
         search_meta["tool_trace"] = tool_trace
         return response, search_meta
 

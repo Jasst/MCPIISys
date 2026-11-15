@@ -133,35 +133,83 @@ def search_query(message: str) -> Optional[str]:
     return text if len(text) >= 3 else None
 
 
-def image_prompt(message: str) -> Optional[str]:
-    """Промпт для генерации картинки.
+def _polish_picture_text(text: str) -> str:
+    t = _PICTURE_NOUNS.sub("", text or "").strip()
+    t = _PREPOSITIONS.sub("", t).strip()
+    t = _POLITE_TAILS.sub("", t).strip(" ,.;:!?")
+    return t
 
-    1) явное описание после команды картинки: «сгенерируй картинку кота в шляпе» → «кота в шляпе»;
-    2) иначе описание после «визуализируй»: «визуализируй закат над морем» → «закат над морем»;
-    3) иначе тема поиска: «найди новость об ИИ … сгенерируй картинку» → «новость об ИИ».
-    None, если ни одного из этого нет. Тогда картинку не генерируем.
-    """
-    def _strip_picture(text: str) -> str:
-        t = _PICTURE_NOUNS.sub("", text).strip()
-        t = _PREPOSITIONS.sub("", t).strip()
-        t = _POLITE_TAILS.sub("", t).strip(" ,.;:!?")
-        return t
 
+def image_prompt_origin(message: str) -> Tuple[Optional[str], str]:
+    """Промпт картинки и откуда он взят: 'explicit' | 'visualize' | 'topic' | ''."""
     for kind, text in commands(message):
         if kind == KIND_IMAGE:
-            prompt = _strip_picture(text)
+            prompt = _polish_picture_text(text)
             if len(prompt) >= 3:
-                return prompt
-            break  # явная команда без описания: дальше смотрим визуализацию и тему поиска
-
+                return prompt, "explicit"
+            break
     for kind, text in commands(message):
         if kind == KIND_VISUALIZE:
-            prompt = _strip_picture(text)
+            prompt = _polish_picture_text(text)
             if len(prompt) >= 3:
-                return prompt
+                return prompt, "visualize"
             break
-
     topic = search_query(message)
     if topic and len(topic) >= 3:
-        return topic
-    return None
+        return topic, "topic"
+    return None, ""
+
+
+def image_prompt(message: str) -> Optional[str]:
+    """Промпт для генерации картинки (см. image_prompt_origin)."""
+    return image_prompt_origin(message)[0]
+
+
+# ---------- защита аргументов, которые передаёт модель ----------
+_STARTS_MEMORY_VERB = re.compile(r"^(?:запомни|сохрани|запиши)", re.IGNORECASE)
+_STARTS_IMAGE_VERB = re.compile(r"^(?:сгенерир|нарису|визуализир|проиллюстр|создай|сделай)", re.IGNORECASE)
+_SCOPE_TAIL_ONLY = re.compile(r"\s+(?:в\s+(?:личную|общую|глобальную)\s+память|глобально|shared|global)\s*$", re.IGNORECASE)
+_GENERIC_PROMPTS = {"", "картинку", "картинка", "картинки", "изображение", "рисунок", "фото"}
+
+
+def clean_fact(text: Optional[str]) -> Optional[str]:
+    """Факт для remember из аргумента модели.
+
+    Если текст начинается с команды «запиши/запомни/сохрани», берём только её содержимое.
+    Иначе это обычный факт, и он сохраняется как есть. «Нел сохранила файл» не трогаем:
+    слово внутри предложения командой не считается.
+    """
+    t = _LEAD_CONNECTIVES.sub("", (text or "").strip()).strip()
+    if _STARTS_MEMORY_VERB.match(t):
+        return memory_fact(t)
+    t = _SCOPE_TAIL_ONLY.sub("", t).strip(" ,.;:")
+    return t if len(t) >= 5 else None
+
+
+def clean_image_prompt(text: Optional[str]) -> Optional[str]:
+    """Промпт картинки из аргумента модели. None — генерировать нельзя (нет описания)."""
+    t = _LEAD_CONNECTIVES.sub("", (text or "").strip()).strip()
+    if _STARTS_IMAGE_VERB.match(t):
+        p = image_prompt(t)
+    else:
+        p = _polish_picture_text(t)
+    if not p:
+        return None
+    p = p.strip(" ,.;:!?")
+    if len(p) < 3 or p.lower() in _GENERIC_PROMPTS:
+        return None
+    return p
+
+
+# ---------- что сохранить из ответа по команде «запиши» без текста ----------
+_VIS_WORDS = re.compile(r"визуализ|изображ|картин|иллюстр|рисун|фото", re.IGNORECASE)
+
+
+def memory_text_from_answer(answer: str, max_chars: int = 500) -> str:
+    """Абзацы ответа про визуализацию (если есть), иначе начало ответа. Без блока размышлений."""
+    text = re.sub(r"<thought>.*?</thought>", "", answer or "", flags=re.S).strip()
+    paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    picked = [p for p in paras if _VIS_WORDS.search(p)]
+    body = " ".join(picked) if picked else " ".join(paras)
+    body = re.sub(r"\s+", " ", body).strip()
+    return body[:max_chars].rstrip()

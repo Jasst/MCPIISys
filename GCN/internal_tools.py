@@ -19,6 +19,7 @@ from .config_ai import (
 )
 from .tool_router import ToolRegistry
 from .web_search import deep_search, fetch_url, best_excerpt
+from .command_parse import clean_fact, clean_image_prompt
 from .research_board import (
     BOARD_OPEN_PER_CALL, BOARD_PAGE_EXCERPT_CHARS, BOARD_TOOL_OUTPUT_CHARS,
     EvidenceBoard, Source, split_context_by_url,
@@ -64,7 +65,9 @@ def _register_memory(registry: ToolRegistry, controller) -> None:
         facts = args.get("facts")
         if facts:
             # Пакетное сохранение: список фактов в одном вызове
-            items = [str(f).strip() for f in facts if str(f).strip()][:20]
+            items = [c for c in (clean_fact(str(f)) for f in facts) if c][:20]
+            if not items:
+                return "Не сохранено: в аргументах нет содержимого факта."
             saved, rejected = [], []
             for item in items:          # по одному: записи в память не должны идти параллельно
                 try:
@@ -82,7 +85,9 @@ def _register_memory(registry: ToolRegistry, controller) -> None:
                 lines.append("Не сохранено: " + "; ".join(rejected))
             return "\n".join(lines)
 
-        fact = args.get("fact", "")
+        fact = clean_fact(args.get("fact", ""))
+        if not fact:
+            return "Не сохранено: в аргументах нет содержимого факта (только команда без текста)."
         # ИСПРАВЛЕНИЕ: внутренний инструмент вызывается по решению LLM в ответ
         # на явную просьбу пользователя «запомни ...». Это осознанный запрос,
         # а не автоизвлечение из web-поиска — пропускаем фильтр фактологичности
@@ -444,7 +449,9 @@ def _register_search(registry: ToolRegistry, controller,
 
 def _register_image(registry: ToolRegistry, controller) -> None:
     async def _internal_generate_image(args: Dict) -> Dict:
-        prompt = args.get("prompt", "")
+        prompt = clean_image_prompt(args.get("prompt", ""))
+        if not prompt:
+            return "Картинка не создана: в аргументах нет описания того, что нарисовать."
         enhance = args.get("enhance_prompt", True)
         steps = args.get("steps", EASYDIFFUSION_DEFAULT_STEPS)
         width = args.get("width", EASYDIFFUSION_DEFAULT_WIDTH)
