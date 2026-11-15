@@ -10,6 +10,14 @@ set "SEARXNG_DIR=%~dp0searxng"
 set "COMPOSE=docker compose"
 where docker-compose >nul 2>&1 && set "COMPOSE=docker-compose"
 
+rem Порт и лог llama-server берём из .env (по умолчанию 8090 и llama_server.log)
+set "LLAMA_PORT=8090"
+set "LLAMA_LOG=%~dp0llama_server.log"
+if exist ".env" (
+    for /f "tokens=1,* delims==" %%a in ('findstr /b "LLAMACPP_PORT=" ".env"') do set "LLAMA_PORT=%%b"
+    for /f "tokens=1,* delims==" %%a in ('findstr /b "LLAMACPP_LOG=" ".env"') do set "LLAMA_LOG=%~dp0%%b"
+)
+
 if not exist "docker-compose.yml" (
     echo ERROR: docker-compose.yml not found in %CD%
     pause & exit /b 1
@@ -32,6 +40,7 @@ echo    [1] Start server
 echo    [2] Stop server
 echo    [3] Status
 echo    [4] Show last log lines
+echo    [5] LLM (llama-server) status
 echo    [0] Exit
 echo.
 set /p choice=  Choose option:
@@ -39,6 +48,7 @@ if "%choice%"=="1" goto START
 if "%choice%"=="2" goto STOP
 if "%choice%"=="3" goto STATUS
 if "%choice%"=="4" goto LOGS
+if "%choice%"=="5" goto LLAMA
 if "%choice%"=="0" goto EXIT
 goto MENU
 
@@ -62,6 +72,7 @@ call :START_SEARXNG
 
 echo  [3/3] Starting application on http://127.0.0.1:8000
 echo        Press Ctrl+C to stop.
+echo        Модель llama грузится при старте приложения: статус — пункт [5] меню.
 echo.
 python run.py
 set "EXIT_CODE=%errorlevel%"
@@ -105,8 +116,50 @@ echo.
 echo  Health check:
 curl -s -o nul -w "%%{http_code}" http://127.0.0.1:8000/health
 echo.
+echo.
+echo  LLM (llama-server, port %LLAMA_PORT%):
+call :LLAMA_QUICK
 pause
 goto MENU
+
+:LLAMA
+echo.
+echo  ---------- llama-server ----------
+echo  Port: %LLAMA_PORT%    Log: %LLAMA_LOG%
+echo.
+echo  Процесс:
+tasklist /fi "imagename eq llama-server.exe" 2>nul | findstr /i "llama-server" >nul
+if errorlevel 1 (
+    echo    llama-server.exe не запущен
+) else (
+    echo    llama-server.exe запущен
+)
+echo.
+echo  Готовность (/health):
+call :LLAMA_QUICK
+echo.
+echo  Последние строки лога:
+if exist "%LLAMA_LOG%" (
+    powershell -Command "Get-Content '%LLAMA_LOG%' -Tail 12"
+) else (
+    echo    лог пока не создан: %LLAMA_LOG%
+)
+echo.
+pause
+goto MENU
+
+rem Одна строка статуса: 200 = готова, 503 = грузит модель, пусто = не отвечает
+:LLAMA_QUICK
+set "LLAMA_CODE="
+for /f %%c in ('curl -s -o nul -w "%%{http_code}" --max-time 3 http://127.0.0.1:%LLAMA_PORT%/health 2^>nul') do set "LLAMA_CODE=%%c"
+if "%LLAMA_CODE%"=="200" (
+    echo    готова ^(200^)
+) else if "%LLAMA_CODE%"=="503" (
+    echo    грузит модель ^(503^), подождите
+) else (
+    echo    не отвечает ^(нет связи с портом %LLAMA_PORT%^)
+)
+goto :eof
 
 :LOGS
 echo.

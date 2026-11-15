@@ -223,6 +223,7 @@ from GCN.web_search import deep_search, is_time_sensitive_query
 from GCN.image_utils import enhance_prompt, generate_image
 from GCN.tool_router import ToolRegistry, ToolRouter, build_tool_trace_context, might_need_tools
 from GCN.research_board import EvidenceBoard
+from GCN import command_parse as cmd
 from GCN.fast_router import (ComplexityRouter, ActivityGate, StageTimer, Route,
                             make_background_llm, heuristic_only_llm)  # [fast-path-patch]
 # ИНТЕЛЛЕКТ-ПАКЕТ: заземлённые ответы, санитайзер фактов, подзапросный retrieval
@@ -765,13 +766,27 @@ class CognitiveController:
             else:
                 self._web_search_results_this_turn.extend(results)
 
+    async def _flush_deferred_memory(self, response: str) -> None:
+        """Отложенное «запиши в память»: сохраняем ответ ассистента (без блока размышлений)."""
+        self._deferred_memory_pending = False
+        text = re.sub(r"<thought>.*?</thought>", "", response or "", flags=re.S).strip()
+        if len(text) < 20:
+            return
+        try:
+            await self.memory_service.remember(text[:500], scope="private", user_explicit=True)
+            logger.info("[deferred-memory] ответ ассистента сохранён в память")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[deferred-memory] не сохранено: {e}")
+
     async def _run_forced_search(self, message: str) -> List[Dict]:
         """Принудительный поиск до ReAct-цикла.
         1-я попытка — без LLM-хуков (expander/refiner), быстро.
         Если пусто и это не прямая ссылка — вторая: переписанный запрос (rewrite_query)
         с expander/refiner. Возвращает записи для _web_search_results_this_turn."""
         has_url = bool(re.search(r'https?://\S+', message or ""))
-        plan = [{"query": message, "budget": 20 if has_url else 10, "rewrite": False, "hooks": False}]
+        # Для составной команды ищем по теме команды поиска, а не по всей фразе.
+        query = message if has_url else (cmd.search_query(message) or message)
+        plan = [{"query": query, "budget": 20 if has_url else 10, "rewrite": False, "hooks": False}]
         if not has_url:
             plan.append({"query": None, "budget": 15, "rewrite": True, "hooks": True})
         for step in plan:
@@ -901,23 +916,21 @@ class CognitiveController:
                         logger.warning(f"[ForceRecall] failed: {e}")
 
         # --- запомни / сохрани / запиши ---
-        remember_match = re.search(
-            r"(?:запомни|сохрани(?:\s+в\s+память)?|запиши(?:\s+в\s+память)?)[:\s]+(.+)$",
-            message, re.IGNORECASE,
-        )
-        if not remember_match:
+        kinds_here = cmd.kinds(message)
+        if cmd.KIND_MEMORY not in kinds_here:
             return
         if any((t.get("tool") or "").endswith("__remember")
                or (t.get("tool") or "").endswith("__remember_batch")
                for t in tool_trace):
             return  # модель уже вызвала сама — не дублируем
 
-        fact = remember_match.group(1).strip()
-        if len(fact) < 5:
+        fact = cmd.memory_fact(message)
+        if fact is None:
+            # «запиши» без текста: сохраним ответ ассистента после ответа (см. _flush_deferred_memory)
+            if cmd.wants_deferred_memory(message):
+                self._deferred_memory_pending = True
+                logger.info("[ForceMemory] команда без текста — сохраню ответ после ответа")
             return
-        # Убираем возможные хвосты «в личную/общую/глобальную память»
-        fact = re.sub(r"\s+(?:в\s+(?:личную|общую|глобальную)\s+память|глобально|shared|global)\s*$",
-                      "", fact, flags=re.IGNORECASE).strip()
 
         # Определяем scope по маркерам в исходном сообщении
         low_full = message.lower()
@@ -982,7 +995,7 @@ class CognitiveController:
         """
         _IMAGE_RE = re.compile(
             r"(?<![а-яёa-z])(?:"
-            r"сгенерир\w*|нарису\w*|"
+            r"сгенерир\w*|нарису\w*|визуализир(?:уй\w*|овать|уйте)|проиллюстр(?:уй\w*|ировать)|"
             r"созда\w*\s+(?:картин\w*|изображени\w*|рисунок|фото)|"
             r"сдела\w*\s+(?:картин\w*|изображени\w*|рисунок|фото)|"
             r"нарису\w*\s+(?:картин\w*|изображени\w*|рисунок|фото)|"
@@ -999,26 +1012,9 @@ class CognitiveController:
                 "[force-image] internal__generate_image уже была в tool_trace — пропуск"
             )
             return
-        # Извлекаем промпт: текст после глагола. Иначе в EasyDiffusion
-        # уходит вся реплика целиком («сгенерируй картинку кота в шляпе»),
-        # что даёт мусорный результат.
-        prompt = (message or "").strip()
-        m = re.search(
-            r"(?:сгенерир\w*|нарису\w*|созда\w*|сдела\w*)\s+"
-            r"(?:картинку|картинка|изображение|рисунок|фото)?\s*"
-            r"(?:с|про|о|об|по|со)?\s*(.+)$",
-            message or "",
-            re.IGNORECASE | re.DOTALL,
-        )
-        if m and m.group(1).strip():
-            prompt = m.group(1).strip()
-        # Убираем вежливые хвосты, которые не относятся к сюжету.
-        prompt = re.sub(
-            r"\s+(?:пожалуйста|плиз|побыстрее|срочно|заранее\s+спасибо)[!.?]*\s*$",
-            "", prompt, flags=re.IGNORECASE,
-        ).strip()
-        if len(prompt) < 3:
-            logger.info(f"[ForceImageTool] промпт слишком короткий: {prompt!r}, пропуск")
+        prompt = cmd.image_prompt(message)
+        if not prompt or len(prompt) < 3:
+            logger.info(f"[ForceImageTool] нет описания картинки в команде: {message[:80]!r}, пропуск")
             return
         spec = self.tool_registry.get("internal__generate_image")
         if spec is None:
@@ -1920,6 +1916,7 @@ class CognitiveController:
         # чтобы не унаследовать поиски от предыдущего сообщения.
         self._web_search_results_this_turn = []
         self.evidence.reset(message)
+        self._deferred_memory_pending = False
         search_meta = {
             "web_search_used": False,
             "auto_triggered": auto_search,
@@ -3986,6 +3983,8 @@ class CognitiveController:
                         }
                     except Exception:
                         pass
+                if getattr(self, "_deferred_memory_pending", False):
+                    await self._flush_deferred_memory(full_response)
             elif _stream_error and full_response:
                 # Стрим упал с ошибкой, но часть ответа уже накоплена —
                 # минимально сохраняем её в историю, чтобы контекст не терялся.
