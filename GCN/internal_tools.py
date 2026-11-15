@@ -505,6 +505,41 @@ def _register_identity(registry: ToolRegistry, controller) -> None:
 
     service = controller.memory_service
 
+    # Личная цепочка ТЕКУЩЕЕ_Я: чтение и аннулирование только в private_memory.
+    # Общее ядро модель только читает через блок контекста; менять его может лишь core_admin.
+    async def _search(args):
+        if hasattr(service.private_memory, "reload_if_stale"):
+            service.private_memory.reload_if_stale()
+        store = service.private_memory.gcn_store
+        matches = search_chain(store, args.get("query", ""), limit=int(args.get("limit", 20)))
+        return {"matches": [asdict(m) for m in matches], "count": len(matches)}
+
+    async def _get_chain(args):
+        if hasattr(service.private_memory, "reload_if_stale"):
+            service.private_memory.reload_if_stale()
+        store = service.private_memory.gcn_store
+        chain = get_chain(
+            store,
+            from_id=args.get("from_id"),
+            limit=int(args.get("limit", 50)),
+        )
+        heads = get_heads(store)
+        return {
+            "chain": [asdict(s) for s in chain],
+            "heads": [h.id for h in heads],
+            "diverged": len(heads) > 1,
+            "invalidated_in_chain": [s.id for s in chain if s.invalidated],
+        }
+
+    async def _invalidate(args):
+        # Модель аннулирует только ЛИЧНЫЕ звенья. Общее ядро откатывает администратор («откатить ядро»).
+        return await invalidate_snapshot(
+            service,
+            identity_id=args["identity_id"],
+            reason=args["reason"],
+            layer="private",
+        )
+
     # --- search_identity_chain ---
     registry.register(
         name="search_identity_chain",

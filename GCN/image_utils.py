@@ -13,10 +13,13 @@ from .config_ai import (
     EASYDIFFUSION_DEFAULT_WIDTH,
     EASYDIFFUSION_DEFAULT_HEIGHT,
     EASYDIFFUSION_MODEL,
+    EASYDIFFUSION_VAE,
+    EASYDIFFUSION_NEGATIVE_PROMPT,
     EASYDIFFUSION_DEFAULT_LORA,
     EASYDIFFUSION_DEFAULT_LORA_WEIGHT,
     EASYDIFFUSION_DEFAULT_LORA_USE,
     EASYDIFFUSION_DEFAULT_SAMPLER,
+
 
 )
 from .llm_client import call_llm
@@ -25,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 # Кеш текущей модели, чтобы не слать /options при каждом вызове.
 _current_model = None
+_current_vae = None
 
 # Переиспользуемая сессия к локальному EasyDiffusion-хосту (как в llm_client.py) —
 # закрывается через close_session() при остановке процесса.
@@ -67,6 +71,17 @@ def _round_to_multiple(value: int, multiple: int = 8) -> int:
     return max(multiple, round(value / multiple) * multiple)
 
 
+# ============================================================
+# image_utils.py — полный блок генерации с VAE
+# ============================================================
+
+# Глобальные кеши, чтобы не дёргать /options при каждой генерации
+_current_model = None
+_current_vae = None
+
+# ... (_get_session, close_session, _round_to_multiple — без изменений)
+
+
 async def set_easy_diffusion_model(model_name: str) -> bool:
     """Устанавливает модель через /v1/sdapi/v1/options. Возвращает True при успехе."""
     global _current_model
@@ -84,7 +99,6 @@ async def set_easy_diffusion_model(model_name: str) -> bool:
                 _current_model = model_name
                 logger.info(f"Model set to: {model_name}")
                 return True
-            # Некоторые бэкенды принимают только поле "model"
             async with session.post(
                 url, json={"model": model_name},
                 timeout=aiohttp.ClientTimeout(total=10)
@@ -100,6 +114,37 @@ async def set_easy_diffusion_model(model_name: str) -> bool:
         return False
 
 
+async def set_easy_diffusion_vae(vae_name: str) -> bool:
+    """
+    Устанавливает VAE через /v1/sdapi/v1/options.
+    vae_name — имя файла VAE без пути, например
+    "vae-ft-mse-840000-ema-pruned.safetensors".
+    """
+    global _current_vae
+    if not vae_name:
+        # пустая строка = не трогаем настройку VAE (используем автоматический)
+        return True
+    if _current_vae == vae_name:
+        return True
+
+    url = f"{EASYDIFFUSION_URL}/v1/sdapi/v1/options"
+    try:
+        session = await _get_session()
+        async with session.post(
+            url, json={"sd_vae": vae_name},
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as resp:
+            if resp.status == 200:
+                _current_vae = vae_name
+                logger.info(f"VAE set to: {vae_name}")
+                return True
+            logger.error(f"Failed to set VAE: HTTP {resp.status}")
+            return False
+    except Exception as e:
+        logger.error(f"Error setting VAE: {e}")
+        return False
+
+
 async def generate_image(
     prompt: str,
     steps: Optional[int] = None,
@@ -108,20 +153,34 @@ async def generate_image(
     cfg_scale: Optional[float] = None,
     seed: Optional[int] = None,
     sampler_name: Optional[str] = None,
+    negative_prompt: Optional[str] = None,
 ) -> Optional[str]:
     """Генерирует изображение через EasyDiffusion API: сначала /options, затем txt2img."""
     if not EASYDIFFUSION_ENABLED:
         logger.warning("EasyDiffusion disabled")
         return None
 
+    # --- 1. Модель ---
     if not await set_easy_diffusion_model(EASYDIFFUSION_MODEL):
         logger.warning("Could not set model, continuing with default")
 
+    # --- 2. VAE ---
+    if not await set_easy_diffusion_vae(EASYDIFFUSION_VAE):
+        logger.warning("Could not set VAE, continuing with default/automatic VAE")
+
+    # --- 3. Промпт + LoRA ---
     if len(prompt) > 500:
         prompt = prompt[:500] + "..."
     if _LORA_TAG and _LORA_TAG not in prompt:
         prompt = f"{prompt} {_LORA_TAG}"
 
+    # --- 4. Негативный промпт (из аргумента или из .env) ---
+    final_negative = (
+        negative_prompt if negative_prompt is not None
+        else EASYDIFFUSION_NEGATIVE_PROMPT
+    )
+
+    # --- 5. Параметры ---
     safe_width = min(_MAX_IMAGE_DIMENSION, _round_to_multiple(
         width if width is not None else EASYDIFFUSION_DEFAULT_WIDTH))
     safe_height = min(_MAX_IMAGE_DIMENSION, _round_to_multiple(
@@ -137,6 +196,8 @@ async def generate_image(
         "width": safe_width,
         "height": safe_height,
     }
+    if final_negative:
+        payload["negative_prompt"] = final_negative
     if cfg_scale is not None:
         payload["cfg_scale"] = cfg_scale
     if seed is not None and seed >= 0:

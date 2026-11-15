@@ -87,14 +87,37 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Failed to initialize MCP: {e}", exc_info=True)
 
+    async def _warm_models():
+        # Модели грузим в отдельном потоке при старте, а не внутри первого запроса пользователя:
+        # раньше первый запрос блокировал весь сервер на время загрузки весов.
+        await asyncio.sleep(0.5)
+        try:
+            await asyncio.to_thread(_warm_models_sync)
+            logger.info("Модели прогреты")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Прогрев моделей не выполнен (загрузятся по требованию): {e}")
+
+    def _warm_models_sync():
+        from GCN.config_ai import MEMORY_USE_EMBEDDINGS, EMBEDDING_MODEL, NLI_MODEL
+        if MEMORY_USE_EMBEDDINGS:
+            from GCN.memory_graph import CognitiveMemory
+            CognitiveMemory._get_shared_embedder(EMBEDDING_MODEL)
+        if NLI_MODEL:
+            from GCN.nli import get_cross_encoder
+            get_cross_encoder(NLI_MODEL)
+        from GCN.web_search import Reranker
+        Reranker._get()
+
     async with mcp.session_manager.run():
         init_task = asyncio.create_task(_deferred_init_mcp(), name="mcp-init")
         autostart_task = asyncio.create_task(_autostart_llamacpp(), name="llama-autostart")
+        warmup_task = asyncio.create_task(_warm_models(), name="model-warmup")
         try:
             yield
         finally:
             init_task.cancel()
             autostart_task.cancel()
+            warmup_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await init_task
             await shutdown_all()

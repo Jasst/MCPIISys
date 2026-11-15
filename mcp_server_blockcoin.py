@@ -664,7 +664,7 @@ async def login(
     return {"status": "ok", "user_id": uid,
             "message": "Вход выполнен. Дальше user_id передавать не нужно. "
                        "Если следующий вызов вернёт forbidden — твой клиент "
-                       "не переиспользует mcp-session-id; слай тот же код в "
+                       "не пере-использует mcp-session-id; шли тот же код в "
                        "заголовке каждого запроса: Authorization: Bearer <код>."}
 
 

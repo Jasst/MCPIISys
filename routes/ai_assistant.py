@@ -4169,6 +4169,26 @@ async def _evict_stale_assistants(exclude_uid: Optional[str] = None) -> None:
         logger.info(f"Ассистент {oldest_uid[:16]} выгружен по лимиту количества (LRU, max={_ASSISTANT_MAX_COUNT})")
 
 
+_warming_users: set = set()
+
+
+def _spawn_assistant_warmup(user_id: str) -> None:
+    """Готовит контроллер пользователя в фоне (один раз на пользователя)."""
+    if user_id in _warming_users:
+        return
+    _warming_users.add(user_id)
+
+    async def _warm():
+        try:
+            await get_assistant(user_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Подготовка ассистента для {user_id[:16]} не удалась: {e}")
+        finally:
+            _warming_users.discard(user_id)
+
+    asyncio.create_task(_warm(), name=f"assistant-warmup:{user_id[:16]}")
+
+
 async def get_assistant(user_id: str):
     async with _assistants_lock:
         await _evict_stale_assistants(exclude_uid=user_id)
@@ -4794,6 +4814,16 @@ async def skip_tool_step(address: str = Depends(require_auth)):
 
 @router.get("/notifications/poll")
 async def poll_notifications(address: str = Depends(require_auth)):
+    # Если контроллер пользователя ещё не создан, не строим его прямо в запросе: первый опрос
+    # страницы иначе блокировал весь сервер на время загрузки памяти и моделей. Отвечаем пусто
+    # и готовим контроллер в фоне; следующий опрос получит уведомления.
+    if address not in _assistants:
+        _spawn_assistant_warmup(address)
+        return {"notifications": [], "warming": True}
+    return await _poll_notifications_ready(address)
+
+
+async def _poll_notifications_ready(address: str):
     """
     Проактивные находки фоновых циклов (авто-исследование по целям,
     доисследование тем из рефлексии — см. CognitiveController._maybe_surface_proactively),
