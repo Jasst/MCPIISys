@@ -292,12 +292,16 @@ body.light-theme .markdown-body :not(pre) > code { background: rgba(0, 0, 0, .05
 /* ---------- резервы высоты под парящие слои ----------
    Переписка прокручивается под шапкой и композером насквозь, поэтому отступы
    держит внутренний контейнер .msgs-inner, а НЕ сам прокручиваемый блок:
-   в Chromium padding-bottom скроллера не входит в прокручиваемую область —
-   последняя реплика залипала бы под композером (проверено в браузере).
+   в этом Chromium padding-bottom скроллера не входит в прокручиваемую область.
+   ВАЖНО: flex-shrink: 0 обязателен — .messages (style.css) flex-контейнер, и
+   без этого .msgs-inner сжимается до высоты контейнера (flex-shrink: 1 по
+   умолчанию), после чего его padding-bottom выпадает из прокрутки и последняя
+   реплика залипает под композером (проверено в браузере).
    Высоты --topbar-h / --composer-h обновляет ai-app.js (ResizeObserver);
    значения по умолчанию — пока скрипт не успел отработать. */
 .messages { padding: 0 16px; }   /* вертикальные отступы переехали в .msgs-inner */
 .msgs-inner {
+  flex-shrink: 0;
   padding-top: calc(var(--topbar-h, 52px) + 14px);
   padding-bottom: calc(var(--composer-h, 132px) + 18px);
 }
