@@ -24,11 +24,14 @@
   ];
 
   const CSS = `
-  #msOverlay{position:fixed;inset:0;background:rgba(8,9,12,.6);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);
+  #msOverlay{position:fixed;inset:0;background:rgba(8,9,12,.6);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
     display:none;z-index:9000;align-items:center;justify-content:center;padding:16px;box-sizing:border-box}
   #msOverlay.open{display:flex}
   #msModal{width:min(880px,100%);max-height:90vh;display:flex;flex-direction:column;overflow:hidden;
-    background:var(--bg-secondary,#1b1d23);color:var(--text-main,#e8e8ea);border:1px solid var(--border-color,rgba(255,255,255,.08));
+    /* едва заметная прозрачность + размытие фона: первая строка background — fallback без color-mix */
+    background:var(--bg-secondary,#1b1d23);background:color-mix(in srgb,var(--bg-secondary,#1b1d23) 88%,transparent);
+    backdrop-filter:blur(10px) saturate(125%);-webkit-backdrop-filter:blur(10px) saturate(125%);
+    color:var(--text-main,#e8e8ea);border:1px solid var(--border-color,rgba(255,255,255,.08));
     border-radius:20px;box-shadow:0 24px 70px rgba(0,0,0,.5);font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
   #msModal header{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--border-color,rgba(255,255,255,.08))}
   #msModal header h2{font-size:16px;margin:0;font-weight:600;letter-spacing:-.01em}
