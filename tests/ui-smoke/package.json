@@ -2,7 +2,9 @@
   "name": "ai-ui-smoke",
   "private": true,
   "scripts": {
-    "test": "node smoke.js && node generation.js"
+    "test": "node smoke.js && node generation.js",
+    "test:metrics": "node stats.js",
+    "test:settings": "node settings_check.js"
   },
   "devDependencies": {
     "jsdom": "^24.0.0",

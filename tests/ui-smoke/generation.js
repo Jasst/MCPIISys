@@ -38,6 +38,7 @@ function openPage(storage, server) {
     calls.push({ url, method: (opts.method || 'GET') });
     return server(url, opts, calls);
   };
+  for (const f of ['js/ui.js', 'js/ai-store.js']) w.eval(fs.readFileSync(path.join(root, f), 'utf8'));
   w.eval(APP);
   const $ = (s) => w.document.querySelector(s);
   const $$ = (s) => Array.from(w.document.querySelectorAll(s));
