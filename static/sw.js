@@ -10,6 +10,8 @@ const SHELL = [
   '/static/ai.css',
   '/static/ui.css',
   '/static/ui-polish.css',
+  '/static/ui-refined.css',
+  '/static/ui-glass.css',
   '/static/js/ui.js',
   '/static/js/ai-app.js',
   '/static/js/ai-store.js',
@@ -94,19 +96,19 @@ self.addEventListener('fetch', (event) => {
       const cached = await cache.match(request);
       let response;
       try {
-        response = await fetch(request, { cache: 'no-cache' });
+        response = await fetch(request);
       } catch {
         return cached || Response.error();
       }
-      // 404/5xx: лучше рабочая копия из кеша, чем пустой ответ, который ломает страницу
-      if (!response.ok) return cached || response;
-      cache.put(request, response.clone());
-      if (cached) {
-        try {
-          const a = await cached.text();
-          const b = await response.clone().text();
-          if (a !== b) self.registration.update();
-        } catch {}
+      if (response.ok) {
+        cache.put(request, response.clone());
+        if (cached) {
+          try {
+            const a = await cached.text();
+            const b = await response.clone().text();
+            if (a !== b) self.registration.update();
+          } catch {}
+        }
       }
       return response;
     })());
