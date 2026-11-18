@@ -30,6 +30,7 @@ from setup import setup_logging, get_rate_limit_stats
 from routes.ai_assistant import (
     router as ai_router,
     start_global_merge_task,
+    stop_global_merge_task,
     init_global_mcp,
     shutdown_all,
 )
@@ -118,6 +119,7 @@ async def lifespan(app: FastAPI):
             init_task.cancel()
             autostart_task.cancel()
             warmup_task.cancel()
+            await stop_global_merge_task()
             with contextlib.suppress(asyncio.CancelledError):
                 await init_task
             await shutdown_all()

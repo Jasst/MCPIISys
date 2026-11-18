@@ -2269,12 +2269,7 @@ refreshUI();
 
       inp.addEventListener('change', () => {
         settings[k] = inp.type === 'checkbox' ? inp.checked : inp.value;
-        // Квота localStorage может быть исчерпана (зеркала чатов): без этого
-        // сообщение настройка молча сбрасывалась бы после перезагрузки страницы,
-        // выглядя как «переключатель не работает».
-        if (!writeJSON(KEY.settings, settings)) {
-          toast('Не удалось сохранить настройку: хранилище браузера переполнено');
-        }
+        writeJSON(KEY.settings, settings);
         if (k === 'webDefault') chips.web = !!settings.webDefault;
         if (k === 'reasoningDefault') chips.reason = !!settings.reasoningDefault;
         if (k === 'notify' || k === 'notifyInterval') startNotify();
@@ -2283,41 +2278,6 @@ refreshUI();
       });
     });
   }
-
-  // Настройки — чисто клиентские (localStorage + классы на body), они НЕ зависят
-  // от чатов и IndexedDB. Вешаем сразу при загрузке скрипта, а не в init():
-  // раньше любой сбой хранилища до init() (guardScope/migrateLegacy бросили
-  // исключение) оставлял bindSettings() невыполненным — и переключатели в
-  // настройках («Компактный режим», «Размер текста», отправка по Enter и т.д.)
-  // становились мёртвыми: галочка менялась, но ничего не сохранялось и не применялось.
-  bindSettings();
-  applySettings();
-  syncChips();
-
-  // ---- парящие шапка и композер: замер фактической высоты ----
-  // Оба слоя лежат ПОВЕРХ переписки (absolute в ui-refined.css), поэтому
-  // прокручиваемый блок .messages держит резерв высоты через CSS-переменные
-  // --topbar-h / --composer-h: иначе первая и последняя реплики застревали бы
-  // под стеклом. ResizeObserver обновляет переменные при любом изменении
-  // высоты слоёв: многострочный ввод, чип вложения, подсказка, экранная
-  // клавиатура. Вешается сразу при загрузке скрипта (как bindSettings) —
-  // не зависит от init() и состояния хранилища.
-  (function () {
-    const root = document.documentElement;
-    const measure = () => {
-      const tb = document.querySelector('.topbar');
-      const cw = document.querySelector('.composer-wrap');
-      if (tb) root.style.setProperty('--topbar-h', tb.offsetHeight + 'px');
-      if (cw) root.style.setProperty('--composer-h', cw.offsetHeight + 'px');
-    };
-    measure();
-    if (window.ResizeObserver) {
-      const ro = new ResizeObserver(measure);
-      document.querySelectorAll('.topbar, .composer-wrap').forEach((el) => ro.observe(el));
-    } else {
-      window.addEventListener('resize', measure);   // запасной путь для старых браузеров
-    }
-  })();
 
   async function exportAllChats() {
     const data = { exportedAt: new Date().toISOString(), sessions, messages: {} };
@@ -3561,16 +3521,9 @@ function buildCodeBlock(text, lang) {
   }
 
   async function bootstrap() {
-    // Подготовка хранилища не должна ронять старт страницы: если IndexedDB
-    // недоступен/сломан, чаты недоступны, но настройки, отправка и UI обязаны
-    // работать. Все шаги — best-effort, ошибки логируем и идём дальше.
-    try {
-      await store().init(currentScopeUid);
-      await store().guardScope();   // в общей IndexedDB не должно быть чужого аккаунта
-      await store().migrateLegacy(currentScopeUid);
-    } catch (e) {
-      console.warn('bootstrap: хранилище недоступно, работаем без синхронизации:', e);
-    }
+    await store().init(currentScopeUid);
+    await store().guardScope();   // в общей IndexedDB не должно быть чужого аккаунта
+    await store().migrateLegacy(currentScopeUid);
 
     // Восстановление от залипшего myGen-флага. Флаг ставится в localStorage
     // при старте генерации и снимается при нормальном завершении. Если
@@ -3784,8 +3737,9 @@ function buildCodeBlock(text, lang) {
 
   function init() {
     if (!Array.isArray(sessions) || !sessions.length) sessions = readJSON(KEY.sessions, []);
-    // bindSettings/applySettings/syncChips выполнены выше, при загрузке скрипта:
-    // настройки не должны зависеть от успешного старта хранилища чатов.
+    bindSettings();
+    applySettings();
+    syncChips();
 
     if (!sessions.length) createSession(DEFAULT_NAME);
     const latest = sessions.slice().sort((a, b) => (b.updated || b.created) - (a.updated || a.created))[0];
@@ -3807,7 +3761,7 @@ function buildCodeBlock(text, lang) {
     setScope(st.uid);
     currentScopeUid = st.uid;
     bootstrap();
-  }).catch((e) => console.error('bootstrap failed:', e));   // init()/настройки уже привязаны выше
+  });
 
   // Когда ПК (или любое другое устройство) сохраняет состояние, сервер может
   // прислать событие SSE. Подписываемся один раз: на «state-changed» мгновенно

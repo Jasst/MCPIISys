@@ -23,6 +23,7 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 import faiss
 import uuid
+import threading
 
 # Импорт GCN-компонентов (папка GCN, файл GCN.py)
 from .GCN import (
@@ -2063,6 +2064,9 @@ class CognitiveMemory:
             self._save_task.cancel()
         await self._save_async()
 
+
+_singleton_lock = threading.Lock()
+
 class GCNMemoryRouter:
     """
     Управляет тремя слоями памяти: личный (PRIVATE), общий (SHARED), глобальный (GLOBAL).
@@ -2203,16 +2207,18 @@ class GCNMemoryRouter:
 
     @classmethod
     def _get_global_memory(cls, base_dir: Path) -> CognitiveMemory:
-        """Возвращает глобальную память как синглтон."""
-        if cls._global_instance is None:
-            cls._global_instance = CognitiveMemory("global", base_dir)
+        """Возвращает глобальную память как синглтон (потокобезопасно)."""
+        with _singleton_lock:
+            if cls._global_instance is None:
+                cls._global_instance = CognitiveMemory("global", base_dir)
         return cls._global_instance
 
     @classmethod
     def _get_shared_memory(cls, base_dir: Path) -> CognitiveMemory:
-        """Возвращает общую (shared) память как синглтон."""
-        if cls._shared_instance is None:
-            cls._shared_instance = CognitiveMemory("shared", base_dir)
+        """Возвращает общую память как синглтон (потокобезопасно)."""
+        with _singleton_lock:
+            if cls._shared_instance is None:
+                cls._shared_instance = CognitiveMemory("shared", base_dir)
         return cls._shared_instance
 
     def set_llm_caller(self, llm_caller):

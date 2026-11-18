@@ -103,20 +103,11 @@
     let stored = null;
     try { stored = await tx('meta', 'readonly', (s) => s.get('scope')); } catch { return; }
     if (stored == null || stored === scopeUid) return;
-    // Пересоздание базы под другой аккаунт может сорваться (другая вкладка держит
-    // соединение, deleteDatabase «blocked», диск переполнен). Раньше исключение
-    // улетало в bootstrap и останавливало весь старт страницы. Теперь — тихий
-    // откат на localStorage-режим.
-    try {
-      try { db.close(); } catch { /* ignore */ }
-      try { indexedDB.deleteDatabase(DB); } catch { /* ignore */ }
-      db = await openIndexedDb();
-      await tx('meta', 'readwrite', (s) => s.put(scopeUid, 'scope'));
-      memRev = Math.max((await readMetaRev()) || 0, Date.now());
-    } catch (e) {
-      console.warn('guardScope: база не пересоздана, работаем на localStorage:', e);
-      db = null; idbBroken = true;
-    }
+    try { db.close(); } catch { /* ignore */ }
+    try { indexedDB.deleteDatabase(DB); } catch { /* ignore */ }
+    db = await openIndexedDb();
+    await tx('meta', 'readwrite', (s) => s.put(scopeUid, 'scope'));
+    memRev = Math.max((await readMetaRev()) || 0, Date.now());
   }
 
   async function readMetaRev() {
@@ -488,9 +479,7 @@
   async function migrateLegacy(uid) {
     if (idbBroken) return false;
     const flag = lsKey('migrated_v1');
-    let already = false;
-    try { already = !!localStorage.getItem(flag); } catch { /* ignore */ }
-    if (already) return false;
+    if (localStorage.getItem(flag)) return false;
     const prefix = uid ? `ai:${uid}:` : 'ai_';
     const legacyKey = prefix + 'sessions';
     let moved = 0;

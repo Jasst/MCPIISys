@@ -3,7 +3,7 @@
  */
 // bump при изменении статики: новый текст sw.js заставляет браузер
 // перерегистрировать worker, а activate вычистит старый кеш
-const VERSION = 'ai-v18';
+const VERSION = 'ai-v19';
 const STATIC_CACHE = `static-${VERSION}`;
 const SHELL = [
   '/static/style.css',
@@ -94,19 +94,19 @@ self.addEventListener('fetch', (event) => {
       const cached = await cache.match(request);
       let response;
       try {
-        response = await fetch(request);
+        response = await fetch(request, { cache: 'no-cache' });
       } catch {
         return cached || Response.error();
       }
-      if (response.ok) {
-        cache.put(request, response.clone());
-        if (cached) {
-          try {
-            const a = await cached.text();
-            const b = await response.clone().text();
-            if (a !== b) self.registration.update();
-          } catch {}
-        }
+      // 404/5xx: лучше рабочая копия из кеша, чем пустой ответ, который ломает страницу
+      if (!response.ok) return cached || response;
+      cache.put(request, response.clone());
+      if (cached) {
+        try {
+          const a = await cached.text();
+          const b = await response.clone().text();
+          if (a !== b) self.registration.update();
+        } catch {}
       }
       return response;
     })());

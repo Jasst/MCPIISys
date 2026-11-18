@@ -28,6 +28,10 @@ import os
 import signal
 import sys
 
+if sys.platform == 'win32':
+    import asyncio
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 logger = logging.getLogger(__name__)
 
 PID_FILE = os.path.join(os.path.dirname(__file__), 'app.pid')
