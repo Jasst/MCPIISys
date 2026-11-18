@@ -11,40 +11,54 @@
   --g-hair: rgba(255, 255, 255, .09);
   --g-blur: blur(22px) saturate(160%);
   --composer-h: 150px;                       /* обновляется из JS по реальной высоте */
+  --g-float: rgba(20, 21, 26, .22);          /* полупрозрачное поле ввода */
+  --g-overlap: 56px;                         /* насколько лента заходит под верхний край поля */
+  --g-float-edge: rgba(255, 255, 255, .12);
 }
 
 body.light-theme {
   --g-panel: rgba(255, 255, 255, .58);
   --g-panel-strong: rgba(255, 255, 255, .84);
   --g-hair: rgba(0, 0, 0, .08);
+  --g-float: rgba(255, 255, 255, .3);
+  --g-float-edge: rgba(255, 255, 255, .7);
 }
 
-/* ---------- сообщения уходят под композер и топбар ----------
-   Отрицательный margin-bottom растягивает область сообщений на всю высоту
-   чата: композер лежит поверх её нижней части, а текст просвечивает сквозь него.
-   Отступы внутри скролла компенсируют перекрытие. */
+/* ---------- сообщения и поле ввода ---------- */
 .main { position: relative; }
-.msgs-wrap { margin-bottom: calc(-1 * var(--composer-h)); }
-.msgs-wrap > .messages { padding-bottom: calc(var(--composer-h) + 12px); }
-.msgs-wrap > .scroll-bottom { bottom: calc(var(--composer-h) + 10px); }
+/* Лента останавливается НАД полем ввода: текст не заходит под него.
+   Нижний край ленты плавно растворяется в 24px над полем. Отступ снизу больше
+   полосы растворения, поэтому последнее сообщение и его кнопки остаются чёткими. */
+.msgs-wrap { margin-bottom: 0; }
+.msgs-wrap > .messages {
+  padding-bottom: 40px;
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent 100%);
+          mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent 100%);
+}
+.msgs-wrap > .scroll-bottom { bottom: 12px; }
 
-/* ---------- композер: прозрачная область без непрозрачного градиента ---------- */
+/* ---------- композер: парящее полупрозрачное поле ввода ----------
+   Нет фоновой полосы: текст ленты проходит под полем и просвечивает сквозь него.
+   Поле отступает от краёв и немного размыто, чтобы текст оставался читаемым. */
 .composer-wrap {
   position: relative;
   z-index: 2;
   background: none;
   border-top: none;
+  padding: 8px 18px max(14px, env(safe-area-inset-bottom));
   pointer-events: none;                      /* пустые поля вокруг не перехватывают скролл */
-  padding-bottom: max(14px, env(safe-area-inset-bottom));
 }
 .composer-wrap > * { pointer-events: auto; }
 
 .composer {
-  background: var(--g-panel);
-  backdrop-filter: var(--g-blur);
-  -webkit-backdrop-filter: var(--g-blur);
-  border: 1px solid var(--g-hair);
-  box-shadow: 0 18px 50px -20px rgba(0, 0, 0, .7), inset 0 1px 0 rgba(255, 255, 255, .05);
+  background: var(--g-float);
+  backdrop-filter: blur(3px) saturate(120%);
+  -webkit-backdrop-filter: blur(3px) saturate(120%);
+  border: 1px solid var(--g-float-edge);
+  box-shadow: 0 14px 40px -18px rgba(0, 0, 0, .45), inset 0 1px 0 rgba(255, 255, 255, .06);
+}
+.composer:focus-within {
+  background: color-mix(in srgb, var(--g-float) 80%, transparent);
 }
 
 /* ---------- боковая панель и верхняя панель ---------- */

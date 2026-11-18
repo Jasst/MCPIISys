@@ -1514,7 +1514,8 @@ class CognitiveMemory:
 
         result.sort(key=lambda x: x["score"], reverse=True)
         if LATERAL_INHIBITION_ENABLED and self.use_embeddings and len(result) > 1:
-            result = self._lateral_inhibit(result)
+            # вычисление синхронное (numpy) — выносим в поток, чтобы не блокировать event loop
+            result = await asyncio.to_thread(self._lateral_inhibit, result)
         result = result[:top_k]
         if activation_map:
             result.extend(self._graph_expansions(
@@ -1529,22 +1530,40 @@ class CognitiveMemory:
         return result
 
     def _lateral_inhibit(self, result: List[Dict]) -> List[Dict]:
-        """Латеральное торможение выдачи: почти одинаковые результаты гасят друг друга.
+        """Латеральное торможение выдачи без повторного энкодинга.
 
-        Меняется только порядок. Набор кандидатов и их скоры в памяти не трогаются.
-        Эмбеддинги текстов кандидатов кэшируются на время вызова.
+        Сначала берём векторы фактов, уже сохранённые в GCN при записи.
+        Модель вызывается только для кандидатов без сохранённого вектора.
+        show_progress_bar=False убирает tqdm-полоски из лога.
+        Меняется только порядок. Набор кандидатов и их скоры не трогаются.
         """
-        texts = [(r.get("text") or "") for r in result]
-        vecs: List[Optional[np.ndarray]] = [None] * len(texts)
-        try:
-            prefix = EMBEDDING_PASSAGE_PREFIX
-            encoded = self.embedder.encode([f"{prefix}{t}" if prefix else t for t in texts],
-                                           convert_to_numpy=True, batch_size=len(texts))
-            for i, v in enumerate(encoded):
-                n = float(np.linalg.norm(v))
-                vecs[i] = v / n if n > 0 else None
-        except Exception as e:
-            logger.debug(f"lateral inhibition embeddings failed: {e}")
+        n = len(result)
+        vecs: List[Optional[np.ndarray]] = [None] * n
+        missing: List[int] = []
+        for i, r in enumerate(result):
+            gid = r.get("gcn_id")
+            v = self.gcn_store.get_embedding(gid) if gid else None
+            if v is not None:
+                vecs[i] = np.asarray(v, dtype=float)
+            else:
+                missing.append(i)
+
+        if missing:
+            try:
+                prefix = EMBEDDING_PASSAGE_PREFIX
+                texts = [(result[i].get("text") or "") for i in missing]
+                encoded = self.embedder.encode(
+                    [f"{prefix}{t}" if prefix else t for t in texts],
+                    convert_to_numpy=True, batch_size=32, show_progress_bar=False)
+                for i, v in zip(missing, encoded):
+                    vecs[i] = np.asarray(v, dtype=float)
+            except Exception as e:
+                logger.debug(f"lateral inhibition embeddings failed: {e}")
+
+        for i, v in enumerate(vecs):
+            if v is not None:
+                nrm = float(np.linalg.norm(v))
+                vecs[i] = v / nrm if nrm > 0 else None
 
         def similarity(i: int, j: int) -> float:
             a, b = vecs[i], vecs[j]
@@ -1558,7 +1577,6 @@ class CognitiveMemory:
         for r in reranked:
             r.pop("score_adj", None)
         return reranked
-
     def _is_time_sensitive(self, query: str) -> bool:
         """
         Делегирует в единую эвристику web_search.is_time_sensitive_query —

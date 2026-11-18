@@ -588,7 +588,8 @@ class CognitiveController:
         self._research_task = None
         self._reflection_task = None
         self._idle_task = None
-        self._start_background_tasks()
+        # Фоновые задачи запускает get_assistant() на основном event loop
+        # (create_task нельзя вызывать из рабочего потока, где конструктор грузит память).
 
         self.current_working_memory: List[str] = []
         self.current_goals: List[Goal] = []
@@ -4223,12 +4224,17 @@ async def get_assistant(user_id: str):
     async with _assistants_lock:
         await _evict_stale_assistants(exclude_uid=user_id)
         if user_id not in _assistants:
+            # Тяжёлая инициализация (эмбеддер, FAISS, GCN, история) идёт в рабочем
+            # потоке, чтобы не блокировать event loop для всех пользователей.
             # Общий MCP-менеджер для внешних серверов (если инициализирован);
             # иначе контроллер создаст свой. Память кошелька идёт мимо менеджера —
             # см. CognitiveController._register_local_memory_tools.
-            _assistants[user_id] = CognitiveController(
-                user_id, mcp_manager=get_global_mcp_manager()
+            ctrl = await asyncio.to_thread(
+                CognitiveController, user_id, mcp_manager=get_global_mcp_manager()
             )
+            # Фоновые циклы стартуем уже на основном loop.
+            ctrl._start_background_tasks()
+            _assistants[user_id] = ctrl
             logger.info(f"Создан когнитивный ассистент для {user_id[:16]}")
         _assistants.move_to_end(user_id)
         _assistant_last_used[user_id] = time.time()
@@ -4882,14 +4888,14 @@ async def global_stats(address: str = Depends(require_auth)):
 
 @router.get("/gcn_global_stats")
 async def gcn_global_stats(address: str = Depends(require_auth)):
-    global_mem = GCNMemoryRouter._get_global_memory(MEMORY_BASE_DIR)
-    shared_mem = GCNMemoryRouter._get_shared_memory(MEMORY_BASE_DIR)
+    global_mem = await asyncio.to_thread(GCNMemoryRouter._get_global_memory, MEMORY_BASE_DIR)
+    shared_mem = await asyncio.to_thread(GCNMemoryRouter._get_shared_memory, MEMORY_BASE_DIR)
     return {"global": global_mem.get_stats(), "shared": shared_mem.get_stats()}
 
 @router.post("/force_merge")
 async def force_merge(address: str = Depends(require_auth)):
-    global_mem = GCNMemoryRouter._get_global_memory(MEMORY_BASE_DIR)
-    shared_mem = GCNMemoryRouter._get_shared_memory(MEMORY_BASE_DIR)
+    global_mem = await asyncio.to_thread(GCNMemoryRouter._get_global_memory, MEMORY_BASE_DIR)
+    shared_mem = await asyncio.to_thread(GCNMemoryRouter._get_shared_memory, MEMORY_BASE_DIR)
     try:
         await global_mem.light_consolidation()
         await shared_mem.light_consolidation()
