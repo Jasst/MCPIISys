@@ -112,17 +112,9 @@ body.light-theme {
 }
 .sb-link svg { width: 16px; height: 16px; opacity: .8; }
 
-/* ---------- верхняя панель: парящее стекло с градиентной линией ----------
-   Шапка больше не занимает строку в потоке .main: она лежит ПОВЕРХ
-   переписки (absolute), и сообщения прокручиваются у неё «за спиной» —
-   насквозь, через полупрозрачное стекло с blur. Работает и на десктопе,
-   и на телефоне (<= 860px меняются только отступы).
-   Высоту резерва под неё держит .messages через --topbar-h — фактическую
-   высоту обновляет ai-app.js (ResizeObserver). */
+/* ---------- верхняя панель: стеклянная, с градиентной линией ---------- */
 .topbar {
-  position: absolute; top: 0; left: 0; right: 0; z-index: 20;
-  /* safe-area сверху: на iPhone PWA шапка не залезает под статус-бар */
-  padding: max(8px, env(safe-area-inset-top)) 14px 8px;
+  padding: 8px 14px;
   border-bottom: none;
   background:
     linear-gradient(90deg, transparent 0%, var(--r-hair-strong) 30%, var(--r-hair-strong) 70%, transparent 100%) bottom / 100% 1px no-repeat,
@@ -254,59 +246,12 @@ body.light-theme .markdown-body :not(pre) > code { background: rgba(0, 0, 0, .05
 }
 .suggest:active { transform: scale(.985); }
 
-/* ---------- композер: парящая стеклянная карточка с градиентной рамкой ----------
-   Поле ввода тоже не в потоке: absolute у нижней границы .main, переписка
-   прокручивается под ним НАСКВОЗЬ — стеклит сама карточка (blur + полупрозрачный
-   фон у .composer ниже). «Подложку» под карточкой убрали: раньше градиент
-   bg-primary визуально привязывал её к низу.
-   pointer-events: none у обёртки — клики в пустых полях по бокам карточки
-   проходят к сообщениям; карточка и подсказка ловят клики как раньше. */
+/* ---------- композер: плавающая стеклянная карточка с градиентной рамкой ---------- */
 .composer-wrap {
-  position: absolute; bottom: 0; left: 0; right: 0; z-index: 20;
-  padding: 4px 20px max(14px, env(safe-area-inset-bottom));
+  padding: 4px 20px 14px;
   border-top: none;
-  background: none;
-  pointer-events: none;
+  background: linear-gradient(to top, var(--bg-primary) 55%, transparent);
 }
-.composer-wrap > * { pointer-events: auto; }
-
-/* ---------- «матовое стекло» над полем ввода ----------
-   Когда история прокручивается, пузыри у нижней рамки не обрезаются резко:
-   полоса над композером размывает их (backdrop-filter), а маска-градиент
-   ослабляет эффект кверху — получается плавное растворение текста.
-   z-index 4: выше сообщений, но ниже кнопки «вниз» (5), pull-индикатора (6)
-   и самих парящих слоёв (topbar/composer, z-index 20). */
-.msgs-wrap::after {
-  content: '';
-  position: absolute;
-  left: 0; right: 0; bottom: 0;
-  height: 46px;
-  z-index: 4;
-  pointer-events: none;
-  -webkit-backdrop-filter: blur(7px);
-  backdrop-filter: blur(7px);
-  -webkit-mask-image: linear-gradient(to top, #000 0%, rgba(0, 0, 0, .5) 45%, transparent 100%);
-  mask-image: linear-gradient(to top, #000 0%, rgba(0, 0, 0, .5) 45%, transparent 100%);
-}
-
-/* ---------- резервы высоты под парящие слои ----------
-   Переписка прокручивается под шапкой и композером насквозь, поэтому отступы
-   держит внутренний контейнер .msgs-inner, а НЕ сам прокручиваемый блок:
-   в этом Chromium padding-bottom скроллера не входит в прокручиваемую область.
-   ВАЖНО: flex-shrink: 0 обязателен — .messages (style.css) flex-контейнер, и
-   без этого .msgs-inner сжимается до высоты контейнера (flex-shrink: 1 по
-   умолчанию), после чего его padding-bottom выпадает из прокрутки и последняя
-   реплика залипает под композером (проверено в браузере).
-   Высоты --topbar-h / --composer-h обновляет ai-app.js (ResizeObserver);
-   значения по умолчанию — пока скрипт не успел отработать. */
-.messages { padding: 0 16px; }   /* вертикальные отступы переехали в .msgs-inner */
-.msgs-inner {
-  flex-shrink: 0;
-  padding-top: calc(var(--topbar-h, 52px) + 14px);
-  padding-bottom: calc(var(--composer-h, 132px) + 18px);
-}
-/* pull-индикатор показывается под шапкой, а не за ней */
-.pull-indicator { top: calc(var(--topbar-h, 52px) + 8px); }
 .composer {
   position: relative; isolation: isolate;
   max-width: 760px; padding: 10px 12px 8px;
@@ -365,17 +310,14 @@ body.light-theme .markdown-body :not(pre) > code { background: rgba(0, 0, 0, .05
 }
 .dialog {
   border-radius: 18px; border: 1px solid var(--r-hair-strong);
-  /* Едва заметное «стекло»: 12% прозрачности + мягкое размытие фона.
-     Первая строка background — fallback для старых браузеров без color-mix. */
   background: rgba(22, 23, 28, .9);
-  background: color-mix(in srgb, #16171c 88%, transparent);
-  backdrop-filter: blur(12px) saturate(130%);
-  -webkit-backdrop-filter: blur(12px) saturate(130%);
+  backdrop-filter: blur(22px) saturate(140%);
+  -webkit-backdrop-filter: blur(22px) saturate(140%);
   box-shadow: 0 28px 80px -20px rgba(0, 0, 0, .7);
 }
-body.light-theme .dialog { background: rgba(252, 252, 253, .92); background: color-mix(in srgb, #fcfcfd 90%, transparent); }
+body.light-theme .dialog { background: rgba(252, 252, 253, .92); }
 .dialog[open] { animation: r-dialog-in .3s var(--r-ease-out) both; }
-.dialog::backdrop { background: rgba(0, 0, 0, .4); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); animation: r-fade .25s ease both; }
+.dialog::backdrop { background: rgba(0, 0, 0, .4); backdrop-filter: blur(4px); animation: r-fade .25s ease both; }
 @keyframes r-fade { from { opacity: 0; } to { opacity: 1; } }
 .dialog header { padding: 14px 16px 12px 20px; border-bottom: 1px solid var(--r-hair); }
 .dialog header h2 { font-size: 15px; font-weight: 600; letter-spacing: -.01em; }
@@ -401,12 +343,8 @@ body.light-theme .dialog { background: rgba(252, 252, 253, .92); background: col
 }
 body.light-theme .toast { background: rgba(255, 255, 255, .92); }
 
-/* кнопка «вниз» поменьше и легче; bottom поднимает её над парящим композером
-   (--composer-h — фактическая высота обёртки, обновляет ai-app.js) */
-.msgs-wrap > .scroll-bottom {
-  width: 34px; height: 34px; min-width: 34px; min-height: 34px;
-  bottom: calc(var(--composer-h, 132px) + 20px);
-}
+/* кнопка «вниз» поменьше и легче */
+.msgs-wrap > .scroll-bottom { width: 34px; height: 34px; min-width: 34px; min-height: 34px; bottom: 14px; }
 .msgs-wrap > .scroll-bottom svg { width: 16px; height: 16px; }
 
 /* ---------- компактный режим ---------- */
@@ -416,12 +354,11 @@ body.compact .msg.bot .bubble { padding-top: 0; }
 /* ---------- адаптив ---------- */
 @media (max-width: 860px) {
   .sidebar { background: rgba(20, 21, 26, .9); }
-  /* резервы высоты держит .msgs-inner (см. блок выше); горизонтальные отступы — свои */
-  .messages { padding: 0 12px; }
+  .messages { padding: 18px 12px 8px; }
   .msgs-inner { gap: 20px; }
-  .composer-wrap { padding: 4px 10px max(10px, env(safe-area-inset-bottom)); }
+  .composer-wrap { padding: 4px 10px 10px; }
   .composer { border-radius: 18px; }
-  .topbar { padding: max(6px, env(safe-area-inset-top)) 10px 6px; }
+  .topbar { padding: 6px 10px; }
   .hint { display: none; }
 }
 
