@@ -1,8 +1,14 @@
 {
-  "mcpServers": {
-    "my-assistant": {
-      "command": "npx",
-      "args": ["-y", "mcp-remote", "https://ai.example.ru/mcp/"]
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "blockcoin-memory": {
+      "type": "remote",
+      "url": "https://www.blockchat.ru/mcp/",
+      "enabled": true,
+      "oauth": false,
+      "headers": {
+        "Authorization": "Bearer P4N6PNAYPX9S"
+      }
     }
   }
 }
