@@ -406,6 +406,7 @@ async def _call_llm_stream_once(
                        "elapsed": round(time.monotonic() - t0, 1),
                        "tokens": usage.get("completion_tokens", n_tok),
                        "prompt_tokens": usage.get("prompt_tokens"),
+                       "context_length": _loaded_ctx or _desired_ctx,
                        "tps": _status(time.monotonic())["tps"]}
             if finish_reason == "length":
                 logger.warning("LLM stream truncated by token limit (finish_reason=length)")
