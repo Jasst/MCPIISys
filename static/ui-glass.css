@@ -1,0 +1,93 @@
+/* ==========================================================================
+   Glass layer: стеклянные панели и прозрачный композер.
+   Подключается ПОСЛЕДНИМ в ai.html. Меняет только фон, прозрачность и blur,
+   вёрстку и переменные других слоёв не трогает.
+   Откат: удалить строку <link> на ui-glass.css.
+   ========================================================================== */
+
+:root {
+  --g-panel: rgba(20, 21, 26, .56);          /* полупрозрачная панель */
+  --g-panel-strong: rgba(20, 21, 26, .8);    /* для окон и меню, где важна читаемость */
+  --g-hair: rgba(255, 255, 255, .09);
+  --g-blur: blur(22px) saturate(160%);
+  --composer-h: 150px;                       /* обновляется из JS по реальной высоте */
+}
+
+body.light-theme {
+  --g-panel: rgba(255, 255, 255, .58);
+  --g-panel-strong: rgba(255, 255, 255, .84);
+  --g-hair: rgba(0, 0, 0, .08);
+}
+
+/* ---------- сообщения уходят под композер и топбар ----------
+   Отрицательный margin-bottom растягивает область сообщений на всю высоту
+   чата: композер лежит поверх её нижней части, а текст просвечивает сквозь него.
+   Отступы внутри скролла компенсируют перекрытие. */
+.main { position: relative; }
+.msgs-wrap { margin-bottom: calc(-1 * var(--composer-h)); }
+.msgs-wrap > .messages { padding-bottom: calc(var(--composer-h) + 12px); }
+.msgs-wrap > .scroll-bottom { bottom: calc(var(--composer-h) + 10px); }
+
+/* ---------- композер: прозрачная область без непрозрачного градиента ---------- */
+.composer-wrap {
+  position: relative;
+  z-index: 2;
+  background: none;
+  border-top: none;
+  pointer-events: none;                      /* пустые поля вокруг не перехватывают скролл */
+  padding-bottom: max(14px, env(safe-area-inset-bottom));
+}
+.composer-wrap > * { pointer-events: auto; }
+
+.composer {
+  background: var(--g-panel);
+  backdrop-filter: var(--g-blur);
+  -webkit-backdrop-filter: var(--g-blur);
+  border: 1px solid var(--g-hair);
+  box-shadow: 0 18px 50px -20px rgba(0, 0, 0, .7), inset 0 1px 0 rgba(255, 255, 255, .05);
+}
+
+/* ---------- боковая панель и верхняя панель ---------- */
+.sidebar,
+.topbar {
+  background: var(--g-panel);
+  backdrop-filter: var(--g-blur);
+  -webkit-backdrop-filter: var(--g-blur);
+}
+
+/* ---------- окна и меню: стекло с более плотным фоном ---------- */
+.dialog,
+.ui-dialog,
+.ui-menu,
+.model-dd {
+  background: var(--g-panel-strong);
+  backdrop-filter: var(--g-blur);
+  -webkit-backdrop-filter: var(--g-blur);
+  border: 1px solid var(--g-hair);
+}
+
+/* ---------- метрики под ответом ---------- */
+.msg-foot { flex-wrap: wrap; row-gap: 4px; }
+.msg-stats {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  margin-right: 6px;
+  cursor: default;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .composer, .sidebar, .topbar, .dialog, .ui-dialog, .ui-menu, .model-dd {
+    background: var(--bg-secondary);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+
+/* ---------- размер текста тоже в поле ввода (только десктоп: на iOS < 16px вызывает автозум) ---------- */
+@media (min-width: 861px) {
+  body[data-fs="s"] #input { font-size: 14px; }
+  body[data-fs="m"] #input { font-size: 15px; }
+  body[data-fs="l"] #input { font-size: 17px; }
+}
