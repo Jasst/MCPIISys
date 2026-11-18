@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import logging
 import json
 import asyncio
+import contextlib
 from collections import deque
 import time
 import re
@@ -587,7 +588,8 @@ class CognitiveController:
         self._research_task = None
         self._reflection_task = None
         self._idle_task = None
-        self._start_background_tasks()
+        # Фоновые задачи запускает get_assistant() на основном event loop
+        # (create_task нельзя вызывать из рабочего потока, где конструктор грузит память).
 
         self.current_working_memory: List[str] = []
         self.current_goals: List[Goal] = []
@@ -4222,12 +4224,17 @@ async def get_assistant(user_id: str):
     async with _assistants_lock:
         await _evict_stale_assistants(exclude_uid=user_id)
         if user_id not in _assistants:
+            # Тяжёлая инициализация (эмбеддер, FAISS, GCN, история) идёт в рабочем
+            # потоке, чтобы не блокировать event loop для всех пользователей.
             # Общий MCP-менеджер для внешних серверов (если инициализирован);
             # иначе контроллер создаст свой. Память кошелька идёт мимо менеджера —
             # см. CognitiveController._register_local_memory_tools.
-            _assistants[user_id] = CognitiveController(
-                user_id, mcp_manager=get_global_mcp_manager()
+            ctrl = await asyncio.to_thread(
+                CognitiveController, user_id, mcp_manager=get_global_mcp_manager()
             )
+            # Фоновые циклы стартуем уже на основном loop.
+            ctrl._start_background_tasks()
+            _assistants[user_id] = ctrl
             logger.info(f"Создан когнитивный ассистент для {user_id[:16]}")
         _assistants.move_to_end(user_id)
         _assistant_last_used[user_id] = time.time()
@@ -4881,14 +4888,14 @@ async def global_stats(address: str = Depends(require_auth)):
 
 @router.get("/gcn_global_stats")
 async def gcn_global_stats(address: str = Depends(require_auth)):
-    global_mem = GCNMemoryRouter._get_global_memory(MEMORY_BASE_DIR)
-    shared_mem = GCNMemoryRouter._get_shared_memory(MEMORY_BASE_DIR)
+    global_mem = await asyncio.to_thread(GCNMemoryRouter._get_global_memory, MEMORY_BASE_DIR)
+    shared_mem = await asyncio.to_thread(GCNMemoryRouter._get_shared_memory, MEMORY_BASE_DIR)
     return {"global": global_mem.get_stats(), "shared": shared_mem.get_stats()}
 
 @router.post("/force_merge")
 async def force_merge(address: str = Depends(require_auth)):
-    global_mem = GCNMemoryRouter._get_global_memory(MEMORY_BASE_DIR)
-    shared_mem = GCNMemoryRouter._get_shared_memory(MEMORY_BASE_DIR)
+    global_mem = await asyncio.to_thread(GCNMemoryRouter._get_global_memory, MEMORY_BASE_DIR)
+    shared_mem = await asyncio.to_thread(GCNMemoryRouter._get_shared_memory, MEMORY_BASE_DIR)
     try:
         await global_mem.light_consolidation()
         await shared_mem.light_consolidation()
@@ -4916,24 +4923,51 @@ def start_global_merge_task():
     if _global_merge_task is not None and not _global_merge_task.done():
         logger.info("Global merge task already running")
         return
-    loop = asyncio.get_event_loop()
-    if not loop.is_running():
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
         logger.warning("start_global_merge_task called without a running loop; skipped")
         return
     _global_merge_task = asyncio.create_task(_global_merge_loop())
     logger.info("Global merge task started")
 
+async def stop_global_merge_task():
+    """Останавливает фоновую консолидацию при выключении приложения."""
+    global _global_merge_task
+    if _global_merge_task is None:
+        return
+    _global_merge_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await _global_merge_task
+    _global_merge_task = None
+
+# Задержка перед тяжёлой инициализацией памяти: сервер успевает подняться и ответить
+GLOBAL_MERGE_STARTUP_DELAY_S = float(os.getenv("GLOBAL_MERGE_STARTUP_DELAY", "300"))
+
+
 async def _global_merge_loop():
-    global_mem = GCNMemoryRouter._get_global_memory(MEMORY_BASE_DIR)
-    shared_mem = GCNMemoryRouter._get_shared_memory(MEMORY_BASE_DIR)
-    # Создаём роутер для формирования концептов с безопасным именем пользователя
+    # Сначала даём серверу подняться
+    await asyncio.sleep(GLOBAL_MERGE_STARTUP_DELAY_S)
+
+    # Инициализация памяти с повтором: break выходит только из этого цикла
+    while True:
+        try:
+            global_mem = await asyncio.to_thread(GCNMemoryRouter._get_global_memory, MEMORY_BASE_DIR)
+            shared_mem = await asyncio.to_thread(GCNMemoryRouter._get_shared_memory, MEMORY_BASE_DIR)
+            break
+        except Exception as e:
+            logger.error(f"Global merge: повторная попытка инициализации через 600 с: {e}")
+            await asyncio.sleep(600)
+
+    concept_router = None
     try:
-        concept_router = GCNMemoryRouter("system_consolidation", MEMORY_BASE_DIR)
+        concept_router = await asyncio.to_thread(GCNMemoryRouter, "system_consolidation", MEMORY_BASE_DIR)
         concept_router.set_llm_caller(call_llm)
     except Exception as e:
         logger.error(f"Не удалось создать роутер для консолидации концептов: {e}")
         concept_router = None
 
+    # Основной цикл консолидации (без изменений)
     while True:
         await asyncio.sleep(CONSOLIDATION_INTERVAL)
         try:

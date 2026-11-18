@@ -695,6 +695,29 @@ const PHASE_LABEL = {
 };
 const TRACE_ICON = { start: '▶', route: '🧭', understand: '🔎', round: '↻', tool: '🛠', done: '✓', skip: '⏭', stuck: '⚠', analyze: '🧠' };
 
+  // Метрики завершённого ответа: время, токены, скорость и заполнение контекста.
+  // Данные приходят из финального status-события сервера (usage от LM Studio).
+  function statsNode(m) {
+    const g = m.gen;
+    if (!g || g.phase !== 'done' || m.pending || m.error) return null;
+    const fmt = (n) => Number(n).toLocaleString('ru-RU');
+    const parts = [];
+    if (g.elapsed != null) parts.push(Number(g.elapsed).toFixed(1) + ' с');
+    if (g.prompt_tokens != null) parts.push('вход ' + fmt(g.prompt_tokens) + ' ток');
+    if (g.tokens) parts.push('выход ' + fmt(g.tokens) + ' ток');
+    if (g.tps) parts.push(g.tps + ' ток/с');
+    const used = (Number(g.prompt_tokens) || 0) + (Number(g.tokens) || 0);
+    if (g.context_length && used) parts.push('контекст ' + Math.min(100, Math.round(used / g.context_length * 100)) + '%');
+    if (!parts.length) return null;
+    const el = document.createElement('span');
+    el.className = 'msg-stats';
+    el.textContent = parts.join(' · ');
+    if (g.context_length && used) {
+      el.title = 'Занято ' + fmt(used) + ' из ' + fmt(g.context_length) + ' токенов контекста';
+    }
+    return el;
+  }
+
   function fmtSec(s) {
   s = Math.max(0, Number(s) || 0);
   return s < 60 ? `${Math.round(s)} с` : `${Math.floor(s / 60)} м ${Math.round(s % 60)} с`;
@@ -1010,6 +1033,8 @@ function skipToolsBtn() {
     time.className = 'time';
     time.textContent = fmtTime(m.time || Date.now());
     foot.appendChild(time);
+    const stats = statsNode(m);
+    if (stats) foot.appendChild(stats);
     if (m.text && !m.pending) foot.appendChild(actBtn('copy', 'Копировать', '/static/icons/Copy.png'));
     if (m.role !== 'user' && !m.pending) foot.appendChild(actBtn('regen', 'Получить другой ответ', ICON_REFRESH));
     if (m.role !== 'user' && m.text && !m.pending && 'speechSynthesis' in window) {
@@ -1328,6 +1353,16 @@ function skipToolsBtn() {
     els.input.style.height = Math.min(els.input.scrollHeight, 200) + 'px';
     const len = els.input.value.length;
     els.counter.textContent = len > 400 ? len + ' симв.' : '';
+  }
+
+  // Высота композера → CSS-переменная --composer-h: сообщения скроллятся под ним,
+  // а отступы в конце ленты и кнопка «вниз» всегда совпадают с реальным полем.
+  function observeComposerHeight() {
+    const wrap = document.querySelector('.composer-wrap');
+    if (!wrap) return;
+    const set = () => document.documentElement.style.setProperty('--composer-h', wrap.offsetHeight + 'px');
+    set();
+    if ('ResizeObserver' in window) new ResizeObserver(set).observe(wrap);
   }
 
   function applySettings() {
@@ -3739,6 +3774,7 @@ function buildCodeBlock(text, lang) {
     if (!Array.isArray(sessions) || !sessions.length) sessions = readJSON(KEY.sessions, []);
     bindSettings();
     applySettings();
+    observeComposerHeight();
     syncChips();
 
     if (!sessions.length) createSession(DEFAULT_NAME);

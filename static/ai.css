@@ -349,7 +349,6 @@ body[data-fs="l"] { --chat-fs: 17px; }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 .scrim { display: none; }
 
-body.compact .msgs-inner { gap: 10px; }
 body.compact .bubble { padding: 8px 12px; }
 
 /* ---------- адаптив ---------- */

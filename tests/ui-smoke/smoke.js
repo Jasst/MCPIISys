@@ -58,6 +58,7 @@ w.fetch = async (url, opts = {}) => {
   return new Response('nope', { status: 404 });
 };
 
+for (const f of ['js/ui.js', 'js/ai-store.js']) w.eval(fs.readFileSync(path.join(root, f), 'utf8'));
 w.eval(fs.readFileSync(path.join(root, 'js/ai-app.js'), 'utf8'));
 
 const $ = (s) => w.document.querySelector(s);

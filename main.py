@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -25,11 +26,12 @@ from starlette.middleware.sessions import SessionMiddleware
 import auth_store
 from config import AUTH_ENABLED, CONFIG, SECRET_KEY, STATIC_FOLDER
 from dependencies import current_user_id
-from GCN.config_ai import GENERATED_IMAGES_DIR
+from GCN.config_ai import GENERATED_IMAGES_DIR, LLM_BACKEND, LLAMACPP_AUTOSTART, LM_STUDIO_MODEL
 from setup import setup_logging, get_rate_limit_stats
 from routes.ai_assistant import (
     router as ai_router,
     start_global_merge_task,
+    stop_global_merge_task,
     init_global_mcp,
     shutdown_all,
 )
@@ -42,13 +44,18 @@ from mcp_server_blockcoin import mcp
 
 setup_logging()
 logger = logging.getLogger(__name__)
+startup_logger = logging.getLogger("startup")  # Для отслеживания старта
 logging.getLogger("routes.ai_assistant").setLevel(logging.INFO)
 logging.getLogger("GCN.mcp_client_manager").setLevel(logging.INFO)
+
+# Запуск через `uvicorn main:app` минует run.py — ставим Windows-фикс и здесь.
+if sys.platform == 'win32':
+    from win_asyncio_accept_fix import install as _install_win_asyncio_accept_fix
+    _install_win_asyncio_accept_fix()
 
 
 async def _autostart_llamacpp():
     """LLM_BACKEND=llamacpp и LLAMACPP_AUTOSTART=1: поднять модель по умолчанию при старте."""
-    from GCN.config_ai import LLM_BACKEND, LLAMACPP_AUTOSTART, LM_STUDIO_MODEL
     if LLM_BACKEND != "llamacpp" or not LLAMACPP_AUTOSTART:
         return
     await asyncio.sleep(2)
@@ -67,64 +74,122 @@ async def _autostart_llamacpp():
     if not target:
         logger.warning("llama-server autostart: в MODELS_DIR нет .gguf моделей")
         return
+    startup_logger.info(f"[LLAMA] Загрузка модели по умолчанию: {target!r}")
     logger.info(f"llama-server autostart: стартовая загрузка {target!r} (инициатор: автозапуск)")
     res = await ensure_model_loaded(target)
+    startup_logger.info(f"[LLAMA] Автозагрузка завершена: {res}")
     logger.info(f"llama-server autostart: {res}")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Контекстный менеджер для жизненного цикла приложения.
+    
+    Запускает фоновые задачи при старте и останавливает их при завершении.
+    Все события логируются в startup_logger для полного трекинга загрузки.
+    """
+    startup_logger.info("=" * 60)
+    startup_logger.info("🚀  FastAPI Application Starting")
+    startup_logger.info("=" * 60)
+    
     logger.info("Starting AI assistant server...")
+    startup_logger.info("[LIFESPAN] Началась инициализация приложения")
+
     if AUTH_ENABLED:
         auth_store.init_db()
+        startup_logger.info("[AUTH] Инициализация базы данных пользователей завершена")
+
     start_global_merge_task()
+    startup_logger.info("[MERGE] Запущена глобальная задача слияния памяти")
 
     async def _deferred_init_mcp():
+        """Инициализация MCP-менеджера с небольшой задержкой."""
         await asyncio.sleep(1.5)
         try:
             await init_global_mcp()
+            startup_logger.info("[MCP] MCP менеджер инициализирован")
             logger.info("MCP manager initialized")
         except Exception as e:
+            startup_logger.error(f"[MCP] Ошибка инициализации MCP: {e}", exc_info=True)
             logger.error(f"Failed to initialize MCP: {e}", exc_info=True)
 
     async def _warm_models():
-        # Модели грузим в отдельном потоке при старте, а не внутри первого запроса пользователя:
-        # раньше первый запрос блокировал весь сервер на время загрузки весов.
+        """Прогрев моделей в отдельном потоке, чтобы не блокировать первый запрос."""
         await asyncio.sleep(0.5)
         try:
+            startup_logger.info("[WARMUP] Начало прогрева моделей")
             await asyncio.to_thread(_warm_models_sync)
+            startup_logger.info("[WARMUP] Модели прогреты")
             logger.info("Модели прогреты")
         except Exception as e:  # noqa: BLE001
+            startup_logger.warning(f"[WARMUP] Прогрев моделей не выполнен (загрузятся по требованию): {e}")
             logger.warning(f"Прогрев моделей не выполнен (загрузятся по требованию): {e}")
 
     def _warm_models_sync():
+        """Синхронная часть прогрева моделей."""
         from GCN.config_ai import MEMORY_USE_EMBEDDINGS, EMBEDDING_MODEL, NLI_MODEL
+        startup_logger.info("[WARMUP] Проверка embedder: %s", EMBEDDING_MODEL)
         if MEMORY_USE_EMBEDDINGS:
             from GCN.memory_graph import CognitiveMemory
             CognitiveMemory._get_shared_embedder(EMBEDDING_MODEL)
+            startup_logger.info("[WARMUP] Embedder загружен")
+        startup_logger.info("[WARMUP] Проверка NLI модель: %s", NLI_MODEL)
         if NLI_MODEL:
             from GCN.nli import get_cross_encoder
             get_cross_encoder(NLI_MODEL)
+            startup_logger.info("[WARMUP] Cross-encoder загружен")
+        startup_logger.info("[WARMUP] Проверка Reranker")
         from GCN.web_search import Reranker
         Reranker._get()
+        startup_logger.info("[WARMUP] Reranker загружен")
 
     async with mcp.session_manager.run():
+        # Создаём задачи с именами для отслеживания в logs
         init_task = asyncio.create_task(_deferred_init_mcp(), name="mcp-init")
         autostart_task = asyncio.create_task(_autostart_llamacpp(), name="llama-autostart")
         warmup_task = asyncio.create_task(_warm_models(), name="model-warmup")
+
+        startup_logger.info("=" * 60)
+        startup_logger.info("📋  Background Tasks Started:")
+        startup_logger.info(f"   [MCP]    _deferred_init_mcp() — инициализация MCP-менеджера")
+        startup_logger.info(f"   [LLAMA]  _autostart_llamacpp() — автозагрузка модели по умолчанию")
+        startup_logger.info(f"   [WARMUP] _warm_models()      — прогрев embedder, NLI и reranker")
+        startup_logger.info("=" * 60)
+
         try:
             yield
         finally:
+            # Отменяем фоновые задачи при завершении приложения
             init_task.cancel()
             autostart_task.cancel()
             warmup_task.cancel()
+            
+            startup_logger.info("=" * 60)
+            startup_logger.info("🛑  FastAPI Application Shutting Down")
+            startup_logger.info("=" * 60)
+
+            await stop_global_merge_task()
+            startup_logger.info("[MERGE] Остановлена глобальная задача слияния памяти")
+
             with contextlib.suppress(asyncio.CancelledError):
                 await init_task
+            with contextlib.suppress(asyncio.CancelledError):
+                await autostart_task
+            with contextlib.suppress(asyncio.CancelledError):
+                await warmup_task
+
             await shutdown_all()
+            startup_logger.info("[SHUTDOWN] Завершена остановка всех компонентов")
+
             # llama-server — наш дочерний процесс: останавливаем вместе с приложением
             from GCN.llamacpp_manager import shutdown_llamacpp
             await shutdown_llamacpp()
+            startup_logger.info("[LLAMA] Остановлен llama-server, освобождён VRAM")
+
             logger.info("Shutdown complete")
+            startup_logger.info("=" * 60)
+            startup_logger.info("✅  FastAPI Application Shutdown Complete")
+            startup_logger.info("=" * 60)
 
 
 app = FastAPI(
