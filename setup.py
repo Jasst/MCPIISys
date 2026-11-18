@@ -12,36 +12,52 @@ from typing import Dict, Tuple
 from config import CONFIG
 
 
-def setup_logging() -> logging.Logger:
+_logging_configured = False
+
+
+def setup_logging() -> Tuple[logging.Logger, logging.Logger]:
+    global _logging_configured
     log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assistant.log')
     is_prod = os.getenv('FLASK_ENV') == 'production'
 
-    file_handler = logging.handlers.RotatingFileHandler(
-        log_path,
-        maxBytes=CONFIG['LOG_MAX_BYTES'],
-        backupCount=CONFIG['LOG_BACKUP_COUNT'],
-        encoding='utf-8',
-        delay=True,
-    )
-    file_handler.setFormatter(logging.Formatter(
-        '%(asctime)s %(levelname)s [%(name)s:%(lineno)d] %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-    ))
-    handlers = [file_handler]
-    if not is_prod:
-        console = logging.StreamHandler()
-        console.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
-        handlers.append(console)
-
-    logging.basicConfig(
-        level=logging.WARNING if is_prod else logging.INFO,
-        handlers=handlers,
-        force=True,
-    )
-    logging.getLogger('uvicorn').setLevel(logging.WARNING)
     logger = logging.getLogger(__name__)
-    logger.warning(f"=== AI assistant started, log: {log_path} ===")
-    return logger
+    if not _logging_configured:
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_path,
+            maxBytes=CONFIG['LOG_MAX_BYTES'],
+            backupCount=CONFIG['LOG_BACKUP_COUNT'],
+            encoding='utf-8',
+            delay=True,
+        )
+        # Подробный формат для файла — показывает полный стек вызовов и контекст
+        file_handler.setFormatter(logging.Formatter(
+            '%(asctime)s [%(levelname)-7s] %(name)s:%(lineno)d - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S',
+        ))
+        handlers = [file_handler]
+        if not is_prod:
+            # Для консоли — компактный формат, но с уровнем детализации DEBUG для старта
+            console = logging.StreamHandler()
+            console.setFormatter(logging.Formatter(
+                '%(asctime)s [%(levelname)-7s] %(name)s - %(message)s',
+                datefmt='%H:%M:%S',
+            ))
+            handlers.append(console)
+
+        # Устанавливаем базовый уровень INFO для старта, DEBUG для отладки
+        logging.basicConfig(
+            level=logging.DEBUG if not is_prod else logging.INFO,
+            handlers=handlers,
+            force=True,
+        )
+        logging.getLogger('uvicorn').setLevel(logging.WARNING)
+        _logging_configured = True
+        logger.warning(f"=== AI assistant started, log: {log_path} ===")
+
+    # Создаём отдельный логгер для отслеживания старта программы
+    startup_logger = logging.getLogger("startup")
+    startup_logger.setLevel(logging.DEBUG)
+    return logger, startup_logger
 
 
 class RateLimiter:

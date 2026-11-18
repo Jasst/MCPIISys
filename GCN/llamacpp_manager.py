@@ -36,6 +36,7 @@ from .config_ai import (
 )
 
 logger = logging.getLogger(__name__)
+startup_logger = logging.getLogger("startup")  # Для отслеживания старта llama-server
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 PARAMS_FILE = BASE_DIR / "model_params.json"
@@ -249,66 +250,147 @@ class LlamaServerManager:
 
     # --- загрузка / выгрузка ---
     async def load(self, model_id: str, params: Optional[LoadParams] = None) -> None:
+        """Загружает модель llama-server.
+        
+        Аргументы:
+            model_id — идентификатор модели из MODELS_DIR
+            params   — параметры загрузки (опционально, по умолчанию из model_params.json)
+            
+        Логирование:
+            - Запись в файл LLAMACPP_LOG с аргументами запуска
+            - Отслеживание состояния процесса и ответа /health
+        """
         model = _find_model(model_id)
         if model is None:
             raise RuntimeError(f"Модель {model_id!r} не найдена в {MODELS_DIR}")
-        if shutil.which(LLAMACPP_SERVER_BIN) is None and not Path(LLAMACPP_SERVER_BIN).is_file():
+        
+        # Проверка llama-server бинарника
+        server_bin_path = Path(LLAMACPP_SERVER_BIN).resolve()
+        if shutil.which(LLAMACPP_SERVER_BIN) is None and not server_bin_path.is_file():
             raise RuntimeError(f"llama-server не найден: проверьте LLAMACPP_SERVER_BIN "
-                               f"({LLAMACPP_SERVER_BIN})")
+                               f"({LLAMACPP_SERVER_BIN}, путь: {server_bin_path})")
+
         p = (params or get_params(model_id)).normalized()
 
-        await self.unload()                      # один процесс — старый сначала гасим
+        # Поиск mmproj проектора
         mmproj = find_mmproj(model["path"])
-        logger.info(f"mmproj для {model_id!r}: {mmproj or 'не найден (изображения не поддерживаются)'}")
+        startup_logger.info(f"[LLAMA] Модель {model_id!r}: mmproj={mmproj or 'не найден'}")
+        
+        # Формирование аргументов запуска
         args = self.build_args(model["path"], model_id, p, mmproj=mmproj)
+        startup_logger.info(f"[LLAMA] Команда запуска: {' '.join(args)}")
+
+        # Подготовка окружения
         env = os.environ.copy()
         env["CUDA_DEVICE_ORDER"] = LLAMACPP_CUDA_DEVICE_ORDER   # порядок карт как в nvidia-smi
-        logger.info(f"llama-server: запуск {model_id!r}")
+        
+        # Информация о модели для лога
+        model_info = f"ctx={p.ctx}, gpu_layers={p.gpu_layers if p.gpu_layers >= 0 else 'все'}, " \
+                    f"flash_attn={'on' if p.flash_attn else 'off'}, kv_cache={p.kv_cache_type}, " \
+                    f"threads={p.threads}, parallel={p.parallel}, main_gpu={p.main_gpu}"
+        startup_logger.info(f"[LLAMA] Параметры: {model_info}")
+
+        # Открываем файл логов llama-server
         self._log_fp = open(LOG_PATH, "a", encoding="utf-8", errors="replace")
-        self._log_fp.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} {' '.join(args)}\n")
+        timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        args_str = ' '.join(args)
+        self._log_fp.write(f"\n===== {timestamp} {' '.join(args)}\n")
         self._log_fp.flush()
+
+        # Запуск subprocess с CREATE_NEW_PROCESS_GROUP для Windows (Ctrl+C работает корректно)
         creation = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+        startup_logger.info(f"[LLAMA] Запуск llama-server: PID={self._proc.pid if self._proc else 'pending'}")
+
         self._proc = subprocess.Popen(args, stdout=self._log_fp, stderr=subprocess.STDOUT,
                                       env=env, creationflags=creation)
         self._model_id, self._params = model_id, p
         self._mmproj = mmproj
+        
+        # Записываем PID в лог для отслеживания
+        startup_logger.info(f"[LLAMA] llama-server запущен с PID={self._proc.pid}")
+
         try:
             await self._wait_ready()
-        except Exception:
+        except Exception as e:
+            startup_logger.error(f"[LLAMA] Ошибка при ожидании готовности: {e}", exc_info=True)
             await self.unload()
             raise
-        save_params(model_id, p)                 # запомнить удачные параметры
+        
+        # Сохраняем удачные параметры для этой модели
+        save_params(model_id, p)
+        startup_logger.info(f"[LLAMA] Параметры сохранения в model_params.json завершены")
 
     async def _wait_ready(self) -> None:
+        """Ожидает ответа /health от llama-server.
+        
+        Аргументы:
+            url      — URL для проверки здоровья (/health)
+            deadline — время дедлайна (текущее + LLAMACPP_STARTUP_TIMEOUT)
+            
+        Возвращает, когда сервер ответил 200 OK на /health
+        
+        Логирование:
+            - Каждую секунду проверяем статус процесса и HTTP-ответ
+            - При успехе — записываем в лог
+            - При ошибке — логируем с полным стеком
+        """
         url = f"http://{LLAMACPP_HOST}:{LLAMACPP_PORT}/health"
         deadline = time.monotonic() + LLAMACPP_STARTUP_TIMEOUT
+        
+        startup_logger.info(f"[LLAMA] Ожидание готовности llama-server: {url} (дедлайн через {LLAMACPP_STARTUP_TIMEOUT:.1f}с)")
+
         async with aiohttp.ClientSession() as session:
             while time.monotonic() < deadline:
+                # Проверка состояния процесса
                 if self._proc.poll() is not None:
-                    raise RuntimeError(f"llama-server завершился (код {self._proc.returncode}). "
+                    returncode = self._proc.returncode
+                    startup_logger.error(f"[LLAMA] llama-server завершился с кодом {returncode}!", exc_info=True)
+                    raise RuntimeError(f"llama-server завершился (код {returncode}). "
                                        f"Подробности в {LLAMACPP_LOG}")
+
+                # Проверка HTTP-ответа /health
                 try:
                     async with session.get(url, timeout=aiohttp.ClientTimeout(total=3)) as r:
                         if r.status == 200:
+                            startup_logger.info(f"[LLAMA] llama-server готов! Ответ /health: {r.status}")
                             return
-                except Exception:
-                    pass                         # ещё грузится — 503 или нет соединения
+                except Exception as e:
+                    # Это нормально — сервер ещё грузится, может быть 503 или нет соединения
+                    pass
+
                 await asyncio.sleep(1.0)
-        raise RuntimeError(f"llama-server не ответил за {LLAMACPP_STARTUP_TIMEOUT} с. "
+
+        startup_logger.error(f"[LLAMA] Ошибка: llama-server не ответил за {LLAMACPP_STARTUP_TIMEOUT:.1f}с", exc_info=True)
+        raise RuntimeError(f"llama-server не ответил за {LLAMACPP_STARTUP_TIMEOUT:.1f} с. "
                            f"Смотрите {LLAMACPP_LOG}")
 
     async def unload(self) -> None:
+        """Останавливает llama-server и освобождает VRAM.
+        
+        Логирование:
+            - Запись о завершении процесса
+            - Успешное освобождение VRAM
+        """
         proc = self._proc
         self._forget()
+        
         if proc is None or proc.poll() is not None:
+            startup_logger.info(f"[LLAMA] llama-server уже остановлен (PID={proc.pid if proc else 'N/A'})")
             return
+
+        # graceful terminate с таймаутом 15с
+        startup_logger.info(f"[LLAMA] Завершение llama-server (PID={proc.pid})...")
         proc.terminate()
+        
         try:
             await asyncio.to_thread(proc.wait, 15)
         except subprocess.TimeoutExpired:
+            # force kill если процесс не остановился
+            startup_logger.warning(f"[LLAMA] graceful terminate не сработал, force kill (PID={proc.pid})")
             proc.kill()
             await asyncio.to_thread(proc.wait, 10)
-        logger.info("llama-server остановлен, VRAM освобождён")
+
+        startup_logger.info("[LLAMA] llama-server остановлен, VRAM освобождён")
 
 
 manager = LlamaServerManager()

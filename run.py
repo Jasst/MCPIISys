@@ -28,9 +28,24 @@ import os
 import signal
 import sys
 
+# Если stdout/stderr перенаправлены (Task Scheduler, CI), Windows использует
+# ANSI-кодировку, и эмодзи в баннере роняют запуск с UnicodeEncodeError.
+# errors='replace' оставляет консольный вывод как есть, но не даёт упасть.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors='replace')
+    except (AttributeError, ValueError):
+        pass
+
 if sys.platform == 'win32':
-    import asyncio
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    # uvicorn >= 0.36 выбирает loop через loop_factory и больше не смотрит на
+    # WindowsSelectorEventLoopPolicy. Оставляем ProactorEventLoop (он нужен
+    # uvicorn) и ставим backport фикса CPython gh-93821: иначе один reset
+    # соединения (WinError 64) закрывает слушающий сокет :8000, процесс
+    # продолжает жить, но сервер перестаёт принимать запросы.
+    from win_asyncio_accept_fix import install as install_win_asyncio_accept_fix
+else:
+    install_win_asyncio_accept_fix = None
 
 logger = logging.getLogger(__name__)
 
@@ -104,9 +119,23 @@ if __name__ == '__main__':
         print("!! Если это осознанно — запусти с ALLOW_PUBLIC_BIND=1")
         host = '127.0.0.1'
 
-    print("=" * 60)
+    # === ДОБАВЛЕНО: подробный лог старта программы ===
+    from setup import setup_logging
+    _, startup_logger = setup_logging()
+
+    if install_win_asyncio_accept_fix is not None:
+        if install_win_asyncio_accept_fix():
+            startup_logger.info(
+                "[WIN] Установлен backport asyncio-accept (gh-93821, WinError 64)"
+            )
+        else:
+            startup_logger.info(
+                "[WIN] Backport asyncio-accept не нужен: исправление уже есть в Python"
+            )
+    
+    print("=" * 80)
     print("🚀  Local AI Assistant (FastAPI + Uvicorn)")
-    print("=" * 60)
+    print("=" * 80)
     print(f"   Mode:    {mode}")
     print(f"   Host:    {host}:{port}   (behind nginx)")
     print(f"   Workers: {workers}  (forced 1: in-memory state)")
@@ -114,7 +143,48 @@ if __name__ == '__main__':
     print(f"   Reload:  {reload}")
     print(f"   Docs:    http://{host}:{port}/api/docs")
     print(f"   PID:     {os.getpid()}")
-    print("=" * 60)
+    print("=" * 80)
+
+    # Записываем конфигурацию в лог
+    startup_logger.info("=" * 60)
+    startup_logger.info("🚀  Local AI Assistant (FastAPI + Uvicorn)")
+    startup_logger.info("=" * 60)
+    startup_logger.info(f"   Mode:    {mode}")
+    startup_logger.info(f"   Host:    {host}:{port}   (behind nginx)")
+    startup_logger.info(f"   Workers: {workers}  (forced 1: in-memory state)")
+    startup_logger.info(f"   Loop:    {loop_impl}")
+    startup_logger.info(f"   Reload:  {reload}")
+    startup_logger.info(f"   Docs:    http://{host}:{port}/api/docs")
+    startup_logger.info(f"   PID:     {os.getpid()}")
+    startup_logger.info("=" * 60)
+
+    # Записываем окружение в лог
+    startup_logger.info("📋  Environment Configuration:")
+    startup_logger.info(f"   FLASK_ENV={os.getenv('FLASK_ENV', 'not set')}")
+    startup_logger.info(f"   UVICORN_MODE={mode}")
+    startup_logger.info(f"   SERVER_HOST={host}")
+    startup_logger.info(f"   SERVER_PORT={port}")
+    startup_logger.info(f"   ALLOW_PUBLIC_BIND={os.getenv('ALLOW_PUBLIC_BIND', 'False')}")
+
+    # Записываем Python окружение в лог
+    startup_logger.info("🐍  Python Environment:")
+    startup_logger.info(f"   PYTHON_VERSION={sys.version}")
+    startup_logger.info(f"   PLATFORM={sys.platform}")
+    startup_logger.info(f"   EXECUTABLE={sys.executable}")
+
+    # Записываем ключевые пути в лог
+    startup_logger.info("📁  Key Paths:")
+    startup_logger.info(f"   PROJECT_ROOT={os.path.dirname(os.path.abspath(__file__))}")
+    startup_logger.info(f"   PID_FILE={PID_FILE}")
+
+    print("\n📋 Запуск сервера...")
+    
+    # Устанавливаем уровень логирования для uvicorn (чтобы не было слишком много шума)
+    logging.getLogger("uvicorn").setLevel(logging.WARNING)
+    
+    startup_logger.info("=" * 60)
+    startup_logger.info("🚀  Starting Uvicorn Server...")
+    startup_logger.info("=" * 60)
 
     uvicorn.run(
         'main:app',
@@ -130,3 +200,8 @@ if __name__ == '__main__':
         timeout_keep_alive=300,
         timeout_graceful_shutdown=30,
     )
+
+    # После завершения uvicorn (или при аварийном завершении)
+    startup_logger.info("=" * 60)
+    startup_logger.info("🛑  Uvicorn Server Stopped")
+    startup_logger.info("=" * 60)
