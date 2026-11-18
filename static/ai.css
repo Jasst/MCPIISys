@@ -349,7 +349,6 @@ body[data-fs="l"] { --chat-fs: 17px; }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 .scrim { display: none; }
 
-body.compact .msgs-inner { gap: 10px; }
 body.compact .bubble { padding: 8px 12px; }
 
 /* ---------- адаптив ---------- */
@@ -503,12 +502,8 @@ html.lb-open, html.lb-open body { overflow: hidden; }
 .tb-menu {
   position: fixed; z-index: 10010; min-width: 220px; padding: 6px;
   display: flex; flex-direction: column; gap: 2px;
-  background: var(--bg-secondary);
-  background: color-mix(in srgb, var(--bg-secondary) 88%, transparent);
-  border: 1px solid var(--border-color);
+  background: var(--bg-secondary); border: 1px solid var(--border-color);
   border-radius: 12px; box-shadow: var(--shadow-xl);
-  backdrop-filter: blur(10px) saturate(125%);
-  -webkit-backdrop-filter: blur(10px) saturate(125%);
 }
 .tb-menu[hidden] { display: none; }
 .tb-item {
